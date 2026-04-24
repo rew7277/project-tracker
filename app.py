@@ -939,6 +939,16 @@ def init_db():
             "ALTER TABLE users ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT ''",
+            # ── SSO / SAML support ──
+            "ALTER TABLE workspaces ADD COLUMN sso_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE workspaces ADD COLUMN sso_type TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN sso_idp_url TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN sso_entity_id TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN sso_x509_cert TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN sso_attr_email TEXT DEFAULT 'email'",
+            "ALTER TABLE workspaces ADD COLUMN sso_attr_name TEXT DEFAULT 'name'",
+            "ALTER TABLE workspaces ADD COLUMN sso_allow_password_login INTEGER DEFAULT 1",
+            "ALTER TABLE workspaces ADD COLUMN workspace_slug TEXT DEFAULT ''",
         ]:
             try: db.execute(stmt)
             except: pass
@@ -1097,6 +1107,19 @@ def login():
         result.pop("totp_secret", None)
         result.pop("password", None)
         result.pop("avatar_data", None)
+        # ── Include workspace-scoped dashboard URL in response ────────────────
+        try:
+            ws_row = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (u["workspace_id"],)
+            ).fetchone()
+            if ws_row:
+                import re as _re
+                slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or "workspace"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_slug"] = slug
+        except Exception:
+            pass
         return jsonify(result)
 
 # ── Email OTP routes kept as stubs (for backward compat) but not used in login
@@ -3735,7 +3758,308 @@ def security_info_page():
     """Serve the Security page."""
     return _load_template('security.html')
 
-# ── Admin Token Store & Guard (must be defined before any route that calls it) ──
+@app.route("/about")
+def about_page():
+    """Serve the About page — always public, no login required."""
+    return _load_template('about.html')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Workspace-scoped URL routing  /<ws_name>/<ws_id>/dashboard  ──────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WS_APP_PATHS = {
+    "dashboard", "projects", "tasks", "messages", "settings",
+    "profile", "analytics", "tickets", "timeline", "app",
+}
+
+def _slugify(name):
+    """Turn a workspace name into a URL-safe slug."""
+    import re
+    s = name.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or "workspace"
+
+@app.route("/<ws_name>/<ws_id>/sso/login")
+def ws_sso_login(ws_name, ws_id):
+    """SSO entry-point for a specific workspace.  Redirects to IdP if SAML is
+    configured, otherwise falls through to the normal login page with the
+    workspace pre-selected."""
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT id, name, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
+            "FROM workspaces WHERE id=?", (ws_id,)
+        ).fetchone()
+
+    if not ws:
+        return redirect("/"), 302
+
+    if ws["sso_enabled"] and ws["sso_type"] == "saml" and ws["sso_idp_url"]:
+        # Build a minimal SAML AuthnRequest redirect
+        return _saml_redirect(ws)
+
+    # Fallback — send to normal login with workspace context embedded
+    return redirect(f"/?action=login&ws={ws_id}&ws_name={ws['name']}")
+
+
+@app.route("/<ws_name>/<ws_id>/sso/callback", methods=["GET", "POST"])
+def ws_sso_callback(ws_name, ws_id):
+    """Receive the SAML assertion from the IdP and log the user in."""
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT * FROM workspaces WHERE id=?", (ws_id,)
+        ).fetchone()
+
+    if not ws:
+        return redirect("/"), 302
+
+    result = _saml_process_response(request, ws)
+    if "error" in result:
+        return redirect(f"/?action=login&error={result['error']}&ws={ws_id}")
+
+    email = result.get("email", "").lower().strip()
+    name  = result.get("name", email)
+
+    with get_db() as db:
+        u = db.execute(
+            "SELECT * FROM users WHERE email=? AND workspace_id=?",
+            (email, ws_id)
+        ).fetchone()
+
+        if not u:
+            # Auto-provision the user (JIT provisioning)
+            uid = f"u{int(datetime.now().timestamp()*1000)}"
+            av  = "".join(w[0] for w in name.split())[:2].upper()
+            c   = random.choice(CLRS)
+            db.execute(
+                "INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (uid, ws_id, name, email, hash_pw(secrets.token_hex(16)),
+                 "Developer", av, c, ts(), None)
+            )
+            _audit("sso_jit_provision", uid, f"JIT provisioned {name} ({email}) via SSO")
+            u = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        else:
+            uid = u["id"]
+
+        db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), uid))
+
+    session.permanent = True
+    session["user_id"]      = uid
+    session["workspace_id"] = ws_id
+    session["role"]         = u["role"] if u else "Developer"
+    _audit("sso_login", uid, f"{name} ({email}) logged in via SSO/SAML")
+
+    # Redirect to workspace-scoped dashboard URL
+    slug = _slugify(ws["name"])
+    return redirect(f"/{slug}/{ws_id}/dashboard")
+
+
+# ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
+
+@app.route("/<ws_name>/<ws_id>/dashboard")
+@app.route("/<ws_name>/<ws_id>/projects")
+@app.route("/<ws_name>/<ws_id>/tasks")
+@app.route("/<ws_name>/<ws_id>/messages")
+@app.route("/<ws_name>/<ws_id>/settings")
+@app.route("/<ws_name>/<ws_id>/profile")
+@app.route("/<ws_name>/<ws_id>/analytics")
+@app.route("/<ws_name>/<ws_id>/tickets")
+@app.route("/<ws_name>/<ws_id>/timeline")
+def ws_app_page(ws_name, ws_id):
+    """Serve the main SPA for workspace-scoped URLs.
+    If not authenticated, redirect to the workspace SSO/login flow."""
+    if "user_id" not in session:
+        # Check if this workspace has SSO enabled
+        with get_db() as db:
+            ws = db.execute(
+                "SELECT id, name, sso_enabled, sso_type "
+                "FROM workspaces WHERE id=?", (ws_id,)
+            ).fetchone()
+        if ws and ws["sso_enabled"]:
+            return redirect(f"/{ws_name}/{ws_id}/sso/login")
+        return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
+
+    # Ensure the logged-in user actually belongs to this workspace
+    if session.get("workspace_id") != ws_id:
+        return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
+
+    return HTML
+
+
+# ── SSO configuration API  ────────────────────────────────────────────────────
+
+@app.route("/api/sso/config", methods=["GET"])
+@login_required
+def get_sso_config():
+    """Return SSO configuration for the current workspace (admin only)."""
+    if session.get("role") not in ("Admin", "Owner"):
+        return jsonify({"error": "Admin access required"}), 403
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT sso_enabled, sso_type, sso_idp_url, sso_entity_id, "
+            "sso_attr_email, sso_attr_name, sso_allow_password_login, workspace_slug "
+            "FROM workspaces WHERE id=?", (wid(),)
+        ).fetchone()
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+    # Never expose the raw x509 cert — just a presence flag
+    return jsonify(dict(ws))
+
+
+@app.route("/api/sso/config", methods=["PUT"])
+@login_required
+def update_sso_config():
+    """Save SAML/SSO settings for the current workspace."""
+    if session.get("role") not in ("Admin", "Owner"):
+        return jsonify({"error": "Admin access required"}), 403
+    d = request.json or {}
+    allowed = {
+        "sso_enabled", "sso_type", "sso_idp_url", "sso_entity_id",
+        "sso_x509_cert", "sso_attr_email", "sso_attr_name",
+        "sso_allow_password_login", "workspace_slug",
+    }
+    updates = {k: v for k, v in d.items() if k in allowed}
+    if not updates:
+        return jsonify({"error": "Nothing to update"}), 400
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    params = list(updates.values()) + [wid()]
+    with get_db() as db:
+        db.execute(f"UPDATE workspaces SET {set_clause} WHERE id=?", params)
+    _audit("sso_config_update", session["user_id"],
+           f"SSO config updated: {list(updates.keys())}")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sso/test-metadata", methods=["POST"])
+@login_required
+def test_sso_metadata():
+    """Validate that an IdP metadata URL is reachable and parse the SSO URL."""
+    if session.get("role") not in ("Admin", "Owner"):
+        return jsonify({"error": "Admin access required"}), 403
+    d = request.json or {}
+    metadata_url = d.get("metadata_url", "").strip()
+    if not metadata_url:
+        return jsonify({"error": "metadata_url required"}), 400
+    try:
+        import urllib.request
+        with urllib.request.urlopen(metadata_url, timeout=8) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        # Very lightweight extraction — production code should use xmlschema/lxml
+        import re
+        idp_sso = ""
+        entity_id = ""
+        m = re.search(r'entityID=["\']([^"\']+)["\']', body)
+        if m:
+            entity_id = m.group(1)
+        m = re.search(
+            r'<(?:\w+:)?SingleSignOnService[^>]+Binding[^=]*=[^"]*"[^"]*POST"[^>]+Location=["\']([^"\']+)',
+            body
+        )
+        if not m:
+            m = re.search(
+                r'<(?:\w+:)?SingleSignOnService[^>]+Location=["\']([^"\']+)',
+                body
+            )
+        if m:
+            idp_sso = m.group(1)
+        return jsonify({
+            "ok": True,
+            "entity_id": entity_id,
+            "idp_sso_url": idp_sso,
+            "metadata_snippet": body[:400],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/sso/workspace-url")
+@login_required
+def get_workspace_url():
+    """Return the full workspace-scoped dashboard URL for the current workspace."""
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT id, name, workspace_slug FROM workspaces WHERE id=?",
+            (wid(),)
+        ).fetchone()
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+    slug = ws["workspace_slug"] or _slugify(ws["name"])
+    base = request.host_url.rstrip("/")
+    return jsonify({
+        "workspace_id":   ws["id"],
+        "workspace_name": ws["name"],
+        "slug":           slug,
+        "dashboard_url":  f"{base}/{slug}/{ws['id']}/dashboard",
+        "sso_login_url":  f"{base}/{slug}/{ws['id']}/sso/login",
+        "sso_callback_url": f"{base}/{slug}/{ws['id']}/sso/callback",
+    })
+
+
+# ── Internal SAML helpers  ────────────────────────────────────────────────────
+
+def _saml_redirect(ws):
+    """Build a minimal SAML AuthnRequest and redirect to the IdP.
+    For production deployments replace this with python3-saml or pysaml2."""
+    import base64, zlib, urllib.parse
+    from datetime import datetime as _dt
+    request_id  = f"id-{secrets.token_hex(10)}"
+    issue_instant = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    acs_url = f"{request.host_url.rstrip('/')}/{_slugify(ws['name'])}/{ws['id']}/sso/callback"
+    entity  = ws["sso_entity_id"] or request.host_url.rstrip("/")
+    authn = (
+        f'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
+        f'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" '
+        f'ID="{request_id}" Version="2.0" IssueInstant="{issue_instant}" '
+        f'AssertionConsumerServiceURL="{acs_url}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">'
+        f'<saml:Issuer>{entity}</saml:Issuer>'
+        f'</samlp:AuthnRequest>'
+    )
+    deflated  = zlib.compress(authn.encode("utf-8"))[2:-4]
+    encoded   = base64.b64encode(deflated).decode("utf-8")
+    params    = urllib.parse.urlencode({"SAMLRequest": encoded, "RelayState": acs_url})
+    idp_url   = ws["sso_idp_url"]
+    sep       = "&" if "?" in idp_url else "?"
+    return redirect(f"{idp_url}{sep}{params}", 302)
+
+
+def _saml_process_response(req, ws):
+    """Decode a SAML Response POST and extract email + name.
+    For production use python3-saml which validates signatures & conditions."""
+    import base64
+    try:
+        raw_response = req.form.get("SAMLResponse", "")
+        if not raw_response:
+            return {"error": "missing_saml_response"}
+        decoded = base64.b64decode(raw_response).decode("utf-8", errors="replace")
+
+        import re
+        email_attr = ws["sso_attr_email"] or "email"
+        name_attr  = ws["sso_attr_name"]  or "name"
+
+        def _extract_attr(xml, attr_name):
+            patterns = [
+                rf'Name=["\'](?:.*?:)?{re.escape(attr_name)}["\'][^>]*>.*?<.*?AttributeValue[^>]*>([^<]+)',
+                rf'<(?:\w+:)?Attribute\s+Name=["\'](?:.*?:)?{re.escape(attr_name)}["\'][^>]*>\s*<(?:\w+:)?AttributeValue[^>]*>([^<]+)',
+            ]
+            for p in patterns:
+                m = re.search(p, xml, re.DOTALL | re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+            return ""
+
+        def _extract_nameid(xml):
+            m = re.search(r'<(?:\w+:)?NameID[^>]*>([^<]+)', xml)
+            return m.group(1).strip() if m else ""
+
+        email = _extract_attr(decoded, email_attr) or _extract_nameid(decoded)
+        name  = _extract_attr(decoded, name_attr)  or email.split("@")[0]
+
+        if not email:
+            return {"error": "saml_no_email"}
+        return {"email": email, "name": name}
+    except Exception as e:
+        return {"error": str(e)}
 _ADMIN_TOKENS = {}       # token -> expiry (datetime)
 _ADMIN_FAIL_LOG = {}     # ip -> [fail_timestamp, ...] — brute-force lockout
 
@@ -4186,6 +4510,18 @@ def catch_all(path):
     # If it looks like a file request, return 404
     if "." in path.split("/")[-1]:
         return "", 404
+
+    # Let explicitly registered routes handle /<ws_name>/<ws_id>/... paths
+    # (Flask already matches those first, so this is just a safety guard)
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2:
+        # Pattern: <anything>/<ws_id_like>/... where ws_id starts with "ws"
+        potential_ws_id = parts[1] if len(parts) >= 2 else ""
+        if potential_ws_id.startswith("ws"):
+            # Route not matched above means it's an unrecognised sub-path;
+            # still serve the SPA so client-side router can handle it.
+            return HTML
+
     # Otherwise serve the app (for client-side routing)
     return HTML
 

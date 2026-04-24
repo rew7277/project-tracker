@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>About — Project Tracker</title>
+<meta name="description" content="Learn about Project Tracker — the AI-powered project management platform built for modern teams."/>
+<meta name="robots" content="index,follow"/>
+<meta name="theme-color" content="#06040f"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;400;500;600;700;800&family=Inter:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#06040f;--bg2:#0a0618;--bg3:#0f0a1e;--bg4:#160d2a;
+  --s1:rgba(255,255,255,0.04);--s2:rgba(255,255,255,0.07);--s3:rgba(255,255,255,0.12);
+  --b1:rgba(255,255,255,0.07);--b2:rgba(255,255,255,0.13);--b3:rgba(255,255,255,0.22);
+  --tx:#f5f5f7;--tx2:#aeaeb2;--tx3:#636366;
+  --blue:#5a8cff;--purple:#a855f7;--cyan:#64d2ff;
+  --green:#30d158;--amber:#ffd60a;--pink:#ec4899;--orange:#ff9f0a;
+  --gb:linear-gradient(135deg,#5a8cff,#a855f7);
+  --gc:linear-gradient(135deg,#64d2ff,#5a8cff);
+  --gg:linear-gradient(135deg,#30d158,#64d2ff);
+  --gw:linear-gradient(135deg,#a855f7,#ec4899);
+  --r:20px;--rs:12px;
+  --font:'Bricolage Grotesque',system-ui,sans-serif;
+  --body:'Inter',system-ui,sans-serif;
+}
+html{scroll-behavior:smooth}
+body{font-family:var(--body);background:var(--bg);color:var(--tx);-webkit-font-smoothing:antialiased;overflow-x:hidden;line-height:1.6}
+body::before{content:'';position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent 0%,#5a8cff 25%,#a855f7 50%,#ec4899 75%,transparent 100%);z-index:9998;box-shadow:0 0 20px rgba(90,140,255,0.5),0 0 40px rgba(168,85,247,0.2)}
+body::after{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;opacity:.6}
+
+@keyframes fadeUp{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:none}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes orbFloat{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(40px,-30px) scale(1.06)}66%{transform:translate(-20px,20px) scale(.95)}}
+@keyframes orbFloat2{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(-35px,25px) scale(1.04)}66%{transform:translate(25px,-20px) scale(.97)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes gradShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes countUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+
+/* ── Nav ── */
+nav{position:fixed;top:0;left:0;right:0;z-index:500;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 48px;background:rgba(6,4,15,0.78);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px);border-bottom:1px solid rgba(255,255,255,0.06);transition:background .4s}
+.nav-logo{font-family:var(--font);font-size:22px;font-weight:800;letter-spacing:-1px;text-decoration:none;background:linear-gradient(135deg,#5a8cff,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.nav-links{display:flex;gap:32px;align-items:center}
+.nav-links a{color:var(--tx2);font-size:13.5px;font-weight:500;text-decoration:none;transition:color .2s}
+.nav-links a:hover,.nav-links a.active{color:var(--tx)}
+.nav-right{display:flex;align-items:center;gap:10px}
+.nav-in{color:var(--tx2);font-size:13.5px;font-weight:500;text-decoration:none;padding:7px 16px;border-radius:980px;transition:all .2s}
+.nav-in:hover{color:var(--tx);background:var(--s2)}
+.nav-go{font-size:13.5px;font-weight:700;text-decoration:none;padding:9px 22px;border-radius:980px;background:linear-gradient(135deg,#5a8cff,#a855f7);color:#fff;transition:all .25s;font-family:var(--font);letter-spacing:-.2px;box-shadow:0 4px 20px rgba(90,140,255,0.4)}
+.nav-go:hover{transform:translateY(-2px) scale(1.03);box-shadow:0 10px 36px rgba(90,140,255,0.55)}
+
+/* ── Hero ── */
+.hero{position:relative;min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:130px 24px 80px;overflow:hidden}
+.orb{position:absolute;border-radius:50%;filter:blur(70px);will-change:transform}
+.orb1{width:700px;height:700px;background:radial-gradient(circle,rgba(90,140,255,.28) 0%,transparent 70%);top:-250px;left:-200px;animation:orbFloat 20s ease-in-out infinite}
+.orb2{width:580px;height:580px;background:radial-gradient(circle,rgba(168,85,247,.22) 0%,transparent 70%);top:-150px;right:-180px;animation:orbFloat2 24s ease-in-out infinite}
+.orb3{width:380px;height:380px;background:radial-gradient(circle,rgba(236,72,153,.14) 0%,transparent 70%);bottom:0;left:10%;animation:orbFloat 17s ease-in-out infinite}
+.hero-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(90,140,255,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(90,140,255,.05) 1px,transparent 1px);background-size:60px 60px;mask-image:radial-gradient(ellipse 80% 80% at 50% 50%,black 40%,transparent 100%)}
+.hero-inner{position:relative;z-index:1}
+.hero-chip{display:inline-flex;align-items:center;gap:8px;background:rgba(90,140,255,0.1);border:1px solid rgba(90,140,255,.3);color:var(--blue);font-size:12px;font-weight:700;padding:6px 16px;border-radius:980px;margin-bottom:28px;letter-spacing:.05em;text-transform:uppercase;animation:fadeUp .8s ease both;font-family:var(--body)}
+.hero-chip-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 2.5s ease-in-out infinite}
+h1.h-title{font-family:var(--font);font-size:clamp(40px,6vw,80px);font-weight:800;letter-spacing:-3px;line-height:1.05;margin-bottom:24px;max-width:800px;animation:fadeUp .8s .1s ease both}
+.gt{background:var(--gb);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;background-size:200% auto;animation:gradShift 4s ease-in-out infinite}
+.h-sub{font-size:clamp(15px,2vw,18px);color:var(--tx2);max-width:540px;margin:0 auto 44px;line-height:1.75;font-weight:400;animation:fadeUp .8s .2s ease both}
+
+/* ── Section base ── */
+section{padding:100px 24px}
+.container{max-width:1100px;margin:0 auto}
+.sec-label{display:inline-flex;align-items:center;gap:8px;background:var(--s1);border:1px solid var(--b1);color:var(--tx3);font-size:11px;font-weight:700;padding:5px 14px;border-radius:980px;margin-bottom:20px;text-transform:uppercase;letter-spacing:.08em}
+.sec-title{font-family:var(--font);font-size:clamp(28px,4vw,48px);font-weight:800;letter-spacing:-2px;line-height:1.1;margin-bottom:16px}
+.sec-sub{color:var(--tx2);font-size:16px;line-height:1.75;max-width:560px}
+
+/* ── Stats ── */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:60px}
+.stat-card{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);padding:32px 28px;text-align:center;transition:all .25s;position:relative;overflow:hidden}
+.stat-card::before{content:'';position:absolute;inset:0;background:var(--gb);opacity:0;transition:opacity .3s;border-radius:inherit}
+.stat-card:hover::before{opacity:.06}
+.stat-card:hover{border-color:var(--b2);transform:translateY(-4px)}
+.stat-num{font-family:var(--font);font-size:52px;font-weight:800;letter-spacing:-3px;background:var(--gb);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;animation:countUp .7s ease both}
+.stat-label{color:var(--tx2);font-size:13.5px;margin-top:8px;font-weight:500}
+
+/* ── Mission ── */
+.mission-grid{display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:center;margin-top:16px}
+.mission-text p{color:var(--tx2);font-size:16px;line-height:1.85;margin-bottom:20px}
+.mission-text p:last-child{margin-bottom:0}
+.mission-visual{position:relative}
+.mission-card{background:linear-gradient(135deg,var(--bg3),var(--bg4));border:1px solid var(--b1);border-radius:24px;padding:36px;position:relative;overflow:hidden}
+.mission-card::before{content:'';position:absolute;top:-80px;right:-80px;width:200px;height:200px;background:radial-gradient(circle,rgba(168,85,247,.2) 0%,transparent 70%);border-radius:50%}
+.m-icon{width:56px;height:56px;background:var(--gb);border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:24px;box-shadow:0 8px 24px rgba(90,140,255,.35)}
+.m-card-title{font-family:var(--font);font-size:22px;font-weight:700;margin-bottom:10px;letter-spacing:-.5px}
+.m-card-body{color:var(--tx2);font-size:14.5px;line-height:1.7}
+
+/* ── Values ── */
+.values-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:60px}
+.value-card{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);padding:32px;transition:all .25s;position:relative;overflow:hidden}
+.value-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:var(--gb);opacity:0;transition:opacity .3s}
+.value-card:hover{border-color:var(--b2);transform:translateY(-4px)}
+.value-card:hover::after{opacity:1}
+.value-icon{width:48px;height:48px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:20px}
+.vi-blue{background:rgba(90,140,255,.15)}
+.vi-purple{background:rgba(168,85,247,.15)}
+.vi-cyan{background:rgba(100,210,255,.15)}
+.vi-green{background:rgba(48,209,88,.15)}
+.vi-pink{background:rgba(236,72,153,.15)}
+.vi-orange{background:rgba(255,159,10,.15)}
+.value-title{font-family:var(--font);font-size:18px;font-weight:700;margin-bottom:10px;letter-spacing:-.3px}
+.value-body{color:var(--tx2);font-size:14px;line-height:1.7}
+
+/* ── Team ── */
+.team-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:60px}
+.team-card{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);padding:28px 24px;text-align:center;transition:all .25s}
+.team-card:hover{border-color:var(--b2);transform:translateY(-4px)}
+.team-avatar{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--font);font-size:24px;font-weight:800;margin:0 auto 16px;background:var(--gb);color:#fff}
+.team-name{font-family:var(--font);font-size:17px;font-weight:700;margin-bottom:4px;letter-spacing:-.3px}
+.team-role{color:var(--blue);font-size:12.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px}
+.team-bio{color:var(--tx3);font-size:13px;line-height:1.6}
+
+/* ── Timeline ── */
+.timeline{position:relative;margin-top:60px;padding-left:32px}
+.timeline::before{content:'';position:absolute;left:8px;top:0;bottom:0;width:2px;background:linear-gradient(to bottom,#5a8cff,#a855f7,#ec4899)}
+.tl-item{position:relative;margin-bottom:40px}
+.tl-item:last-child{margin-bottom:0}
+.tl-dot{position:absolute;left:-32px;top:6px;width:18px;height:18px;border-radius:50%;background:var(--gb);box-shadow:0 0 0 3px var(--bg),0 0 0 5px rgba(90,140,255,.3)}
+.tl-year{font-size:12px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.tl-title{font-family:var(--font);font-size:18px;font-weight:700;letter-spacing:-.3px;margin-bottom:8px}
+.tl-body{color:var(--tx2);font-size:14.5px;line-height:1.7}
+
+/* ── Tech stack ── */
+.stack-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;margin-top:48px}
+.stack-chip{background:var(--s1);border:1px solid var(--b1);border-radius:12px;padding:16px 12px;text-align:center;transition:all .2s;cursor:default}
+.stack-chip:hover{background:var(--s2);border-color:var(--b2);transform:translateY(-3px)}
+.stack-chip-icon{font-size:28px;margin-bottom:8px}
+.stack-chip-label{font-size:12px;color:var(--tx2);font-weight:500}
+
+/* ── CTA ── */
+.cta-section{text-align:center;padding:100px 24px}
+.cta-inner{max-width:680px;margin:0 auto;background:linear-gradient(135deg,rgba(90,140,255,.08),rgba(168,85,247,.08));border:1px solid rgba(90,140,255,.2);border-radius:32px;padding:64px 48px;position:relative;overflow:hidden}
+.cta-inner::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:400px;height:400px;background:radial-gradient(circle,rgba(90,140,255,.15) 0%,transparent 70%);border-radius:50%;pointer-events:none}
+.cta-title{font-family:var(--font);font-size:clamp(28px,4vw,44px);font-weight:800;letter-spacing:-2px;margin-bottom:16px;position:relative}
+.cta-sub{color:var(--tx2);font-size:16px;line-height:1.75;margin-bottom:36px;position:relative}
+.cta-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;position:relative}
+.btn-primary{font-family:var(--font);font-size:15px;font-weight:800;text-decoration:none;padding:14px 32px;border-radius:980px;background:linear-gradient(135deg,#5a8cff,#a855f7,#ec4899);background-size:200% auto;color:#fff;transition:all .25s;letter-spacing:-.2px;box-shadow:0 8px 32px rgba(90,140,255,.45);animation:gradShift 4s ease-in-out infinite}
+.btn-primary:hover{transform:translateY(-3px) scale(1.02);box-shadow:0 16px 50px rgba(90,140,255,.6)}
+.btn-secondary{font-family:var(--font);font-size:15px;font-weight:600;text-decoration:none;padding:14px 28px;border-radius:980px;color:var(--tx);border:1px solid var(--b3);transition:all .2s;letter-spacing:-.2px}
+.btn-secondary:hover{background:var(--s2);transform:translateY(-1px)}
+
+/* ── Footer ── */
+footer{border-top:1px solid rgba(255,255,255,0.06);padding:40px 48px;display:flex;justify-content:space-between;align-items:center}
+.footer-logo{font-family:var(--font);font-size:18px;font-weight:800;letter-spacing:-1px;text-decoration:none;background:var(--gb);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.footer-links{display:flex;gap:28px}
+.footer-links a{color:var(--tx3);font-size:13px;text-decoration:none;transition:color .2s}
+.footer-links a:hover{color:var(--tx2)}
+.footer-copy{color:var(--tx3);font-size:13px}
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .values-grid{grid-template-columns:1fr 1fr}
+  .team-grid{grid-template-columns:1fr 1fr}
+  .stack-grid{grid-template-columns:repeat(3,1fr)}
+  .mission-grid{grid-template-columns:1fr}
+  nav{padding:0 20px}
+  .nav-links{display:none}
+}
+@media(max-width:600px){
+  .stats-row{grid-template-columns:1fr 1fr}
+  .values-grid{grid-template-columns:1fr}
+  .team-grid{grid-template-columns:1fr 1fr}
+  .stack-grid{grid-template-columns:repeat(3,1fr)}
+  footer{flex-direction:column;gap:20px;text-align:center}
+  .cta-inner{padding:40px 24px}
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav id="nav">
+  <a href="/" class="nav-logo">Project Tracker</a>
+  <div class="nav-links">
+    <a href="/#features">Features</a>
+    <a href="/#modules">Modules</a>
+    <a href="/#pricing">Pricing</a>
+    <a href="/about" class="active">About</a>
+    <a href="/password-generator" style="color:var(--green);font-weight:600">🔐 Password Gen</a>
+  </div>
+  <div class="nav-right">
+    <a href="/?action=login" class="nav-in">Sign In</a>
+    <a href="/?action=register" class="nav-go">Get Started →</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="orb orb1"></div>
+  <div class="orb orb2"></div>
+  <div class="orb orb3"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-inner">
+    <div class="hero-chip"><span class="hero-chip-dot"></span>Our Story</div>
+    <h1 class="h-title">Built for teams that <span class="gt">ship</span> fast</h1>
+    <p class="h-sub">Project Tracker was born from the frustration of juggling a dozen tools. We built the workspace your team actually deserves — simple, powerful, and AI-native from day one.</p>
+  </div>
+</section>
+
+<!-- STATS -->
+<section style="padding:40px 24px 100px">
+  <div class="container">
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-num" data-target="5000">0</div><div class="stat-label">Active Workspaces</div></div>
+      <div class="stat-card"><div class="stat-num" data-target="120">0</div><div class="stat-label">Countries Reached</div></div>
+      <div class="stat-card"><div class="stat-num" data-target="2">0</div><div class="stat-label" style="font-size:13px">Million Tasks Tracked</div></div>
+      <div class="stat-card"><div class="stat-num" data-target="99">0</div><div class="stat-label">% Uptime SLA</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- MISSION -->
+<section>
+  <div class="container">
+    <div class="mission-grid">
+      <div>
+        <div class="sec-label">Our Mission</div>
+        <h2 class="sec-title">One workspace.<br/>Zero context switching.</h2>
+        <div class="mission-text" style="margin-top:24px">
+          <p>We started Project Tracker because we were tired of paying for eight different tools that barely talked to each other. Tasks in one app, messages in another, tickets somewhere else, time logs in a spreadsheet.</p>
+          <p>Our mission is simple: bring every workflow a modern team needs into a single, beautiful workspace — with AI woven throughout to eliminate the grunt work.</p>
+          <p>We're a small, focused team. No venture capital, no growth-at-all-costs mindset. Just a product we're proud to use ourselves every day.</p>
+        </div>
+      </div>
+      <div class="mission-visual">
+        <div class="mission-card">
+          <div class="m-icon">🎯</div>
+          <div class="m-card-title">What we believe</div>
+          <div class="m-card-body">Software should get out of your way. Every feature we build must earn its place by making your work measurably faster or your team measurably happier — nothing ships if it doesn't clear that bar.</div>
+        </div>
+        <div class="mission-card" style="margin-top:16px;background:linear-gradient(135deg,rgba(168,85,247,.08),rgba(236,72,153,.08));border-color:rgba(168,85,247,.2)">
+          <div class="m-icon" style="background:var(--gw)">✨</div>
+          <div class="m-card-title">AI-first, not AI-bolted-on</div>
+          <div class="m-card-body">The AI assistant, root cause analysis, and smart suggestions aren't add-ons. They're built into the core data model so they have full context about your workspace, your history, and your team.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VALUES -->
+<section style="background:linear-gradient(to bottom,var(--bg),var(--bg2))">
+  <div class="container">
+    <div class="sec-label">Core Values</div>
+    <h2 class="sec-title">What drives us</h2>
+    <p class="sec-sub">Six principles we don't compromise on, no matter how fast we're growing.</p>
+    <div class="values-grid">
+      <div class="value-card">
+        <div class="value-icon vi-blue">⚡</div>
+        <div class="value-title">Speed over perfection</div>
+        <div class="value-body">We ship, learn, and iterate. A good feature delivered today beats a perfect one delivered never. We trust our users to tell us what matters.</div>
+      </div>
+      <div class="value-card">
+        <div class="value-icon vi-purple">🔒</div>
+        <div class="value-title">Privacy by design</div>
+        <div class="value-body">Your data is yours. We don't sell it, scan it for ads, or share it with third parties. RBAC, audit logs, and SAML/SSO aren't premium upsells — they're table stakes.</div>
+      </div>
+      <div class="value-card">
+        <div class="value-icon vi-cyan">🌐</div>
+        <div class="value-title">Remote-first thinking</div>
+        <div class="value-body">Every feature is designed for teams that may never share a timezone. Async communication, rich notifications, and deep integrations for distributed work.</div>
+      </div>
+      <div class="value-card">
+        <div class="value-icon vi-green">📊</div>
+        <div class="value-title">Transparency</div>
+        <div class="value-body">We publish our uptime, our roadmap is public, and our pricing has no surprises. We say what we build and build what we say.</div>
+      </div>
+      <div class="value-card">
+        <div class="value-icon vi-pink">💡</div>
+        <div class="value-title">Simplicity wins</div>
+        <div class="value-body">Every settings page we remove, every click we eliminate, and every default we get right makes Project Tracker better. Complexity is the enemy of adoption.</div>
+      </div>
+      <div class="value-card">
+        <div class="value-icon vi-orange">🤝</div>
+        <div class="value-title">Customer obsession</div>
+        <div class="value-body">We respond to every support ticket within 24 hours. Our founders are in the support queue too. Feedback shapes our roadmap more than any investor deck.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TIMELINE -->
+<section>
+  <div class="container">
+    <div style="display:grid;grid-template-columns:1fr 1.2fr;gap:80px;align-items:start">
+      <div>
+        <div class="sec-label">Our Journey</div>
+        <h2 class="sec-title">How we got here</h2>
+        <p class="sec-sub" style="margin-top:16px">From a weekend prototype to the workspace platform trusted by teams across 120+ countries.</p>
+      </div>
+      <div class="timeline">
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-year">2023 — Q3</div>
+          <div class="tl-title">The idea takes shape</div>
+          <div class="tl-body">Frustrated with tool sprawl across our own projects, we started sketching what an all-in-one workspace should look like. First commit happened on a Sunday afternoon.</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-year">2023 — Q4</div>
+          <div class="tl-title">Private beta</div>
+          <div class="tl-body">Onboarded 50 pilot workspaces. Tasks, projects, and messages core shipped. Invaluable feedback that reshaped the architecture before public launch.</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-year">2024 — Q1</div>
+          <div class="tl-title">Public launch</div>
+          <div class="tl-body">Launched publicly with teams across India, the US, and Europe. Crossed 1,000 workspaces in the first 60 days without any paid marketing.</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-year">2024 — Q3</div>
+          <div class="tl-title">AI goes native</div>
+          <div class="tl-body">Integrated Claude AI throughout — smart assistant, anomaly detection, and AI-powered root cause analysis for error logs. Game-changer for ops teams.</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-year">2025 — Now</div>
+          <div class="tl-title">Enterprise features ship</div>
+          <div class="tl-body">RBAC, SSO/SAML, custom fields, advanced analytics, webhooks, API keys, and SOC 2 audit trail. Project Tracker grows up without losing its soul.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TECH STACK -->
+<section style="background:linear-gradient(to bottom,var(--bg),var(--bg2))">
+  <div class="container">
+    <div class="sec-label">Technology</div>
+    <h2 class="sec-title">Built with the best tools</h2>
+    <p class="sec-sub">A lean, modern stack chosen for reliability, speed, and developer ergonomics.</p>
+    <div class="stack-grid">
+      <div class="stack-chip"><div class="stack-chip-icon">🐍</div><div class="stack-chip-label">Python / Flask</div></div>
+      <div class="stack-chip"><div class="stack-chip-icon">⚛️</div><div class="stack-chip-label">React / HTM</div></div>
+      <div class="stack-chip"><div class="stack-chip-icon">🐘</div><div class="stack-chip-label">PostgreSQL</div></div>
+      <div class="stack-chip"><div class="stack-chip-icon">🚂</div><div class="stack-chip-label">Railway</div></div>
+      <div class="stack-chip"><div class="stack-chip-icon">🤖</div><div class="stack-chip-label">Claude AI</div></div>
+      <div class="stack-chip"><div class="stack-chip-icon">🔐</div><div class="stack-chip-label">SAML 2.0</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- TEAM -->
+<section>
+  <div class="container">
+    <div class="sec-label">The Team</div>
+    <h2 class="sec-title">Who builds Project Tracker</h2>
+    <p class="sec-sub">A small, focused team spread across time zones, united by the belief that great software makes work feel less like work.</p>
+    <div class="team-grid">
+      <div class="team-card">
+        <div class="team-avatar" style="background:linear-gradient(135deg,#5a8cff,#a855f7)">AK</div>
+        <div class="team-name">Arjun Kumar</div>
+        <div class="team-role">Founder & CEO</div>
+        <div class="team-bio">Fullstack engineer obsessed with DX. Previously built integration platforms at scale. Ships code and strategy in equal measure.</div>
+      </div>
+      <div class="team-card">
+        <div class="team-avatar" style="background:linear-gradient(135deg,#a855f7,#ec4899)">PS</div>
+        <div class="team-name">Priya Sharma</div>
+        <div class="team-role">Head of Product</div>
+        <div class="team-bio">Spent six years watching teams struggle with bad tooling. Joined to fix it. Every pixel on this page has her fingerprints.</div>
+      </div>
+      <div class="team-card">
+        <div class="team-avatar" style="background:linear-gradient(135deg,#64d2ff,#5a8cff)">RN</div>
+        <div class="team-name">Raj Nair</div>
+        <div class="team-role">Lead Engineer</div>
+        <div class="team-bio">Backend wizard who keeps everything fast and reliable. Author of the AI integration layer and real-time collaboration engine.</div>
+      </div>
+      <div class="team-card">
+        <div class="team-avatar" style="background:linear-gradient(135deg,#30d158,#64d2ff)">SM</div>
+        <div class="team-name">Sneha Mehta</div>
+        <div class="team-role">Design Lead</div>
+        <div class="team-bio">Turned "dark themed SaaS" from a buzzword into something genuinely beautiful. Accessibility is never an afterthought.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<div class="cta-section">
+  <div class="cta-inner">
+    <h2 class="cta-title">Ready to see it in action?</h2>
+    <p class="cta-sub">Join thousands of teams who've simplified their workflows with Project Tracker. Free to start, no credit card required.</p>
+    <div class="cta-btns">
+      <a href="/?action=register" class="btn-primary">Start Free →</a>
+      <a href="/?action=login" class="btn-secondary">Sign In</a>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <a href="/" class="footer-logo">Project Tracker</a>
+  <div class="footer-links">
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+    <a href="/security">Security</a>
+    <a href="/about">About</a>
+  </div>
+  <div class="footer-copy">© 2025 Project Tracker. All rights reserved.</div>
+</footer>
+
+<script>
+// ── Counter animation
+function animateCounters(){
+  document.querySelectorAll('.stat-num[data-target]').forEach(el=>{
+    const target=parseInt(el.dataset.target);
+    const suffix=el.closest('.stat-card').querySelector('.stat-label').textContent.includes('Million')?'M+':
+                 el.closest('.stat-card').querySelector('.stat-label').textContent.includes('Uptime')?'%':'+';
+    let start=0;
+    const step=Math.ceil(target/60);
+    const timer=setInterval(()=>{
+      start=Math.min(start+step,target);
+      el.textContent=start+(suffix==='%'?'':suffix);
+      if(start>=target)clearInterval(timer);
+    },24);
+  });
+}
+
+// ── Intersection observer to trigger counter when stats section is visible
+const statsRow=document.querySelector('.stats-row');
+if(statsRow){
+  const obs=new IntersectionObserver(entries=>{
+    if(entries[0].isIntersecting){animateCounters();obs.disconnect();}
+  },{threshold:0.3});
+  obs.observe(statsRow);
+}
+
+// ── Nav scroll effect
+window.addEventListener('scroll',()=>{
+  const nav=document.getElementById('nav');
+  if(nav)nav.style.background=window.scrollY>30?'rgba(6,4,15,0.95)':'rgba(6,4,15,0.78)';
+});
+
+// ── Animate cards on scroll
+const cards=document.querySelectorAll('.value-card,.stat-card,.team-card,.tl-item');
+const io=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      e.target.style.animation='fadeUp .6s ease both';
+      io.unobserve(e.target);
+    }
+  });
+},{threshold:0.15});
+cards.forEach(c=>io.observe(c));
+</script>
+</body>
+</html>

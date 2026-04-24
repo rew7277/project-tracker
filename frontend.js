@@ -102,6 +102,8 @@ class ErrorBoundary extends React.Component{
 /* ─── AuthScreen — Apple iPhone 17 Pro Design Language ──────────────────── */
 function AuthScreen({onLogin}){
   const _initTab=(()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='register'?'register':'login';}catch{return 'login';}})();
+  const _initWsId=(()=>{try{return new URLSearchParams(window.location.search).get('ws')||'';}catch{return '';}})();
+  const _initWsName=(()=>{try{return decodeURIComponent(new URLSearchParams(window.location.search).get('ws_name')||'');}catch{return '';}})();
   const [tab,setTabRaw]=useState(_initTab);
   const [regMode,setRegMode]=useState('create');
   const [wsName,setWsName]=useState('');
@@ -4889,6 +4891,157 @@ function WorkspaceSettings({cu,onReload}){
         </button>
       </div>
     </div>
+    <${SSOSettingsCard} cu=${cu} ws=${ws}/>
+  </div>`;
+}
+
+/* ─── SSO Settings Card ───────────────────────────────────────────────────── */
+function SSOSettingsCard({cu,ws}){
+  const isAdmin=cu&&(cu.role==='Admin'||cu.role==='Owner');
+  const [cfg,setCfg]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const [saved,setSaved]=useState(false);
+  const [testing,setTesting]=useState(false);
+  const [testResult,setTestResult]=useState(null);
+  const [metaUrl,setMetaUrl]=useState('');
+  const [wsUrl,setWsUrl]=useState(null);
+
+  useEffect(()=>{
+    if(!isAdmin)return;
+    api.get('/api/sso/config').then(d=>{if(!d.error)setCfg(d);});
+    api.get('/api/sso/workspace-url').then(d=>{if(!d.error)setWsUrl(d);});
+  },[]);
+
+  const save=async()=>{
+    if(!cfg)return;
+    setSaving(true);
+    await api.put('/api/sso/config',cfg);
+    setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2500);
+  };
+
+  const testMeta=async()=>{
+    if(!metaUrl){alert('Enter a metadata URL first');return;}
+    setTesting(true);setTestResult(null);
+    const r=await api.post('/api/sso/test-metadata',{metadata_url:metaUrl});
+    setTesting(false);
+    if(r.ok){
+      setCfg(prev=>({...prev,sso_idp_url:r.idp_sso_url||prev.sso_idp_url,sso_entity_id:r.entity_id||prev.sso_entity_id}));
+      setTestResult({ok:true,msg:`\u2713 Metadata parsed \u2014 IdP SSO URL: ${r.idp_sso_url||'(not found)'}`});
+    } else {
+      setTestResult({ok:false,msg:`\u2717 ${r.error}`});
+    }
+    setTimeout(()=>setTestResult(null),6000);
+  };
+
+  const copy=t=>navigator.clipboard&&navigator.clipboard.writeText(t);
+
+  const ROW=({label,children,hint})=>html`
+    <div style=${{marginBottom:18}}>
+      <label style=${{display:'block',fontSize:11,fontWeight:700,letterSpacing:'.07em',textTransform:'uppercase',color:'var(--tx3)',marginBottom:6}}>${label}</label>
+      ${children}
+      ${hint&&html`<div style=${{fontSize:11,color:'var(--tx3)',marginTop:4}}>${hint}</div>`}
+    </div>`;
+
+  if(!isAdmin)return null;
+  if(!cfg)return html`<div style=${{padding:'24px',textAlign:'center'}}><span class="spin"></span></div>`;
+
+  return html`
+  <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'24px',marginTop:24}}>
+    <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:20}}>
+      <div style=${{width:38,height:38,borderRadius:11,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>&#128273;</div>
+      <div>
+        <h3 style=${{fontSize:14,fontWeight:700,color:'var(--tx)',margin:0}}>SSO / SAML Authentication</h3>
+        <p style=${{fontSize:12,color:'var(--tx2)',margin:0,marginTop:2}}>Let team members sign in via your Identity Provider (Okta, Azure AD, Google Workspace, etc.)</p>
+      </div>
+    </div>
+
+    ${wsUrl&&html`
+    <div style=${{background:'var(--bg)',border:'1px solid var(--bd)',borderRadius:12,padding:'14px 16px',marginBottom:20}}>
+      <div style=${{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--tx3)',marginBottom:10}}>Your Workspace URLs</div>
+      ${[
+        {label:'Dashboard',val:wsUrl.dashboard_url},
+        {label:'SSO Login',val:wsUrl.sso_login_url},
+        {label:'SSO Callback (ACS)',val:wsUrl.sso_callback_url},
+      ].map(({label,val})=>html`
+        <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+          <span style=${{fontSize:11,fontWeight:600,color:'var(--tx3)',width:100,flexShrink:0}}>${label}</span>
+          <code style=${{flex:1,fontSize:11,background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:7,padding:'5px 10px',color:'var(--ac)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${val}</code>
+          <button class="btn bg" style=${{padding:'5px 10px',fontSize:11}} onClick=${()=>copy(val)}>Copy</button>
+        </div>
+      `)}
+    </div>`}
+
+    <${ROW} label="Enable SSO">
+      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
+        <input type="checkbox" checked=${!!cfg.sso_enabled}
+          onChange=${e=>setCfg(p=>({...p,sso_enabled:e.target.checked?1:0}))}
+          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
+        <span style=${{fontSize:13,color:'var(--tx)'}}>Enable SAML 2.0 SSO for this workspace</span>
+      </label>
+    <//>
+
+    ${cfg.sso_enabled?html`
+    <${ROW} label="Import from IdP Metadata URL" hint="Paste your IdP metadata URL and click Test \u2014 it will auto-fill the fields below.">
+      <div style=${{display:'flex',gap:8}}>
+        <input class="vinp" style=${{flex:1,fontSize:13}} placeholder="https://login.microsoftonline.com/\u2026/federationmetadata/\u2026"
+          value=${metaUrl} onInput=${e=>setMetaUrl(e.target.value)}/>
+        <button class="btn bp" style=${{fontSize:12,padding:'8px 16px',whiteSpace:'nowrap'}} onClick=${testMeta} disabled=${testing}>
+          ${testing?html`<span class="spin"></span>`:'Test & Import'}
+        </button>
+      </div>
+      ${testResult&&html`<div style=${{marginTop:8,fontSize:12,padding:'8px 12px',borderRadius:8,
+        background:testResult.ok?'rgba(48,209,88,.1)':'rgba(255,59,48,.1)',
+        color:testResult.ok?'var(--green)':'var(--red)',border:'1px solid '+(testResult.ok?'rgba(48,209,88,.3)':'rgba(255,59,48,.3)')
+      }}>${testResult.msg}</div>`}
+    <//>
+
+    <${ROW} label="IdP SSO URL" hint="The SAML endpoint where AuthnRequests are sent.">
+      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://idp.example.com/sso/saml"
+        value=${cfg.sso_idp_url||''} onInput=${e=>setCfg(p=>({...p,sso_idp_url:e.target.value}))}/>
+    <//>
+
+    <${ROW} label="Entity ID / Issuer" hint="Your Service Provider entity ID (usually your app URL).">
+      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://app.project-tracker.in"
+        value=${cfg.sso_entity_id||''} onInput=${e=>setCfg(p=>({...p,sso_entity_id:e.target.value}))}/>
+    <//>
+
+    <${ROW} label="IdP x.509 Certificate" hint="Paste the raw PEM certificate from your IdP (starts with -----BEGIN CERTIFICATE-----)">
+      <textarea class="vinp" style=${{width:'100%',fontSize:11,fontFamily:'monospace',minHeight:80,resize:'vertical'}}
+        placeholder="-----BEGIN CERTIFICATE-----&#10;MIIxxxxx\u2026&#10;-----END CERTIFICATE-----"
+        value=${cfg.sso_x509_cert||''} onInput=${e=>setCfg(p=>({...p,sso_x509_cert:e.target.value}))}></textarea>
+    <//>
+
+    <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+      <${ROW} label="Email Attribute" hint="SAML attribute name for user email">
+        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="email"
+          value=${cfg.sso_attr_email||'email'} onInput=${e=>setCfg(p=>({...p,sso_attr_email:e.target.value}))}/>
+      <//>
+      <${ROW} label="Name Attribute" hint="SAML attribute name for display name">
+        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="name"
+          value=${cfg.sso_attr_name||'name'} onInput=${e=>setCfg(p=>({...p,sso_attr_name:e.target.value}))}/>
+      <//>
+    </div>
+
+    <${ROW} label="Workspace URL Slug" hint="Customise the slug in your workspace URL (e.g. 'acme' \u2192 /acme/wsXXX/dashboard)">
+      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="my-company"
+        value=${cfg.workspace_slug||''} onInput=${e=>setCfg(p=>({...p,workspace_slug:e.target.value.toLowerCase().replace(/[^a-z0-9-]/g,'-')}))}/>
+    <//>
+
+    <${ROW} label="Allow Password Login">
+      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
+        <input type="checkbox" checked=${cfg.sso_allow_password_login!==0}
+          onChange=${e=>setCfg(p=>({...p,sso_allow_password_login:e.target.checked?1:0}))}
+          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
+        <span style=${{fontSize:13,color:'var(--tx)'}}>Allow members to also use email + password login</span>
+      </label>
+    <//>
+    `:null}
+
+    <div style=${{display:'flex',gap:10,justifyContent:'flex-end',marginTop:8}}>
+      <button class="btn bp" onClick=${save} disabled=${saving}>
+        ${saving?html`<span class="spin"></span>`:saved?'\u2713 Saved!':'Save SSO Settings'}
+      </button>
+    </div>
   </div>`;
 }
 
@@ -6958,7 +7111,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{ if(u.workspace_dashboard_url){window.history.replaceState({},'',u.workspace_dashboard_url);} setCu(u); }}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
