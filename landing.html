@@ -1499,16 +1499,25 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
   <div class="wrap">
     <div class="ey">FAQ</div>
     <h2 class="st">Common questions.</h2>
-    <p class="ssub" style="margin-bottom:40px">Can't find an answer? Email <a href="/cdn-cgi/l/email-protection#a8cbc7c6dcc9cbdce8decddfc1dc86c1c6"><span class="__cf_email__" data-cfemail="a5c6cacbd1c4c6d1e5d3c0d2ccd18bcccb">[email&#160;protected]</span></a></p>
+    <p class="ssub" style="margin-bottom:28px">Can't find an answer? Email <a href="/cdn-cgi/l/email-protection#a8cbc7c6dcc9cbdce8decddfc1dc86c1c6"><span class="__cf_email__" data-cfemail="a5c6cacbd1c4c6d1e5d3c0d2ccd18bcccb">[email&#160;protected]</span></a></p>
+    <div style="position:relative;margin-bottom:24px">
+      <span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:var(--tx3);pointer-events:none">🔍</span>
+      <input id="faqSearch" type="text" placeholder="Search questions…" autocomplete="off"
+        style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--b1);border-radius:12px;padding:14px 16px 14px 44px;font-size:15px;color:var(--tx);font-family:var(--font);outline:none;transition:border .2s"
+        oninput="filterFaq(this.value)"
+        onfocus="this.style.borderColor='var(--blue)'"
+        onblur="this.style.borderColor='var(--b1)'">
+    </div>
+    <p id="faqNoResult" style="display:none;text-align:center;color:var(--tx3);font-size:14px;padding:24px 0">No questions match your search.</p>
     <div class="faq">
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">Do I need a credit card to start?<span class="arr">▾</span></button><div class="faq-a">No. The Starter plan is completely free forever. Create a workspace, invite your team and use all 12 modules with zero payment required. You only need billing details when upgrading to Team or Enterprise.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">How does the AI assistant work?<span class="arr">▾</span></button><div class="faq-a">VEWIT's AI assistant is powered by Anthropic Claude. You provide your own API key in Workspace Settings → AI Key. Once set, the assistant can create tasks, update statuses, generate EOD reports and answer questions about your projects in natural language.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan supports up to 5 team members. If your team is larger, upgrade to the Team plan for unlimited members. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">Is my data secure?<span class="arr">▾</span></button><div class="faq-a">Yes. VEWIT uses bcrypt password hashing, session-based auth, Google Authenticator TOTP 2FA, HTTPS-only sessions and tenant-isolated database queries — no workspace can access another's data. Enterprise customers can opt for on-premise deployment for complete data sovereignty.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">What does "bring your own AI key" mean?<span class="arr">▾</span></button><div class="faq-a">Get an API key from Anthropic (anthropic.com) and paste it once in VEWIT's Workspace Settings. VEWIT calls the Claude API directly from your server — you pay Anthropic only for actual usage, and we never store your key outside your workspace settings.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">Can I upgrade or downgrade anytime?<span class="arr">▾</span></button><div class="faq-a">Yes. Upgrade from Starter to Team at any time and your data is preserved exactly as-is. Downgrades take effect at the end of your billing period. Contact <a href="/cdn-cgi/l/email-protection#6112000d04122117041608154f080f" style="color:var(--blue)"><span class="__cf_email__" data-cfemail="b8cbd9d4ddcbf8ceddcfd1cc96d1d6">[email&#160;protected]</span></a> for Enterprise custom billing arrangements.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">Does VEWIT work for non-technical teams?<span class="arr">▾</span></button><div class="faq-a">Absolutely. While VEWIT has deep features for dev teams (story points, sprint planning, velocity tracking), the core Kanban, ticket system, AI assistant and messaging work perfectly for any team — product, marketing, operations, or support.</div></div>
-      <div class="faq-i"><button class="faq-q" onclick="this.closest('.faq-i').classList.toggle('open')">What happens to my data if I cancel?<span class="arr">▾</span></button><div class="faq-a">Your data remains accessible for 30 days after cancellation. You can export your projects, tasks and attachments at any time via Settings → Export. We never delete data without notice.</div></div>
+      <div class="faq-i"><button class="faq-q" >Do I need a credit card to start?<span class="arr">▾</span></button><div class="faq-a">No. The Starter plan is completely free forever. Create a workspace, invite your team and use all 12 modules with zero payment required. You only need billing details when upgrading to Team or Enterprise.</div></div>
+      <div class="faq-i"><button class="faq-q" >How does the AI assistant work?<span class="arr">▾</span></button><div class="faq-a">VEWIT's AI assistant is powered by Anthropic Claude. You provide your own API key in Workspace Settings → AI Key. Once set, the assistant can create tasks, update statuses, generate EOD reports and answer questions about your projects in natural language.</div></div>
+      <div class="faq-i"><button class="faq-q" >How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan supports up to 5 team members. If your team is larger, upgrade to the Team plan for unlimited members. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
+      <div class="faq-i"><button class="faq-q" >Is my data secure?<span class="arr">▾</span></button><div class="faq-a">Yes. VEWIT uses bcrypt password hashing, session-based auth, Google Authenticator TOTP 2FA, HTTPS-only sessions and tenant-isolated database queries — no workspace can access another's data. Enterprise customers can opt for on-premise deployment for complete data sovereignty.</div></div>
+      <div class="faq-i"><button class="faq-q" >What does "bring your own AI key" mean?<span class="arr">▾</span></button><div class="faq-a">Get an API key from Anthropic (anthropic.com) and paste it once in VEWIT's Workspace Settings. VEWIT calls the Claude API directly from your server — you pay Anthropic only for actual usage, and we never store your key outside your workspace settings.</div></div>
+      <div class="faq-i"><button class="faq-q" >Can I upgrade or downgrade anytime?<span class="arr">▾</span></button><div class="faq-a">Yes. Upgrade from Starter to Team at any time and your data is preserved exactly as-is. Downgrades take effect at the end of your billing period. Contact <a href="/cdn-cgi/l/email-protection#6112000d04122117041608154f080f" style="color:var(--blue)"><span class="__cf_email__" data-cfemail="b8cbd9d4ddcbf8ceddcfd1cc96d1d6">[email&#160;protected]</span></a> for Enterprise custom billing arrangements.</div></div>
+      <div class="faq-i"><button class="faq-q" >Does VEWIT work for non-technical teams?<span class="arr">▾</span></button><div class="faq-a">Absolutely. While VEWIT has deep features for dev teams (story points, sprint planning, velocity tracking), the core Kanban, ticket system, AI assistant and messaging work perfectly for any team — product, marketing, operations, or support.</div></div>
+      <div class="faq-i"><button class="faq-q" >What happens to my data if I cancel?<span class="arr">▾</span></button><div class="faq-a">Your data remains accessible for 30 days after cancellation. You can export your projects, tasks and attachments at any time via Settings → Export. We never delete data without notice.</div></div>
     </div>
   </div>
 </section>
@@ -1761,6 +1770,21 @@ document.querySelectorAll('.faq-q').forEach(btn=>{
     if(!isOpen)item.classList.add('open');
   });
 });
+
+// ── FAQ search filter ──
+function filterFaq(query){
+  const q=query.trim().toLowerCase();
+  const items=document.querySelectorAll('.faq-i');
+  let visible=0;
+  items.forEach(item=>{
+    const text=item.innerText.toLowerCase();
+    const match=!q||text.includes(q);
+    item.style.display=match?'':'none';
+    if(match)visible++;
+  });
+  document.getElementById('faqNoResult').style.display=visible?'none':'block';
+  if(q)document.querySelectorAll('.faq-i').forEach(i=>i.classList.remove('open'));
+}
 </script>
 
 <!-- ── FLOATING SECTION NAVIGATOR ── -->
