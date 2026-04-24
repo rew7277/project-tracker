@@ -7,3 +7,5 @@ qrcode>=7.4.2
 segno>=1.6.1
 pywebpush>=2.0.3
 gunicorn>=23.0.0
+# Stripe billing: set env vars STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_TEAM, STRIPE_PRICE_ENTERPRISE
+# No stripe pip package needed — uses built-in urllib for direct API calls

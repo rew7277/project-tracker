@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VEWIT v4.0
+Project Tracker v4.0
 Multi-tenant workspaces | AI Assistant | Stage Dropdown | Direct Messages
 """
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
@@ -16,7 +16,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
     stream=sys.stdout
 )
-log = logging.getLogger("vewit")
+log = logging.getLogger("project-tracker")
 try:
     import bcrypt as _bcrypt
 except ImportError:
@@ -422,13 +422,13 @@ def generate_otp():
 
 def send_otp_email(to_email, otp_code, user_name):
     """Send OTP verification email."""
-    subject = "VEWIT — Your Login Code"
+    subject = "Project Tracker — Your Login Code"
     body = f"""
     <html>
     <body style="font-family: Arial, sans-serif; background:#f4f4f4; padding:20px;">
       <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
         <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-          <h1 style="color:#5a8cff;margin:0;font-size:22px;letter-spacing:-0.5px;">VEWIT</h1>
+          <h1 style="color:#5a8cff;margin:0;font-size:22px;letter-spacing:-0.5px;">Project Tracker</h1>
         </div>
         <div style="padding:32px;">
           <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
@@ -441,7 +441,7 @@ def send_otp_email(to_email, otp_code, user_name):
           <p style="color:#888;font-size:13px;margin:0;">If you didn't request this code, you can safely ignore this email. Do not share this code with anyone.</p>
         </div>
         <div style="background:#f9f9f9;padding:14px 32px;text-align:center;border-top:1px solid #eee;">
-          <p style="color:#aaa;font-size:11px;margin:0;">VEWIT · Team Project Management</p>
+          <p style="color:#aaa;font-size:11px;margin:0;">Project Tracker · Team Project Management</p>
         </div>
       </div>
     </body>
@@ -481,7 +481,7 @@ def _send_via_resend(to_email, subject, body_html, from_email):
     try:
         import json as _json
         payload = _json.dumps({
-            "from": f"VEWIT <{from_email or 'noreply@vewit.in'}>",
+            "from": f"Project Tracker <{from_email or 'noreply@project-tracker.in'}>",
             "to": [to_email],
             "subject": subject,
             "html": body_html
@@ -509,7 +509,7 @@ def _send_via_resend(to_email, subject, body_html, from_email):
 
 def send_email(to_email, subject, body_html, workspace_id=None):
     """Send email — tries Resend API first (works on Railway), falls back to SMTP."""
-    from_addr = FROM_EMAIL or SMTP_USERNAME or 'noreply@vewit.in'
+    from_addr = FROM_EMAIL or SMTP_USERNAME or 'noreply@project-tracker.in'
 
     # ── Try Resend API first (no port restrictions) ───────────────────────
     if RESEND_API_KEY:
@@ -599,7 +599,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
                 <h3 style="margin: 0 0 10px 0; color: #1f2937;">{task_title}</h3>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #6366f1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
         </div>
     </body>
     </html>
@@ -621,7 +621,7 @@ def send_status_change_email(user_email, user_name, task_title, new_stage, chang
                 <p style="margin: 0;"><strong>New Status:</strong> <span style="color: #10b981; font-weight: bold;">{new_stage}</span></p>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
         </div>
     </body>
     </html>
@@ -645,7 +645,7 @@ def send_comment_email(user_email, user_name, task_title, commenter_name, commen
                 </div>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #f59e0b; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Comment</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
         </div>
     </body>
     </html>
@@ -885,6 +885,47 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_vault_audit_card ON vault_audit_log(card_id)",
             "ALTER TABLE workspaces ADD COLUMN plan TEXT DEFAULT 'starter'",
             "ALTER TABLE workspaces ADD COLUMN suspended INTEGER DEFAULT 0",
+            # ── Stripe billing ──
+            "ALTER TABLE workspaces ADD COLUMN stripe_customer_id TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN stripe_subscription_id TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN plan_expires TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN trial_ends TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN seat_count INTEGER DEFAULT 5",
+            # ── Usage metering ──
+            "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT, event_type TEXT, quantity INTEGER DEFAULT 1, meta TEXT DEFAULT '{}', created TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ws ON usage_events(workspace_id, event_type, created)",
+            # ── Public API keys ──
+            "CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, name TEXT, key_hash TEXT, key_prefix TEXT, scopes TEXT DEFAULT '[]', last_used TEXT DEFAULT '', created TEXT, expires TEXT DEFAULT '')",
+            "CREATE INDEX IF NOT EXISTS idx_apikeys_ws ON api_keys(workspace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(key_hash)",
+            # ── Webhooks ──
+            "CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, url TEXT, events TEXT DEFAULT '[]', secret TEXT DEFAULT '', enabled INTEGER DEFAULT 1, last_triggered TEXT DEFAULT '', fail_count INTEGER DEFAULT 0, created TEXT)",
+            "CREATE TABLE IF NOT EXISTS webhook_logs (id TEXT PRIMARY KEY, webhook_id TEXT, event TEXT, status_code INTEGER DEFAULT 0, response TEXT DEFAULT '', created TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_webhooks_ws ON webhooks(workspace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_whlogs_wh ON webhook_logs(webhook_id, created)",
+            # ── Custom fields ──
+            "CREATE TABLE IF NOT EXISTS custom_fields (id TEXT PRIMARY KEY, workspace_id TEXT, entity_type TEXT DEFAULT 'task', name TEXT, field_type TEXT DEFAULT 'text', options TEXT DEFAULT '[]', required INTEGER DEFAULT 0, created TEXT)",
+            "CREATE TABLE IF NOT EXISTS custom_field_values (id TEXT PRIMARY KEY, workspace_id TEXT, field_id TEXT, entity_id TEXT, value TEXT DEFAULT '', created TEXT, updated TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_cfv_entity ON custom_field_values(entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cf_ws ON custom_fields(workspace_id)",
+            # ── SLA tracking for tickets ──
+            "ALTER TABLE tickets ADD COLUMN sla_hours INTEGER DEFAULT 24",
+            "ALTER TABLE tickets ADD COLUMN sla_breached INTEGER DEFAULT 0",
+            "ALTER TABLE tickets ADD COLUMN first_response_at TEXT DEFAULT ''",
+            "ALTER TABLE tickets ADD COLUMN resolved_at TEXT DEFAULT ''",
+            "ALTER TABLE tickets ADD COLUMN sla_due_at TEXT DEFAULT ''",
+            # ── Onboarding ──
+            "ALTER TABLE workspaces ADD COLUMN onboarding_done INTEGER DEFAULT 0",
+            "ALTER TABLE workspaces ADD COLUMN onboarding_step INTEGER DEFAULT 0",
+            # ── Enhanced audit log ──
+            "ALTER TABLE audit_log ADD COLUMN entity_type TEXT DEFAULT ''",
+            "ALTER TABLE audit_log ADD COLUMN entity_id TEXT DEFAULT ''",
+            "ALTER TABLE audit_log ADD COLUMN old_value TEXT DEFAULT ''",
+            "ALTER TABLE audit_log ADD COLUMN new_value TEXT DEFAULT ''",
+            # ── Time tracking ──
+            "CREATE TABLE IF NOT EXISTS time_entries (id TEXT PRIMARY KEY, workspace_id TEXT, task_id TEXT, user_id TEXT, description TEXT DEFAULT '', minutes INTEGER DEFAULT 0, billable INTEGER DEFAULT 1, date TEXT DEFAULT '', created TEXT, updated TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_time_ws ON time_entries(workspace_id, user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_time_task ON time_entries(task_id)",
             "ALTER TABLE audit_log ADD COLUMN ip TEXT DEFAULT ''",
             # Performance indexes missing from original schema
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
@@ -1140,7 +1181,7 @@ def _totp_verify(secret, token, window=1):
             return True
     return False
 
-def _totp_qr_url(secret, email, issuer="VEWIT"):
+def _totp_qr_url(secret, email, issuer="Project Tracker"):
     """Generate otpauth:// URL for QR code rendering."""
     import urllib.parse
     pad = (8 - len(secret) % 8) % 8
@@ -1395,7 +1436,7 @@ def _qr_to_png_base64(mat, cell=8, border=4):
            + png_chunk(b'IEND', b''))
     return 'data:image/png;base64,' + base64.b64encode(png).decode()
 
-def _totp_qr_base64(secret, email, issuer="VEWIT"):
+def _totp_qr_base64(secret, email, issuer="Project Tracker"):
     """Generate a real scannable QR code PNG — pure Python, zero dependencies."""
     otpauth_url = _totp_qr_url(secret, email, issuer)
     try:
@@ -1787,7 +1828,7 @@ def test_email():
     if not test_to:
         return jsonify({"error":"test_email required"}),400
 
-    subject="VEWIT Email Test"
+    subject="Project Tracker Email Test"
     body="""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -1804,7 +1845,7 @@ def test_email():
                 <li>Status changes</li>
                 <li>New comments</li>
             </ul>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
         </div>
     </body>
     </html>
@@ -2951,7 +2992,7 @@ def ai_chat():
     task_ctx="\n".join([f"- [{t['id']}] {t['title']} | stage:{t['stage']} | priority:{t['priority']} | pct:{t['pct']}%" for t in tasks])
     user_ctx="\n".join([f"- {u['name']} (id:{u['id']}, role:{u['role']})" for u in users])
 
-    system=f"""You are an AI assistant for VEWIT — a project management tool used by the workspace "{ws['name'] if ws else 'Unknown'}".
+    system=f"""You are an AI assistant for Project Tracker — a project management tool used by the workspace "{ws['name'] if ws else 'Unknown'}".
 Current user: {cu['name']} (role: {cu['role']})
 Today: {datetime.now().strftime('%Y-%m-%d')}
 
@@ -3266,7 +3307,7 @@ Brief description of the tech stack and architecture.
 Prioritized list of immediate actions.
 
 ---
-*Generated by VEWIT AI · {datetime.now().strftime('%B %d, %Y')}*"""
+*Generated by Project Tracker AI · {datetime.now().strftime('%B %d, %Y')}*"""
 
     try:
         req_data = json.dumps({
@@ -3457,7 +3498,7 @@ def serve_static(fn):
         # instead of an HTML 404 (which causes the MIME-type rejection)
         if fn == "frontend.js":
             err_js = (
-                "console.error('[VEWIT] frontend.js not found on server. "
+                "console.error('[Project Tracker] frontend.js not found on server. "
                 "Make sure frontend.js is deployed in the same directory as app.py.');"
                 "document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;"
                 "padding:40px;background:#0a0618;min-height:100vh\">"
@@ -3502,7 +3543,7 @@ def serve_js(fn):
 def serve_sw():
     """Service Worker for background push notifications and offline caching."""
     sw_code = r"""
-// VEWIT Service Worker v2
+// Project Tracker Service Worker v2
 const CACHE = 'pf-v2';
 const ICON = '/favicon.ico';
 
@@ -3519,7 +3560,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('push', e => {
   let data = {};
   try { data = e.data ? e.data.json() : {}; } catch(err) {}
-  const title  = data.title  || 'VEWIT';
+  const title  = data.title  || 'Project Tracker';
   const body   = data.body   || '';
   const tag    = data.tag    || 'pf-notif';
   const url    = data.url    || '/';
@@ -3589,7 +3630,7 @@ async function pollNotifications() {
 def serve_manifest():
     """PWA manifest — full desktop installability."""
     manifest = {
-        "name": "VEWIT",
+        "name": "Project Tracker",
         "short_name": "PFPro",
         "description": "AI-powered team project management — tasks, huddles, timeline, tickets & more.",
         "start_url": "/dashboard",
@@ -3614,7 +3655,7 @@ def serve_manifest():
             {"name": "Projects", "short_name": "Projects", "url": "/projects", "description": "View all projects"}
         ],
         "screenshots": [
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "wide", "label": "VEWIT Dashboard"}
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "wide", "label": "Project Tracker Dashboard"}
         ]
     }
     return jsonify(manifest)
@@ -3622,10 +3663,10 @@ def serve_manifest():
 @app.route("/favicon.ico")
 @app.route("/favicon.png")
 def favicon():
-    """Serve the VEWIT blue favicon — same as icon-192 PNG."""
+    """Serve the Project Tracker blue favicon — same as icon-192 PNG."""
     import base64
     from flask import Response
-    # Exact same blue VEWIT icon as icon-192
+    # Exact same blue Project Tracker icon as icon-192
     png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAEuklEQVR4nO3UQQ5TSRAEUS7ClTj/3IZZITWDRgJsV2b/eiHF3r8rw1++AAAAAAAAAAAAAAAAAAAAAAAAhPj67Z/vnDV9cxykx7DR9M1xkB7DRtM3x0F6DL/r75D+jQK4kPQYXh39jTGkb46D9BjePfwbQkjfHAfpMXxy/K0RpG+Og/QYPj3+xgjSN8dBegwT42+LIH1zHKTHMDX+pgjSN8dBegwCQJT0GBKkvzl9cxykxyAARNk2/oYI0jfHgQAEsBoBCGA1G8f/AwFAAALYjQAEsBoBCGA1AhDAagQggNWkRpCOIPnd6ZvjQAACWI0ABLCa5BBSEaS/OX1zHKTHIABESY9hOoL0twqgjPQYBIAo6TFMRpD+RgEUkh7DVATpbxNAKekxTESQ/iYBFJMew6cjSH+LAMpJj0EAS0kfodmnB9CiAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKPOTpL+tUQEUOUH6G9sUQJECmFcAJU6S/tYmBVBggvQ3tyiAAgWQUwBhk6S/vUEBhBWAAFYrAAGstYH0G6QVgABWK4Clw/8v6TcRwBKbSb+NAB7sTaTfSgAP8mbSbyeAy30C6TcUwIU+kfSbCuACN5B+YwGUuon0WwugyM2k314Ahl9B+hYCMPwK0rcRgPHHSd9IAIZfQfpmAjD8CtI3FIDxx0nfUgCGX0H6tgIw/ArStxbARcP/k997+7cJYGDMtwxkS+Sv3E8AFxz4b/jEP93TEICjerPvr7/ZlQE8jYnhe8OHBPAkEsP3nhcH8CTSw/euAoiQHrv3vTSA20mP21tfHMDtpActAgFESI94cwgCCJIerRAeFMBNpEcqhJ8RwCDpYYrgVwQwQHqMQvh/BPBB0uNrshUBfIj04BptRABvJj2yG2xCAG8iPaobbUAAQ4/Ie28ngDc8Iu+9nQDe8Ii893YCePEBeff96gNIPmJ6PE+w/XYCePEBeff9rggg8Yjp0TzJ5tsJ4MUH5N33uyaAqUdMD+XJNt7vqgAmHjE9kifbeLvrAvjUQ6bHscmm+10ZwLsfMT2IjbbcLxpAC+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNAQAAAAAAAAAAAAAAAAAAAGAx/wJoKCsUOqYWXQAAAABJRU5ErkJggg=="
     png_data = base64.b64decode(png_b64)
     return Response(png_data, mimetype='image/png',
@@ -3723,7 +3764,7 @@ def _require_admin():
 def _audit(action, target="", detail=""):
     """Write an entry to audit_log. Fire-and-forget — never raises."""
     try:
-        admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in")
+        admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in")
         entry_id    = secrets.token_hex(8)
         with get_db() as db:
             db.execute(
@@ -3858,7 +3899,7 @@ def admin_api_login():
     email    = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "")
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in").strip().lower()
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in").strip().lower()
     admin_pass  = os.environ.get("ADMIN_PASSWORD", "")
 
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")[:60]
@@ -3885,7 +3926,7 @@ def admin_api_session():
     """Validate an existing admin token — called on page load to restore session."""
     if not _require_admin():
         return jsonify({"error": "Unauthorized"}), 401
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in")
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in")
     return jsonify({"ok": True, "email": admin_email})
 
 @app.route("/api/admin/logout", methods=["POST"])
@@ -4210,8 +4251,686 @@ def open_browser(port):
     time.sleep(1.4)
     webbrowser.open(f"http://localhost:{port}")
 
+# ═══════════════════════════════════════════════════════════════
+#  STRIPE BILLING
+# ═══════════════════════════════════════════════════════════════
+import hmac as _hmac, hashlib as _hashlib
+
+STRIPE_SECRET = os.environ.get("STRIPE_SECRET_KEY","")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET","")
+STRIPE_PRICES = {
+    "team":       os.environ.get("STRIPE_PRICE_TEAM","price_team"),
+    "enterprise": os.environ.get("STRIPE_PRICE_ENTERPRISE","price_enterprise"),
+}
+
+def _stripe_headers():
+    return {"Authorization":f"Bearer {STRIPE_SECRET}","Content-Type":"application/x-www-form-urlencoded"}
+
+def _stripe_post(path, data):
+    import urllib.parse as _up
+    body = _up.urlencode(data).encode()
+    req  = urllib.request.Request(f"https://api.stripe.com/v1{path}", data=body, headers=_stripe_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error":{"message":str(e)}}
+
+def _stripe_get(path):
+    req = urllib.request.Request(f"https://api.stripe.com/v1{path}", headers=_stripe_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error":{"message":str(e)}}
+
+@app.route("/api/billing/create-checkout", methods=["POST"])
+@login_required
+def billing_create_checkout():
+    d    = request.get_json(force=True)
+    plan = d.get("plan","team")
+    if plan not in STRIPE_PRICES:
+        return jsonify(error="Invalid plan"), 400
+    if not STRIPE_SECRET:
+        return jsonify(error="Stripe not configured. Set STRIPE_SECRET_KEY env var."), 503
+    db = get_db()
+    ws = db.execute("SELECT * FROM workspaces WHERE id=?", (wid(),)).fetchone()
+    user = db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
+    cust_id = ws["stripe_customer_id"] if ws and ws["stripe_customer_id"] else ""
+    if not cust_id:
+        c = _stripe_post("/customers", {"email": user["email"], "name": ws["name"] if ws else "", "metadata[workspace_id]": wid()})
+        if "error" in c:
+            return jsonify(error=c["error"]["message"]), 502
+        cust_id = c["id"]
+        db.execute("UPDATE workspaces SET stripe_customer_id=? WHERE id=?", (cust_id, wid()))
+        db.commit()
+    base = request.host_url.rstrip("/")
+    sess = _stripe_post("/checkout/sessions", {
+        "customer": cust_id,
+        "mode": "subscription",
+        "line_items[0][price]": STRIPE_PRICES[plan],
+        "line_items[0][quantity]": "1",
+        "success_url": f"{base}/settings?billing=success",
+        "cancel_url":  f"{base}/settings?billing=cancel",
+        "metadata[workspace_id]": wid(),
+        "metadata[plan]": plan,
+    })
+    if "error" in sess:
+        return jsonify(error=sess["error"]["message"]), 502
+    return jsonify(url=sess["checkout_session"]["url"] if "checkout_session" in sess else sess.get("url",""))
+
+@app.route("/api/billing/portal", methods=["POST"])
+@login_required
+def billing_portal():
+    if not STRIPE_SECRET:
+        return jsonify(error="Stripe not configured"), 503
+    db = get_db()
+    ws = db.execute("SELECT stripe_customer_id FROM workspaces WHERE id=?", (wid(),)).fetchone()
+    if not ws or not ws["stripe_customer_id"]:
+        return jsonify(error="No billing account found"), 400
+    base = request.host_url.rstrip("/")
+    portal = _stripe_post("/billing_portal/sessions", {
+        "customer": ws["stripe_customer_id"],
+        "return_url": f"{base}/settings",
+    })
+    if "error" in portal:
+        return jsonify(error=portal["error"]["message"]), 502
+    return jsonify(url=portal.get("url",""))
+
+@app.route("/api/billing/status")
+@login_required
+def billing_status():
+    db = get_db()
+    ws = db.execute("SELECT plan, stripe_subscription_id, plan_expires, trial_ends, seat_count, stripe_customer_id FROM workspaces WHERE id=?", (wid(),)).fetchone()
+    if not ws:
+        return jsonify(plan="starter", active=True, trial=False)
+    members = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
+    usage   = _get_month_usage(wid())
+    return jsonify(
+        plan=ws["plan"] or "starter",
+        stripe_customer=bool(ws["stripe_customer_id"]),
+        subscription_id=ws["stripe_subscription_id"] or "",
+        plan_expires=ws["plan_expires"] or "",
+        trial_ends=ws["trial_ends"] or "",
+        seat_count=ws["seat_count"] or 5,
+        member_count=members["c"] if members else 0,
+        usage=usage,
+    )
+
+@app.route("/api/billing/webhook", methods=["POST"])
+def stripe_webhook():
+    payload = request.get_data()
+    sig     = request.headers.get("Stripe-Signature","")
+    if STRIPE_WEBHOOK_SECRET:
+        parts = {p.split("=")[0]: p.split("=")[1] for p in sig.split(",") if "=" in p}
+        signed_payload = f"{parts.get('t','')}".encode() + b"." + payload
+        expected = _hmac.new(STRIPE_WEBHOOK_SECRET.encode(), signed_payload, _hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, parts.get("v1","")):
+            return "Bad signature", 400
+    event = request.get_json(force=True)
+    etype = event.get("type","")
+    obj   = event.get("data",{}).get("object",{})
+    db    = get_db(autocommit=True)
+    ws_id = obj.get("metadata",{}).get("workspace_id","")
+    if etype == "checkout.session.completed":
+        plan = obj.get("metadata",{}).get("plan","team")
+        sub  = obj.get("subscription","")
+        if ws_id:
+            db.execute("UPDATE workspaces SET plan=?, stripe_subscription_id=? WHERE id=?", (plan, sub, ws_id))
+    elif etype in ("customer.subscription.updated","customer.subscription.deleted"):
+        status = obj.get("status","")
+        sub_id = obj.get("id","")
+        ws_row = db.execute("SELECT id FROM workspaces WHERE stripe_subscription_id=?", (sub_id,)).fetchone()
+        if ws_row:
+            new_plan = "starter" if status in ("canceled","unpaid","past_due") else (obj.get("metadata",{}).get("plan","team"))
+            exp      = datetime.fromtimestamp(obj.get("current_period_end", 0)).isoformat() if obj.get("current_period_end") else ""
+            db.execute("UPDATE workspaces SET plan=?, plan_expires=? WHERE id=?", (new_plan, exp, ws_row["id"]))
+    return "ok", 200
+
+# ═══════════════════════════════════════════════════════════════
+#  USAGE METERING
+# ═══════════════════════════════════════════════════════════════
+PLAN_LIMITS = {
+    "starter":    {"members": 5,   "projects": 3,  "ai_calls_month": 50,  "storage_mb": 500},
+    "team":       {"members": 50,  "projects": 50, "ai_calls_month": 500, "storage_mb": 10000},
+    "enterprise": {"members": 999, "projects": 999,"ai_calls_month": 9999,"storage_mb": 100000},
+}
+
+def _get_month_usage(workspace_id):
+    month_start = datetime.now().replace(day=1,hour=0,minute=0,second=0).isoformat()
+    db = get_db()
+    rows = db.execute(
+        "SELECT event_type, SUM(quantity) as total FROM usage_events WHERE workspace_id=? AND created>=? GROUP BY event_type",
+        (workspace_id, month_start)
+    ).fetchall()
+    return {r["event_type"]: r["total"] for r in rows}
+
+def _record_usage(workspace_id, event_type, quantity=1, meta=None):
+    _raw_pg("INSERT INTO usage_events VALUES (?,?,?,?,?,?)",
+            (secrets.token_hex(8), workspace_id, event_type, quantity,
+             json.dumps(meta or {}), ts()))
+
+@app.route("/api/usage")
+@login_required
+def get_usage():
+    db  = get_db()
+    ws  = db.execute("SELECT plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+    plan = (ws["plan"] or "starter") if ws else "starter"
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+    usage  = _get_month_usage(wid())
+    members = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
+    projects = db.execute("SELECT COUNT(*) as c FROM projects WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
+    return jsonify(
+        plan=plan, limits=limits,
+        usage={
+            "members":       members["c"] if members else 0,
+            "projects":      projects["c"] if projects else 0,
+            "ai_calls_month": usage.get("ai_call", 0),
+            "storage_mb":    usage.get("storage_mb", 0),
+        }
+    )
+
+# ═══════════════════════════════════════════════════════════════
+#  PUBLIC API KEYS
+# ═══════════════════════════════════════════════════════════════
+VALID_SCOPES = ["tasks:read","tasks:write","projects:read","projects:write",
+                "tickets:read","tickets:write","users:read","webhooks:manage"]
+
+def _api_key_auth():
+    """Returns (workspace_id, user_id) if valid API key in header, else (None,None)"""
+    auth = request.headers.get("Authorization","")
+    if not auth.startswith("Bearer pt_"):
+        return None, None
+    raw_key = auth[7:]
+    prefix  = raw_key[:12]
+    key_hash = _hashlib.sha256(raw_key.encode()).hexdigest()
+    db   = get_db()
+    row  = db.execute("SELECT * FROM api_keys WHERE key_hash=? AND key_prefix=?", (key_hash, prefix)).fetchone()
+    if not row:
+        return None, None
+    if row["expires"] and row["expires"] < ts():
+        return None, None
+    db.execute("UPDATE api_keys SET last_used=? WHERE id=?", (ts(), row["id"]))
+    return row["workspace_id"], row["user_id"]
+
+@app.route("/api/keys", methods=["GET"])
+@login_required
+def list_api_keys():
+    db   = get_db()
+    rows = db.execute("SELECT id, name, key_prefix, scopes, last_used, created, expires FROM api_keys WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/keys", methods=["POST"])
+@login_required
+def create_api_key():
+    d      = request.get_json(force=True)
+    name   = (d.get("name","") or "").strip()[:80]
+    scopes = [s for s in d.get("scopes",[]) if s in VALID_SCOPES]
+    expires = d.get("expires","")
+    if not name:
+        return jsonify(error="Name required"), 400
+    if not scopes:
+        scopes = ["tasks:read","projects:read"]
+    raw_key  = "pt_" + secrets.token_hex(28)
+    prefix   = raw_key[:12]
+    key_hash = _hashlib.sha256(raw_key.encode()).hexdigest()
+    kid      = secrets.token_hex(8)
+    _raw_pg("INSERT INTO api_keys VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (kid, wid(), session["user_id"], name, key_hash, prefix, json.dumps(scopes), "", ts(), expires))
+    _log_audit("api_key_created", session["user_id"], kid)
+    return jsonify(id=kid, key=raw_key, prefix=prefix, name=name, scopes=scopes, created=ts())
+
+@app.route("/api/keys/<kid>", methods=["DELETE"])
+@login_required
+def delete_api_key(kid):
+    db = get_db()
+    row = db.execute("SELECT id FROM api_keys WHERE id=? AND workspace_id=?", (kid, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    _raw_pg("DELETE FROM api_keys WHERE id=?", (kid,))
+    _log_audit("api_key_deleted", session["user_id"], kid)
+    return jsonify(ok=True)
+
+# ── Public API v1 endpoints (bearer token auth) ──
+@app.route("/api/v1/tasks", methods=["GET"])
+def public_list_tasks():
+    ws_id, uid = _api_key_auth()
+    if not ws_id:
+        return jsonify(error="Invalid or missing API key"), 401
+    db    = get_db()
+    tasks = db.execute("SELECT id,title,stage,priority,assignee,due_date,created FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 200", (ws_id,)).fetchall()
+    return jsonify(data=[dict(t) for t in tasks])
+
+@app.route("/api/v1/tasks", methods=["POST"])
+def public_create_task():
+    ws_id, uid = _api_key_auth()
+    if not ws_id:
+        return jsonify(error="Unauthorized"), 401
+    d = request.get_json(force=True)
+    tid = secrets.token_hex(6)
+    _raw_pg("INSERT INTO tasks(id,workspace_id,project_id,title,stage,priority,assignee,due_date,created,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,'')",
+            (tid, ws_id, d.get("project_id",""), d.get("title","Untitled"), d.get("stage","planning"),
+             d.get("priority","medium"), d.get("assignee",""), d.get("due_date",""), ts()))
+    _fire_webhooks(ws_id, "task.created", {"id":tid,"title":d.get("title","")})
+    return jsonify(id=tid, created=True), 201
+
+@app.route("/api/v1/projects", methods=["GET"])
+def public_list_projects():
+    ws_id, _ = _api_key_auth()
+    if not ws_id:
+        return jsonify(error="Unauthorized"), 401
+    db   = get_db()
+    rows = db.execute("SELECT id,name,description,start_date,target_date,progress,color FROM projects WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 100", (ws_id,)).fetchall()
+    return jsonify(data=[dict(r) for r in rows])
+
+@app.route("/api/v1/tickets", methods=["GET"])
+def public_list_tickets():
+    ws_id, _ = _api_key_auth()
+    if not ws_id:
+        return jsonify(error="Unauthorized"), 401
+    db   = get_db()
+    rows = db.execute("SELECT id,title,status,priority,assignee,created FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 200", (ws_id,)).fetchall()
+    return jsonify(data=[dict(r) for r in rows])
+
+# ═══════════════════════════════════════════════════════════════
+#  WEBHOOKS
+# ═══════════════════════════════════════════════════════════════
+def _fire_webhooks(workspace_id, event, payload):
+    try:
+        db   = get_db()
+        hooks = db.execute("SELECT * FROM webhooks WHERE workspace_id=? AND enabled=1", (workspace_id,)).fetchall()
+        for hook in hooks:
+            events = json.loads(hook["events"] or "[]")
+            if event not in events and "*" not in events:
+                continue
+            body = json.dumps({"event": event, "workspace_id": workspace_id, "data": payload, "timestamp": ts()}).encode()
+            headers = {"Content-Type":"application/json","X-PT-Event":event,"X-PT-Delivery":secrets.token_hex(8)}
+            if hook["secret"]:
+                sig = _hmac.new(hook["secret"].encode(), body, _hashlib.sha256).hexdigest()
+                headers["X-PT-Signature"] = f"sha256={sig}"
+            req = urllib.request.Request(hook["url"], data=body, headers=headers, method="POST")
+            status_code, resp_text = 0, ""
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    status_code = r.status
+                    resp_text   = r.read(500).decode(errors="replace")
+            except Exception as e:
+                resp_text = str(e)
+            log_id = secrets.token_hex(8)
+            _raw_pg("INSERT INTO webhook_logs VALUES (?,?,?,?,?,?)",
+                    (log_id, hook["id"], event, status_code, resp_text[:500], ts()))
+            fail_inc = "" if 200 <= status_code < 300 else ", fail_count=fail_count+1"
+            _raw_pg(f"UPDATE webhooks SET last_triggered=? {fail_inc} WHERE id=?", (ts(), hook["id"]))
+    except Exception as e:
+        print(f"Webhook fire error: {e}")
+
+@app.route("/api/webhooks", methods=["GET"])
+@login_required
+def list_webhooks():
+    db   = get_db()
+    rows = db.execute("SELECT id,name,url,events,enabled,last_triggered,fail_count,created FROM webhooks WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/webhooks", methods=["POST"])
+@login_required
+def create_webhook():
+    d      = request.get_json(force=True)
+    url    = (d.get("url","") or "").strip()
+    name   = (d.get("name","") or "Webhook").strip()[:80]
+    events = d.get("events", ["*"])
+    secret = secrets.token_hex(16)
+    if not url.startswith("http"):
+        return jsonify(error="Valid URL required"), 400
+    wh_id = secrets.token_hex(8)
+    _raw_pg("INSERT INTO webhooks VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (wh_id, wid(), name, url, json.dumps(events), secret, 1, "", 0, ts()))
+    _log_audit("webhook_created", session["user_id"], wh_id)
+    return jsonify(id=wh_id, secret=secret, name=name, url=url, events=events, created=ts())
+
+@app.route("/api/webhooks/<wh_id>", methods=["PUT"])
+@login_required
+def update_webhook(wh_id):
+    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    d = request.get_json(force=True)
+    _raw_pg("UPDATE webhooks SET name=?,url=?,events=?,enabled=? WHERE id=?",
+            (d.get("name","Webhook"), d.get("url",""), json.dumps(d.get("events",["*"])), int(d.get("enabled",1)), wh_id))
+    return jsonify(ok=True)
+
+@app.route("/api/webhooks/<wh_id>", methods=["DELETE"])
+@login_required
+def delete_webhook(wh_id):
+    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    _raw_pg("DELETE FROM webhooks WHERE id=?", (wh_id,))
+    _raw_pg("DELETE FROM webhook_logs WHERE webhook_id=?", (wh_id,))
+    return jsonify(ok=True)
+
+@app.route("/api/webhooks/<wh_id>/logs", methods=["GET"])
+@login_required
+def webhook_logs(wh_id):
+    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    rows = get_db().execute("SELECT * FROM webhook_logs WHERE webhook_id=? ORDER BY created DESC LIMIT 50", (wh_id,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/webhooks/<wh_id>/test", methods=["POST"])
+@login_required
+def test_webhook(wh_id):
+    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    _fire_webhooks(wid(), "ping", {"message":"Test delivery from Project Tracker"})
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════
+#  CUSTOM FIELDS
+# ═══════════════════════════════════════════════════════════════
+@app.route("/api/custom-fields", methods=["GET"])
+@login_required
+def list_custom_fields():
+    entity = request.args.get("entity","task")
+    db  = get_db()
+    rows = db.execute("SELECT * FROM custom_fields WHERE workspace_id=? AND entity_type=? ORDER BY created", (wid(), entity)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/custom-fields", methods=["POST"])
+@login_required
+def create_custom_field():
+    d = request.get_json(force=True)
+    name = (d.get("name","") or "").strip()[:60]
+    ftype = d.get("field_type","text")
+    if ftype not in ("text","number","date","checkbox","dropdown","url"):
+        return jsonify(error="Invalid field type"), 400
+    if not name:
+        return jsonify(error="Name required"), 400
+    fid = secrets.token_hex(6)
+    _raw_pg("INSERT INTO custom_fields VALUES (?,?,?,?,?,?,?,?)",
+            (fid, wid(), d.get("entity_type","task"), name, ftype,
+             json.dumps(d.get("options",[])), int(d.get("required",0)), ts()))
+    return jsonify(id=fid, name=name, field_type=ftype)
+
+@app.route("/api/custom-fields/<fid>", methods=["DELETE"])
+@login_required
+def delete_custom_field(fid):
+    _raw_pg("DELETE FROM custom_fields WHERE id=? AND workspace_id=?", (fid, wid()))
+    _raw_pg("DELETE FROM custom_field_values WHERE field_id=? AND workspace_id=?", (fid, wid()))
+    return jsonify(ok=True)
+
+@app.route("/api/custom-field-values/<entity_id>", methods=["GET"])
+@login_required
+def get_field_values(entity_id):
+    db   = get_db()
+    rows = db.execute("SELECT field_id, value FROM custom_field_values WHERE entity_id=? AND workspace_id=?", (entity_id, wid())).fetchall()
+    return jsonify({r["field_id"]: r["value"] for r in rows})
+
+@app.route("/api/custom-field-values/<entity_id>", methods=["POST"])
+@login_required
+def set_field_values(entity_id):
+    d   = request.get_json(force=True)
+    now = ts()
+    for fid, val in d.items():
+        existing = get_db().execute("SELECT id FROM custom_field_values WHERE field_id=? AND entity_id=? AND workspace_id=?", (fid, entity_id, wid())).fetchone()
+        if existing:
+            _raw_pg("UPDATE custom_field_values SET value=?,updated=? WHERE id=?", (str(val), now, existing["id"]))
+        else:
+            _raw_pg("INSERT INTO custom_field_values VALUES (?,?,?,?,?,?,?)",
+                    (secrets.token_hex(6), wid(), fid, entity_id, str(val), now, now))
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════
+#  TIME TRACKING
+# ═══════════════════════════════════════════════════════════════
+@app.route("/api/time-entries", methods=["GET"])
+@login_required
+def list_time_entries():
+    task_id = request.args.get("task_id","")
+    user_filter = request.args.get("user_id","")
+    since = request.args.get("since","")
+    db   = get_db()
+    sql  = "SELECT te.*, u.name as user_name FROM time_entries te LEFT JOIN users u ON te.user_id=u.id WHERE te.workspace_id=?"
+    params = [wid()]
+    if task_id:
+        sql += " AND te.task_id=?"; params.append(task_id)
+    if user_filter:
+        sql += " AND te.user_id=?"; params.append(user_filter)
+    if since:
+        sql += " AND te.date>=?"; params.append(since)
+    sql += " ORDER BY te.date DESC, te.created DESC LIMIT 500"
+    rows = db.execute(sql, params).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/time-entries", methods=["POST"])
+@login_required
+def create_time_entry():
+    d   = request.get_json(force=True)
+    tid = secrets.token_hex(6)
+    minutes = max(1, int(d.get("minutes", 0) or 0))
+    task_id = d.get("task_id","")
+    _raw_pg("INSERT INTO time_entries VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (tid, wid(), task_id, session["user_id"],
+             d.get("description","")[:200], minutes, int(d.get("billable",1)),
+             d.get("date", now_ist().strftime("%Y-%m-%d")), ts(), ts()))
+    if task_id:
+        _fire_webhooks(wid(), "time.logged", {"task_id":task_id,"minutes":minutes})
+    return jsonify(id=tid, minutes=minutes, created=True), 201
+
+@app.route("/api/time-entries/<eid>", methods=["PUT"])
+@login_required
+def update_time_entry(eid):
+    row = get_db().execute("SELECT id FROM time_entries WHERE id=? AND workspace_id=?", (eid, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    d = request.get_json(force=True)
+    _raw_pg("UPDATE time_entries SET description=?,minutes=?,billable=?,date=?,updated=? WHERE id=?",
+            (d.get("description",""), max(1,int(d.get("minutes",1))), int(d.get("billable",1)), d.get("date",""), ts(), eid))
+    return jsonify(ok=True)
+
+@app.route("/api/time-entries/<eid>", methods=["DELETE"])
+@login_required
+def delete_time_entry(eid):
+    row = get_db().execute("SELECT id FROM time_entries WHERE id=? AND workspace_id=?", (eid, wid())).fetchone()
+    if not row:
+        return jsonify(error="Not found"), 404
+    _raw_pg("DELETE FROM time_entries WHERE id=?", (eid,))
+    return jsonify(ok=True)
+
+@app.route("/api/time-entries/summary", methods=["GET"])
+@login_required
+def time_summary():
+    since = request.args.get("since", now_ist().replace(day=1).strftime("%Y-%m-%d"))
+    db    = get_db()
+    rows  = db.execute(
+        "SELECT te.user_id, u.name, SUM(te.minutes) as total_min, SUM(CASE WHEN te.billable=1 THEN te.minutes ELSE 0 END) as billable_min, COUNT(*) as entries FROM time_entries te LEFT JOIN users u ON te.user_id=u.id WHERE te.workspace_id=? AND te.date>=? GROUP BY te.user_id, u.name ORDER BY total_min DESC",
+        (wid(), since)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+# ═══════════════════════════════════════════════════════════════
+#  SLA TRACKING FOR TICKETS
+# ═══════════════════════════════════════════════════════════════
+SLA_HOURS = {"critical":4,"high":8,"medium":24,"low":72}
+
+def _set_sla_due(ticket_id, priority, created):
+    hours = SLA_HOURS.get(priority, 24)
+    try:
+        created_dt = datetime.fromisoformat(created)
+    except Exception:
+        created_dt = datetime.now()
+    due = (created_dt + timedelta(hours=hours)).isoformat()
+    _raw_pg("UPDATE tickets SET sla_hours=?, sla_due_at=? WHERE id=?", (hours, due, ticket_id))
+
+@app.route("/api/tickets/sla-report", methods=["GET"])
+@login_required
+def sla_report():
+    db  = get_db()
+    now = ts()
+    rows = db.execute(
+        "SELECT t.*, u.name as assignee_name FROM tickets t LEFT JOIN users u ON t.assignee=u.id WHERE t.workspace_id=? ORDER BY t.created DESC LIMIT 200",
+        (wid(),)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        sla_due = r["sla_due_at"] or ""
+        if sla_due and r["status"] not in ("resolved","closed"):
+            d["sla_breached"]   = sla_due < now
+            d["sla_remaining_min"] = max(0, int((datetime.fromisoformat(sla_due) - datetime.now()).total_seconds() / 60)) if sla_due > now else 0
+        else:
+            d["sla_breached"]    = False
+            d["sla_remaining_min"] = None
+        result.append(d)
+    return jsonify(result)
+
+@app.route("/api/tickets/sla-stats", methods=["GET"])
+@login_required
+def sla_stats():
+    db  = get_db()
+    now = ts()
+    total   = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=?", (wid(),)).fetchone()["c"]
+    breached = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=? AND sla_due_at!='' AND sla_due_at<? AND status NOT IN ('resolved','closed')", (wid(), now)).fetchone()["c"]
+    resolved = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=? AND status IN ('resolved','closed')", (wid(),)).fetchone()["c"]
+    avg_row = db.execute("SELECT AVG(CAST((JULIANDAY(resolved_at) - JULIANDAY(created)) * 24 * 60 AS INTEGER)) as avg_min FROM tickets WHERE workspace_id=? AND resolved_at!=''", (wid(),)).fetchone()
+    return jsonify(total=total, breached=breached, resolved=resolved, breach_rate=round(breached/max(total,1)*100,1), avg_resolve_minutes=int(avg_row["avg_min"] or 0))
+
+# ═══════════════════════════════════════════════════════════════
+#  ONBOARDING
+# ═══════════════════════════════════════════════════════════════
+@app.route("/api/onboarding/status", methods=["GET"])
+@login_required
+def onboarding_status():
+    db  = get_db()
+    ws  = db.execute("SELECT onboarding_done, onboarding_step FROM workspaces WHERE id=?", (wid(),)).fetchone()
+    user = db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
+    members  = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
+    projects = db.execute("SELECT COUNT(*) as c FROM projects WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
+    has_ai   = bool(db.execute("SELECT ai_key FROM workspaces WHERE id=?", (wid(),)).fetchone() or {})
+    steps = [
+        {"id":"workspace",   "label":"Create your workspace",    "done": True},
+        {"id":"profile",     "label":"Set up your profile",      "done": bool(user and user["name"])},
+        {"id":"invite",      "label":"Invite a team member",     "done": (members["c"] if members else 0) > 1},
+        {"id":"project",     "label":"Create your first project","done": (projects["c"] if projects else 0) > 0},
+        {"id":"ai_key",      "label":"Connect AI assistant",     "done": False},
+    ]
+    done_count = sum(1 for s in steps if s["done"])
+    return jsonify(
+        onboarding_done=bool(ws and ws["onboarding_done"]),
+        step=ws["onboarding_step"] if ws else 0,
+        steps=steps,
+        progress=round(done_count/len(steps)*100),
+        complete=done_count==len(steps),
+    )
+
+@app.route("/api/onboarding/complete", methods=["POST"])
+@login_required
+def complete_onboarding():
+    _raw_pg("UPDATE workspaces SET onboarding_done=1 WHERE id=?", (wid(),))
+    return jsonify(ok=True)
+
+@app.route("/api/onboarding/step", methods=["POST"])
+@login_required
+def update_onboarding_step():
+    d = request.get_json(force=True)
+    _raw_pg("UPDATE workspaces SET onboarding_step=? WHERE id=?", (d.get("step",0), wid()))
+    return jsonify(ok=True)
+
+# ═══════════════════════════════════════════════════════════════
+#  ENHANCED AUDIT LOG
+# ═══════════════════════════════════════════════════════════════
+def _log_audit(action, user_id, target="", old_val="", new_val="", entity_type="", entity_id=""):
+    try:
+        _raw_pg("INSERT INTO audit_log(id,workspace_id,user_id,action,target,created,ip,entity_type,entity_id,old_value,new_value) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (secrets.token_hex(8), wid(), user_id, action, target, ts(),
+                 request.remote_addr or "", entity_type, entity_id, str(old_val)[:500], str(new_val)[:500]))
+    except Exception:
+        pass
+
+@app.route("/api/audit", methods=["GET"])
+@login_required
+def full_audit_log():
+    role = get_user_role()
+    if role not in ("Admin","Owner"):
+        return jsonify(error="Admins only"), 403
+    db     = get_db()
+    page   = max(1, int(request.args.get("page",1)))
+    limit  = 50
+    offset = (page-1)*limit
+    action_filter = request.args.get("action","")
+    user_filter   = request.args.get("user_id","")
+    entity_filter = request.args.get("entity_type","")
+    since  = request.args.get("since","")
+    sql    = "SELECT a.*, u.name as user_name FROM audit_log a LEFT JOIN users u ON a.user_id=u.id WHERE a.workspace_id=?"
+    params = [wid()]
+    if action_filter:
+        sql += " AND a.action LIKE ?"; params.append(f"%{action_filter}%")
+    if user_filter:
+        sql += " AND a.user_id=?"; params.append(user_filter)
+    if entity_filter:
+        sql += " AND a.entity_type=?"; params.append(entity_filter)
+    if since:
+        sql += " AND a.created>=?"; params.append(since)
+    sql += f" ORDER BY a.created DESC LIMIT {limit} OFFSET {offset}"
+    rows = db.execute(sql, params).fetchall()
+    total = db.execute("SELECT COUNT(*) as c FROM audit_log WHERE workspace_id=?", (wid(),)).fetchone()["c"]
+    return jsonify(rows=[dict(r) for r in rows], total=total, page=page, pages=max(1, -(-total//limit)))
+
+# ═══════════════════════════════════════════════════════════════
+#  REAL-TIME SERVER-SENT EVENTS
+# ═══════════════════════════════════════════════════════════════
+import queue as _queue
+_sse_clients: dict[str, list] = {}
+_sse_lock = threading.Lock()
+
+def _sse_publish(workspace_id, event_type, data):
+    with _sse_lock:
+        queues = _sse_clients.get(workspace_id, [])
+        dead   = []
+        for q in queues:
+            try:
+                q.put_nowait({"type": event_type, "data": data})
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            queues.remove(q)
+
+@app.route("/api/stream")
+@login_required
+def sse_stream():
+    ws_id = wid()
+    q = _queue.Queue(maxsize=50)
+    with _sse_lock:
+        _sse_clients.setdefault(ws_id, []).append(q)
+    def generate():
+        yield "data: {\"type\":\"connected\"}\n\n"
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=25)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                except _queue.Empty:
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_lock:
+                clients = _sse_clients.get(ws_id, [])
+                if q in clients:
+                    clients.remove(q)
+    return app.response_class(generate(), mimetype="text/event-stream",
+                               headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+# ═══════════════════════════════════════════════════════════════
+#  ONBOARDING PAGE ROUTE
+# ═══════════════════════════════════════════════════════════════
+@app.route("/onboarding")
+def onboarding_page():
+    if "user_id" not in session:
+        return redirect("/?action=login")
+    return send_from_directory(".", "onboarding.html")
+
 if __name__=="__main__":
-    print("\n⚡ VEWIT v4.0 — Multi-Tenant | AI | Workspaces")
+    print("\n⚡ Project Tracker v4.0 — Multi-Tenant | AI | Workspaces")
     print("="*54)
     print("  Initializing database...")
     init_db()

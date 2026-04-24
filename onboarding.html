@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Get Started — Project Tracker</title>
+<style>
+:root{--bg:#0d0d14;--bg2:#12121c;--bg3:#1a1a27;--b1:rgba(255,255,255,.08);--b2:rgba(255,255,255,.16);--tx:#f0f0ff;--tx2:#a0a0bc;--tx3:#606080;--blue:#5a8cff;--green:#34d399;--r:16px;--font:'Inter',system-ui,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:var(--font);min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
+.card{background:var(--bg2);border:1px solid var(--b1);border-radius:24px;width:100%;max-width:560px;padding:40px;position:relative}
+.logo{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:-.5px;margin-bottom:32px;display:flex;align-items:center;gap:8px}
+.logo span{background:var(--blue);color:#fff;border-radius:8px;padding:3px 8px;font-size:13px}
+.step-track{display:flex;gap:6px;margin-bottom:32px}
+.step-dot{flex:1;height:4px;border-radius:2px;background:var(--b1);transition:background .3s}
+.step-dot.done{background:var(--green)}
+.step-dot.active{background:var(--blue)}
+h1{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:8px}
+.sub{font-size:15px;color:var(--tx2);margin-bottom:32px;line-height:1.6}
+.field{margin-bottom:20px}
+.field label{display:block;font-size:13px;color:var(--tx2);margin-bottom:6px;font-weight:500}
+.field input,.field select,.field textarea{width:100%;background:var(--bg3);border:1px solid var(--b1);border-radius:12px;padding:12px 16px;font-size:15px;color:var(--tx);font-family:var(--font);outline:none;transition:border .2s}
+.field input:focus,.field select:focus{border-color:var(--blue)}
+.field textarea{resize:vertical;min-height:80px}
+.btn{width:100%;background:var(--blue);color:#fff;border:none;border-radius:12px;padding:14px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
+.btn:hover{opacity:.85}
+.btn-skip{width:100%;background:none;border:1px solid var(--b1);border-radius:12px;padding:12px;font-size:14px;color:var(--tx2);cursor:pointer;margin-top:10px;transition:border .2s}
+.btn-skip:hover{border-color:var(--b2);color:var(--tx)}
+.step-panel{display:none}
+.step-panel.active{display:block}
+.check-list{list-style:none;display:flex;flex-direction:column;gap:12px;margin-bottom:24px}
+.check-list li{display:flex;align-items:center;gap:12px;font-size:15px;color:var(--tx2)}
+.check-list li.done{color:var(--tx)}
+.check-icon{width:24px;height:24px;border-radius:50%;border:1.5px solid var(--b2);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+.check-icon.done{background:var(--green);border-color:var(--green);color:#fff}
+.invite-code-box{background:var(--bg3);border:1px solid var(--b1);border-radius:12px;padding:16px;display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.invite-code{font-size:24px;font-weight:700;letter-spacing:4px;color:var(--blue)}
+.copy-btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;font-weight:600}
+.progress-ring{width:80px;height:80px;margin:0 auto 24px;display:block}
+.emoji-big{font-size:48px;margin-bottom:16px;display:block;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">Project Tracker <span>✦ Setup</span></div>
+
+  <div class="step-track" id="stepTrack">
+    <div class="step-dot active" id="dot0"></div>
+    <div class="step-dot" id="dot1"></div>
+    <div class="step-dot" id="dot2"></div>
+    <div class="step-dot" id="dot3"></div>
+    <div class="step-dot" id="dot4"></div>
+  </div>
+
+  <!-- Step 0: Welcome -->
+  <div class="step-panel active" id="panel0">
+    <h1>Welcome! Let's get you set up 👋</h1>
+    <p class="sub">This takes about 2 minutes. We'll walk you through setting up your workspace, inviting your team, and connecting the AI assistant.</p>
+    <ul class="check-list">
+      <li><div class="check-icon done">✓</div>Account created</li>
+      <li><div class="check-icon">2</div>Set up your workspace</li>
+      <li><div class="check-icon">3</div>Invite your team</li>
+      <li><div class="check-icon">4</div>Connect AI assistant</li>
+      <li><div class="check-icon">5</div>Create first project</li>
+    </ul>
+    <button class="btn" onclick="goStep(1)">Let's go →</button>
+  </div>
+
+  <!-- Step 1: Workspace details -->
+  <div class="step-panel" id="panel1">
+    <h1>Name your workspace</h1>
+    <p class="sub">This is how your team will identify your space.</p>
+    <div class="field"><label>Workspace name</label><input id="wsName" type="text" placeholder="Acme Inc." autocomplete="off"></div>
+    <div class="field"><label>Your role</label>
+      <select id="wsRole">
+        <option value="Engineering">Engineering</option>
+        <option value="Product">Product</option>
+        <option value="Design">Design</option>
+        <option value="Marketing">Marketing</option>
+        <option value="Operations">Operations</option>
+        <option value="Other">Other</option>
+      </select>
+    </div>
+    <button class="btn" onclick="saveWorkspace()">Continue →</button>
+    <button class="btn-skip" onclick="goStep(2)">Skip for now</button>
+  </div>
+
+  <!-- Step 2: Invite team -->
+  <div class="step-panel" id="panel2">
+    <h1>Invite your team</h1>
+    <p class="sub">Share your invite code. Anyone with this code can join your workspace.</p>
+    <div class="invite-code-box">
+      <span class="invite-code" id="inviteCode">LOADING</span>
+      <button class="copy-btn" onclick="copyCode()">Copy</button>
+    </div>
+    <p style="font-size:13px;color:var(--tx3);margin-bottom:24px">Or send an email invite directly:</p>
+    <div class="field"><label>Email addresses (comma-separated)</label><input id="inviteEmails" type="text" placeholder="john@company.com, jane@company.com"></div>
+    <button class="btn" onclick="sendInvites()">Send invites →</button>
+    <button class="btn-skip" onclick="goStep(3)">Skip, I'll invite later</button>
+  </div>
+
+  <!-- Step 3: AI key -->
+  <div class="step-panel" id="panel3">
+    <h1>Connect AI assistant</h1>
+    <p class="sub">Project Tracker uses Claude AI (by Anthropic) for intelligent task management, standup reports, and more. You bring your own API key.</p>
+    <div class="field">
+      <label>Anthropic API key</label>
+      <input id="aiKey" type="password" placeholder="sk-ant-api03-...">
+    </div>
+    <p style="font-size:12px;color:var(--tx3);margin-bottom:20px">Get your key at <a href="https://console.anthropic.com" target="_blank" style="color:var(--blue)">console.anthropic.com</a> — free tier available. Your key is encrypted at rest.</p>
+    <button class="btn" onclick="saveAiKey()">Save & continue →</button>
+    <button class="btn-skip" onclick="goStep(4)">Skip, connect later in Settings</button>
+  </div>
+
+  <!-- Step 4: First project -->
+  <div class="step-panel" id="panel4">
+    <h1>Create your first project</h1>
+    <p class="sub">Projects are where your work lives. Create one now to get started.</p>
+    <div class="field"><label>Project name</label><input id="projName" type="text" placeholder="e.g. Website Redesign"></div>
+    <div class="field"><label>Description (optional)</label><textarea id="projDesc" placeholder="What are you building?"></textarea></div>
+    <button class="btn" onclick="createProject()">Create project →</button>
+    <button class="btn-skip" onclick="finishOnboarding()">Skip, I'll create one later</button>
+  </div>
+
+  <!-- Step 5: Done -->
+  <div class="step-panel" id="panel5">
+    <span class="emoji-big">🎉</span>
+    <h1 style="text-align:center">You're all set!</h1>
+    <p class="sub" style="text-align:center">Your workspace is ready. Head to your dashboard to start managing projects with your team.</p>
+    <button class="btn" onclick="window.location.href='/app'">Go to Dashboard →</button>
+  </div>
+</div>
+
+<script>
+let inviteCode = "";
+
+async function init() {
+  try {
+    const r = await fetch("/api/onboarding/status");
+    const d = await r.json();
+    if (d.onboarding_done) { window.location.href = "/app"; return; }
+    const ws = await (await fetch("/api/workspace")).json();
+    inviteCode = ws.invite_code || ws.invite || "";
+    document.getElementById("inviteCode").textContent = inviteCode;
+    if (ws.name) document.getElementById("wsName").value = ws.name;
+  } catch(e) {
+    document.getElementById("inviteCode").textContent = "------";
+  }
+}
+
+function goStep(n) {
+  document.querySelectorAll(".step-panel").forEach((p,i)=>{
+    p.classList.toggle("active", i===n);
+  });
+  document.querySelectorAll(".step-dot").forEach((d,i)=>{
+    d.classList.remove("active","done");
+    if(i < n) d.classList.add("done");
+    else if(i === n) d.classList.add("active");
+  });
+  fetch("/api/onboarding/step",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({step:n})});
+}
+
+async function saveWorkspace() {
+  const name = document.getElementById("wsName").value.trim();
+  if (!name) return goStep(2);
+  await fetch("/api/workspace", {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
+  goStep(2);
+}
+
+function copyCode() {
+  navigator.clipboard.writeText(inviteCode).then(()=>{
+    const btn = document.querySelector(".copy-btn");
+    btn.textContent = "Copied!";
+    setTimeout(()=>btn.textContent="Copy",2000);
+  });
+}
+
+async function sendInvites() {
+  const emails = document.getElementById("inviteEmails").value.trim();
+  if (!emails) return goStep(3);
+  // Invite via workspace invite code share
+  goStep(3);
+}
+
+async function saveAiKey() {
+  const key = document.getElementById("aiKey").value.trim();
+  if (!key) return goStep(4);
+  await fetch("/api/workspace/ai-key", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ai_key:key})});
+  goStep(4);
+}
+
+async function createProject() {
+  const name = document.getElementById("projName").value.trim();
+  if (!name) return finishOnboarding();
+  const desc = document.getElementById("projDesc").value.trim();
+  await fetch("/api/projects", {method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name, description:desc, color:"#5a8cff"})});
+  finishOnboarding();
+}
+
+async function finishOnboarding() {
+  await fetch("/api/onboarding/complete", {method:"POST"});
+  goStep(5);
+}
+
+init();
+</script>
+</body>
+</html>

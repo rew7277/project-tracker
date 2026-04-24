@@ -26,7 +26,7 @@ function AppLoader(){
           <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" strokeWidth="3.5" strokeLinecap="round"/>
         </svg>
       </div>
-      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>VEWIT</div>
+      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>Project Tracker</div>
       <div style=${{fontSize:13,color:'rgba(174,174,178,0.6)',letterSpacing:'0.05em',marginBottom:36}}>AI-Powered Workspace</div>
       <div style=${{width:180,height:2,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',margin:'0 auto'}}>
         <div style=${{height:'100%',borderRadius:2,background:'linear-gradient(90deg,#5a8cff,#a855f7,#ec4899)',animation:'vwBoot-bar 1.8s cubic-bezier(0.4,0,0.2,1) infinite'}}></div>
@@ -387,7 +387,7 @@ function AuthScreen({onLogin}){
       if(regMode==='join'&&!inviteCode){setErr('Enter the invite code.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       const r=await api.post('/api/auth/register',{mode:regMode,workspace_name:wsName,invite_code:inviteCode,name,email,password:pw,role});
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
-      else{setSuccessMsg('Welcome to VEWIT, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
+      else{setSuccessMsg('Welcome to Project Tracker, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
     }
   };
 
@@ -423,7 +423,7 @@ function AuthScreen({onLogin}){
             <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
           </svg>
         </div>
-        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>VEWIT</span>
+        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>Project Tracker</span>
       </div>
 
       <!-- Center hero -->
@@ -562,7 +562,7 @@ function AuthScreen({onLogin}){
           <div style=${{width:30,height:30,borderRadius:9,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 3px 14px rgba(90,140,255,0.45)'}}>
             <svg width="17" height="17" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="8.5" fill="white"/><circle cx="32" cy="11" r="5.5" fill="white" opacity=".9"/><circle cx="51" cy="43" r="5.5" fill="white" opacity=".9"/><circle cx="13" cy="43" r="5.5" fill="white" opacity=".9"/><line x1="32" y1="16.5" x2="32" y2="23.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="46" y1="40" x2="40.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/></svg>
           </div>
-          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>VEWIT</span>
+          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>Project Tracker</span>
         </div>
 
         <!-- Headline -->
@@ -570,7 +570,7 @@ function AuthScreen({onLogin}){
           ${tab==='login'?'Sign in.':'Get started.'}
         </h1>
         <p style=${{fontSize:14,color:'rgba(175,170,210,0.5)',marginBottom:28,lineHeight:1.6}}>
-          ${tab==='login'?'Access your VEWIT workspace.':'Create your team workspace.'}
+          ${tab==='login'?'Access your Project Tracker workspace.':'Create your team workspace.'}
         </p>
 
         <!-- Tab switcher — Apple segmented control -->
@@ -656,19 +656,19 @@ function AuthScreen({onLogin}){
         <!-- Switch tab -->
         <p style=${{fontSize:13.5,color:'rgba(175,170,210,0.4)',textAlign:'center',marginTop:22,lineHeight:1.7}}>
           ${tab==='login'
-            ?html`New to VEWIT? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
+            ?html`New to Project Tracker? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
             :html`Already have an account? <button class="ap-link" onClick=${()=>setTab('login')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Sign in</button>`}
         </p>
 
         <!-- Help / legal -->
         <div style=${{marginTop:28,paddingTop:20,borderTop:'1px solid rgba(255,255,255,0.05)',display:'flex',justifyContent:'center',gap:20,flexWrap:'wrap'}}>
-          <a href="mailto:support@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:support@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(90,140,255,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🛟 support@vewit.in
+            🛟 support@project-tracker.in
           </a>
-          <a href="mailto:ceo@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:ceo@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(168,85,247,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🤝 ceo@vewit.in
+            🤝 ceo@project-tracker.in
           </a>
         </div>
 
@@ -1078,7 +1078,7 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
           <svg width="14" height="14" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="9" fill="white"/><circle cx="32" cy="11" r="6" fill="white" opacity=".9"/><circle cx="51" cy="43" r="6" fill="white" opacity=".9"/><circle cx="13" cy="43" r="6" fill="white" opacity=".9"/><line x1="32" y1="17" x2="32" y2="23" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="46" y1="40" x2="40" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="18" y1="40" x2="24" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/></svg>
         </div>
         ${!col?html`<div style=${{flex:1,minWidth:0}}>
-          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'VEWIT'}</div>
+          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'Project Tracker'}</div>
           ${activeTeam?html`<div style=${{fontSize:10,color:'var(--ac)',fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:4}}>
             ${!isAdminManager?html`<span style=${{color:'rgba(255,255,255,.3)',fontWeight:400}}>My Team</span>`:null}
             ${activeTeam.name}
@@ -1996,14 +1996,14 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
     try{
       const slug=detail.id;
       history.pushState(null,'','/projects/'+slug);
-      document.title='VEWIT — '+detail.name+' | Projects';
+      document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
       if(window.location.pathname.startsWith('/projects/')){
         history.pushState(null,'','/projects');
-        document.title='VEWIT — Projects | AI-Powered Team Collaboration';
+        document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
   }},[detail]);
@@ -2416,7 +2416,7 @@ function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,in
     const csv='data:text/csv;charset=utf-8,'+[headers,...rows].map(r=>r.join(',')).join('\n');
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
-    a.setAttribute('download','vewit_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
+    a.setAttribute('download','project-tracker_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -4776,7 +4776,7 @@ function WorkspaceSettings({cu,onReload}){
               <div>
                 <div style=${{fontSize:13,fontWeight:700,color:planColors[plan]||'var(--tx)'}}>${planLabels[plan]||plan}</div>
                 <div style=${{fontSize:11,color:'var(--tx3)',marginTop:2}}>
-                  ${limit?html\`Member limit: \${limit} · Contact ceo@vewit.in to upgrade\`:html\`Unlimited members\`}
+                  ${limit?html\`Member limit: \${limit} · Contact ceo@project-tracker.in to upgrade\`:html\`Unlimited members\`}
                 </div>
               </div>
               <div style=${{fontSize:22,padding:'6px 14px',background:plan==='team'?'rgba(90,140,255,.12)':plan==='enterprise'?'rgba(168,85,247,.12)':'var(--sf2)',borderRadius:8,fontWeight:700,color:planColors[plan]||'var(--tx3)',border:'1px solid var(--bd)'}}>
@@ -4785,7 +4785,7 @@ function WorkspaceSettings({cu,onReload}){
             </div>
             ${plan==='starter'?html\`
               <div style=${{fontSize:12,padding:'9px 12px',background:'rgba(90,140,255,.06)',borderRadius:8,border:'1px solid rgba(90,140,255,.15)',color:'var(--tx2)'}}>
-                🚀 <b>Upgrade to Team</b> — Get up to 30 members, analytics, custom SMTP & more for ₹999/mo. Email <a href="mailto:ceo@vewit.in" style=${{color:'var(--ac)'}}>ceo@vewit.in</a>
+                🚀 <b>Upgrade to Team</b> — Get up to 30 members, analytics, custom SMTP & more for ₹999/mo. Email <a href="mailto:ceo@project-tracker.in" style=${{color:'var(--ac)'}}>ceo@project-tracker.in</a>
               </div>
             \`:null}
           \`;
@@ -5005,7 +5005,7 @@ Your workspace has **${safe(projects).length} projects**, **${safe(tasks).length
     const taskCtx=safe(tasks).filter(t=>t.stage!=='completed').slice(0,20).map(t=>`- [${t.id}] ${t.title} | ${t.stage} | ${t.priority}`).join('\n');
     const teamCtx=safe(users).map(u=>`- ${u.name} (${u.role})`).join('\n');
 
-    const systemPrompt=`You are an expert technical documentation assistant for VEWIT, an AI-powered project management platform.
+    const systemPrompt=`You are an expert technical documentation assistant for Project Tracker, an AI-powered project management platform.
 
 WORKSPACE CONTEXT:
 Projects (${safe(projects).length} total):
@@ -5530,7 +5530,7 @@ function updateBadge(count){
       }
       const links=document.querySelectorAll("link[rel*='icon']");
       links.forEach(l=>{l.href=canvas.toDataURL();});
-      document.title=count>0?'('+count+') VEWIT':'VEWIT';
+      document.title=count>0?'('+count+') Project Tracker':'Project Tracker';
     };
     img.src=NOTIF_ICON;
   }catch(e){}
@@ -5542,7 +5542,7 @@ async function requestNotifPermission(){
       const {isPermissionGranted,requestPermission,sendNotification}=window.__TAURI__.notification;
       let ok=await isPermissionGranted();
       if(!ok){const p=await requestPermission();ok=(p==='granted');}
-      if(ok)await sendNotification({title:'VEWIT',body:'Notifications enabled.'});
+      if(ok)await sendNotification({title:'Project Tracker',body:'Notifications enabled.'});
       return;
     }catch(e){}
   }
@@ -5566,7 +5566,7 @@ async function requestNotifPermission(){
           }
         }catch(e){}
       }
-      new Notification('VEWIT',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
+      new Notification('Project Tracker',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
     }
   }
 }
@@ -6193,7 +6193,7 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
     const lbl=filterMode==='today'?localToday():filterMode==='yesterday'?'yesterday':filterMode==='week'?'thisweek':filterMode==='month'?filterMonth:'custom';
-    a.setAttribute('download','vewit_timelogs_'+lbl+'.csv');
+    a.setAttribute('download','project-tracker_timelogs_'+lbl+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -6542,8 +6542,8 @@ function App(){
     try{
       const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
-      if(p&&VIEW_T[p]) document.title='VEWIT — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
-      else document.title='VEWIT — AI-Powered Team Collaboration Platform';
+      if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
+      else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
     }catch(e){}
   },[]);
   const [view,setView]=useState(()=>{
@@ -6569,7 +6569,7 @@ function App(){
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
         history.pushState(null,'','/'+base);
-        document.title='VEWIT — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
+        document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
   },[]);
@@ -6819,7 +6819,7 @@ function App(){
         brandNew.forEach(n=>{
           if(n.type==='dm')return; // DMs handled by separate poll
           if(n.type==='call') return;
-          const title=NTITLES[n.type]||'VEWIT';
+          const title=NTITLES[n.type]||'Project Tracker';
           const nav=NNAV[n.type]||'notifs';
           addToast(n.type,title,n.content||'');
           showBrowserNotif(title,n.content||'',()=>{
@@ -7191,4 +7191,47 @@ ReactDOM.createRoot(document.getElementById('root')).render(html`<${ErrorBoundar
 if(window._vwHideBoot)window._vwHideBoot();
 };
 waitForLibs(window._pfStartApp);
+})();
+// ═══════════════════════════════════════════════════════════
+// REAL-TIME SSE CLIENT — auto-reconnect, event dispatch
+// ═══════════════════════════════════════════════════════════
+(function initSSE(){
+  if(window._ptSSEActive) return;
+  window._ptSSEActive = true;
+  let es, retryTimer, retryDelay = 2000;
+  const MAX_DELAY = 30000;
+
+  function connect(){
+    if(es){ try{es.close()}catch(e){} }
+    es = new EventSource("/api/stream");
+    es.onopen = () => { retryDelay = 2000; console.log("[PT] SSE connected"); };
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if(msg.type === "connected") return;
+        window.dispatchEvent(new CustomEvent("pt:realtime", {detail: msg}));
+        // Trigger a soft refresh on key events
+        if(["task.created","task.updated","task.deleted",
+            "ticket.created","ticket.updated",
+            "comment.added"].includes(msg.type)){
+          window.dispatchEvent(new CustomEvent("pt:refresh"));
+        }
+      } catch(err){}
+    };
+    es.onerror = () => {
+      es.close();
+      retryTimer = setTimeout(()=>{ retryDelay = Math.min(retryDelay*2, MAX_DELAY); connect(); }, retryDelay);
+    };
+  }
+
+  // Only connect when logged in (page has #root)
+  if(document.getElementById("root")){
+    connect();
+  }
+
+  // Show a live indicator dot in the header when connected
+  window.addEventListener("pt:realtime", ()=>{
+    const dot = document.getElementById("pt-live-dot");
+    if(dot){ dot.style.background="#34d399"; dot.title="Live — real-time sync active"; }
+  });
 })();
