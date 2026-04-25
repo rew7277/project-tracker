@@ -1,3 +1,15 @@
+// ── Workspace URL prefix bootstrap ─────────────────────────────────────────
+// Set _pfWsBase immediately from the current URL if it looks ws-scoped.
+// This runs synchronously before React mounts, so _wsPath works from frame 0.
+(function(){
+  try{
+    var p=window.location.pathname.split('/');
+    // ws-scoped pattern: /slug/wsXXX/page  → p[2] starts with 'ws'
+    if(p.length>=3&&p[2]&&p[2].startsWith('ws')){
+      window._pfWsBase='/'+p[1]+'/'+p[2]+'/dashboard';
+    }
+  }catch(e){}
+})();
 const {useState,useEffect,useRef,useCallback,useMemo}=React;
 const RC=Recharts;
 
@@ -6730,17 +6742,30 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
-  // Build ws-scoped path helper
+  // Build ws-scoped path helper — reads prefix from multiple sources for robustness
   const _wsPath=useCallback((page)=>{
     try{
+      // Source 1: window._pfWsBase set synchronously on login / /api/auth/me
+      const base=window._pfWsBase;
+      if(base){
+        const p=base.split('/');
+        // p = ['','fsbl','ws123','dashboard']
+        if(p.length>=3&&p[2]&&p[2].startsWith('ws'))
+          return '/'+p[1]+'/'+p[2]+'/'+page;
+      }
+      // Source 2: current URL is already ws-scoped (e.g. /fsbl/ws123/dashboard)
+      const loc=window.location.pathname.split('/');
+      if(loc.length>=3&&loc[2]&&loc[2].startsWith('ws'))
+        return '/'+loc[1]+'/'+loc[2]+'/'+page;
+      // Source 3: React state cu (may be null on first render)
       const url=cu&&cu.workspace_dashboard_url;
       if(url){
-        // url is like /fsbl/ws123/dashboard — extract prefix
         const parts=url.split('/');
-        if(parts.length>=3) return '/'+parts[1]+'/'+parts[2]+'/'+page;
+        if(parts.length>=3&&parts[2]&&parts[2].startsWith('ws'))
+          return '/'+parts[1]+'/'+parts[2]+'/'+page;
       }
     }catch(e){}
-    return '/'+page; // fallback
+    return '/'+page; // last-resort fallback
   },[cu]);
   const _setView=useCallback((v)=>{
     setView(v);
@@ -6873,6 +6898,13 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
+      // Keep _pfWsBase in sync if workspace slug changes
+      if(ws&&ws.id){
+        try{
+          const _slug=ws.workspace_slug||(ws.name||'workspace').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+          window._pfWsBase='/'+_slug+'/'+ws.id+'/dashboard';
+        }catch(_){}
+      }
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}

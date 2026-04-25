@@ -3738,8 +3738,20 @@ def icon_512():
 @app.route("/")
 def index():
     """Serve the landing page for non-authenticated users."""
-    if "user_id" in session:
-        return serve_app()
+    if "user_id" in session and session.get("workspace_id"):
+        ws_id = session["workspace_id"]
+        try:
+            import re as _re2
+            with get_db() as db:
+                ws_row = db.execute(
+                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
+                ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
+        except Exception:
+            pass
+        return HTML
     action = request.args.get("action", "")
     if action in ("login", "register"):
         return HTML
