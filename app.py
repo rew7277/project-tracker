@@ -601,6 +601,28 @@ def _cache_bust_ws(workspace_id):
             if workspace_id in key:
                 _CACHE.pop(key, None)
 
+
+def _cache_inject_item(workspace_id, table, item_dict):
+    """After a create, inject the new item into existing cache entries
+    so the next poll (background refresh) returns instantly from cache
+    rather than hitting the DB cold. Non-critical — failures are silent."""
+    try:
+        with _CACHE_LOCK:
+            for key, entry in list(_CACHE.items()):
+                if workspace_id not in key:
+                    continue
+                val = entry.get("val", {})
+                if table not in val:
+                    continue
+                if not isinstance(val[table], list):
+                    continue
+                # Only inject if not already present
+                ids = {x.get("id") for x in val[table]}
+                if item_dict.get("id") not in ids:
+                    val[table] = [item_dict] + val[table]
+    except Exception:
+        pass
+
 # Shared DDL connection — reused across all _run_ddl calls to avoid opening
 # 170 separate connections on startup (which caused NO_SOCKET exhaustion).
 _DDL_CONN = None
@@ -2879,6 +2901,7 @@ def create_project():
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
         _cache_bust(wid(), "projects", "notifs")  # targeted bust — faster than _cache_bust_ws
+        _cache_inject_item(wid(), "projects", dict(p))  # warm cache immediately
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
@@ -3050,6 +3073,7 @@ def create_task():
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
         _cache_bust(wid(), "tasks")
+        _cache_inject_item(wid(), "tasks", dict(t))  # warm cache immediately
         return jsonify(dict(t))
 
 

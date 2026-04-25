@@ -301,10 +301,16 @@ body{font-family:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;backgrou
   --grad-subtle:linear-gradient(135deg,rgba(10,132,255,0.12),rgba(191,90,242,0.08));
 }
 
-::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:8px}
 ::-webkit-scrollbar-thumb:hover{background:var(--tx3)}
+/* Kanban board horizontal scrollbar */
+.kanban-scroll::-webkit-scrollbar{height:10px !important}
+.kanban-scroll::-webkit-scrollbar-track{background:rgba(90,94,247,0.07);border-radius:10px;margin:0 8px}
+.kanban-scroll::-webkit-scrollbar-thumb{background:linear-gradient(90deg,#5a5ef7,#a855f7);border-radius:10px;border:2px solid rgba(90,94,247,0.12)}
+.kanban-scroll::-webkit-scrollbar-thumb:hover{background:linear-gradient(90deg,#6366f1,#c026d3)}
+.kanban-scroll{scrollbar-width:thin;scrollbar-color:#5a5ef7 rgba(90,94,247,0.07)}
 .vault-scroll::-webkit-scrollbar{width:8px}
 .vault-scroll::-webkit-scrollbar-track{background:rgba(90,94,247,0.06);border-radius:0;margin:0}
 .vault-scroll::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#5a5ef7,#a855f7);border-radius:4px}
@@ -2827,12 +2833,25 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   };
   const saveTask=async p=>{
     let r;
-    if(p.id&&allTasks.find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
-    else r=await api.post('/api/tasks',{...p,project:project.id});
-    await onReload();
+    if(p.id&&allTasks.find(t=>t.id===p.id)){
+      // UPDATE: optimistic patch
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+      r=await api.put('/api/tasks/'+p.id,p);
+    } else {
+      // CREATE: post then show immediately
+      r=await api.post('/api/tasks',{...p,project:project.id});
+      if(r&&r.id){
+        setData&&setData(prev=>({...prev,tasks:[r,...(prev.tasks||[])]}));
+      }
+    }
+    // Background sync — non-blocking
+    setTimeout(()=>onReload(),1000);
     return r;
   };
-  const delTask=async id=>{await api.del('/api/tasks/'+id);await onReload();};
+  const delTask=async id=>{
+    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
+    api.del('/api/tasks/'+id).then(()=>setTimeout(()=>onReload(),800)).catch(()=>onReload());
+  };
 
   return html`
     <div class="ov" onClick=${e=>e.target===e.currentTarget&&onClose()}>
@@ -3056,9 +3075,11 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       const newProj=await api.post('/api/projects',{name:name.trim(),description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
+      // ✅ Optimistic update: show project instantly, no waiting for full app-data reload
+      setData&&setData(prev=>({...prev,projects:[newProj,...(prev.projects||[])]}));
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Single reload — no delay needed with optimistic UI
-      reload();
+      // Background refresh to sync any server-side computed fields (non-blocking)
+      setTimeout(()=>reload(),1000);
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
 
@@ -3389,17 +3410,25 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   };
   const saveT=async p=>{
     let r;
-    if(p.id&&safe(tasks).find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
-    else r=await api.post('/api/tasks',p);
+    if(p.id&&safe(tasks).find(t=>t.id===p.id)){
+      // UPDATE: optimistic patch immediately
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+      r=await api.put('/api/tasks/'+p.id,p);
+    } else {
+      // CREATE: post then prepend to state instantly
+      r=await api.post('/api/tasks',p);
+      if(r&&r.id){
+        setData&&setData(prev=>({...prev,tasks:[r,...(prev.tasks||[])]}));
+      }
+    }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    if(p.id){
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-    }
-    reload();return r;
+    // Background sync — non-blocking, keeps UI instant
+    setTimeout(()=>reload(),1000);
+    return r;
   };
   const delT=async id=>{
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
@@ -3581,7 +3610,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       </div>
 
       ${mode==='kanban'?html`
-        <div style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px'}}>
+        <div class="kanban-scroll" style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px 20px'}}>
           <div style=${{display:'flex',gap:11,height:'100%',minWidth:'fit-content'}}>
             ${KCOLS.map(st=>{
               const col=filtered.filter(t=>t.stage===st);const si=STAGES[st];
