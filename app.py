@@ -453,9 +453,48 @@ _CACHE_TTL   = 20        # serve fresh data up to 20s
 _CACHE_STALE = 120       # serve stale data up to 120s while refreshing
 _CACHE_LOCK  = _cthread.Lock()
 
+# ── Redis cache layer (optional, shared across workers) ──────────────────────
+# Set REDIS_URL env var (e.g. from Railway Redis service) to enable.
+# Falls back to the in-process dict cache if Redis is unavailable.
+import json as _json
+import os as _os_redis
+
+_redis_client = None
+try:
+    _REDIS_URL = _os_redis.environ.get("REDIS_URL", "")
+    if _REDIS_URL:
+        import redis as _redis_lib
+        _redis_client = _redis_lib.from_url(
+            _REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        _redis_client.ping()   # fail fast if unreachable
+        print("  [cache] Redis connected — shared cross-worker cache active")
+    else:
+        print("  [cache] REDIS_URL not set — using in-process dict cache")
+except Exception as _re:
+    print(f"  [cache] Redis unavailable ({_re}) — falling back to in-process cache")
+    _redis_client = None
+
 def _cache_get(key):
-    """Return cached value if fresh. If stale but within stale window, return
-    stale value AND trigger a background refresh. Returns None if no entry."""
+    """Return cached value if fresh/stale-usable. Checks Redis first, then dict.
+    Returns None only when cache is cold or too stale."""
+    # --- Redis path ---
+    if _redis_client is not None:
+        try:
+            raw = _redis_client.get(f"ptcache:{key}")
+            if raw:
+                entry = _json.loads(raw)
+                age = _time.time() - entry["ts"]
+                if age < _CACHE_STALE:
+                    return entry["val"]
+            return None
+        except Exception:
+            pass  # Redis blip — fall through to dict cache
+
+    # --- In-process dict path ---
     entry = _CACHE.get(key)
     if not entry:
         return None
@@ -467,11 +506,36 @@ def _cache_get(key):
     return None                      # too old — force synchronous refresh
 
 def _cache_set(key, val):
+    # --- Redis path ---
+    if _redis_client is not None:
+        try:
+            payload = _json.dumps({"val": val, "ts": _time.time()})
+            _redis_client.setex(f"ptcache:{key}", _CACHE_STALE + 60, payload)
+            return
+        except Exception:
+            pass  # Redis blip — fall through to dict
+
+    # --- In-process dict path ---
     with _CACHE_LOCK:
         _CACHE[key] = {"val": val, "ts": _time.time(), "refreshing": False}
 
 def _cache_bust(workspace_id, *tables):
     """Invalidate specific table caches for a workspace on writes."""
+    if _redis_client is not None:
+        try:
+            pattern = f"ptcache:*{workspace_id}*"
+            keys = _redis_client.keys(pattern)
+            for k in keys:
+                raw = _redis_client.get(k)
+                if raw:
+                    for t in tables:
+                        if t in k:
+                            _redis_client.delete(k)
+                            break
+            return
+        except Exception:
+            pass
+
     with _CACHE_LOCK:
         for key in list(_CACHE.keys()):
             if workspace_id in key:
@@ -482,6 +546,16 @@ def _cache_bust(workspace_id, *tables):
 
 def _cache_bust_ws(workspace_id):
     """Bust ALL cache entries for a workspace."""
+    if _redis_client is not None:
+        try:
+            pattern = f"ptcache:*{workspace_id}*"
+            keys = _redis_client.keys(pattern)
+            if keys:
+                _redis_client.delete(*keys)
+            return
+        except Exception:
+            pass
+
     with _CACHE_LOCK:
         for key in list(_CACHE.keys()):
             if workspace_id in key:
@@ -2210,8 +2284,6 @@ def get_projects_last_messages():
             (wid(),)).fetchall()
         return jsonify({r["project"]: r["last_ts"] for r in rows})
 
-@app.route("/api/app-data")
-@login_required
 def _fetch_app_data_from_db(ws, team_id, uid):
     """Execute all app-data queries in ONE round-trip using a single connection.
     pg8000 is synchronous so we batch all SELECTs through the same connection
@@ -2257,6 +2329,8 @@ def _fetch_app_data_from_db(ws, team_id, uid):
         _return_pool_conn(conn)
 
 
+@app.route("/api/app-data")
+@login_required
 def get_app_data():
     """Single endpoint that returns all dashboard data.
 
@@ -2271,16 +2345,44 @@ def get_app_data():
     team_id = request.args.get("team_id", "")
     cache_key = f"appdata:{ws}:{uid}:{team_id}"
 
+    now = _time.time()
+
+    # --- Redis SWR path ---
+    if _redis_client is not None:
+        try:
+            raw = _redis_client.get(f"ptcache:{cache_key}")
+            if raw:
+                entry = _json.loads(raw)
+                age = now - entry["ts"]
+                if age < _CACHE_TTL:
+                    return jsonify(entry["val"])   # fresh
+                if age < _CACHE_STALE:
+                    # Try to become the one refresher using SET NX (atomic)
+                    lock_key = f"ptcache:lock:{cache_key}"
+                    acquired = _redis_client.set(lock_key, "1", nx=True, ex=30)
+                    if acquired:
+                        def _bg_refresh_redis():
+                            try:
+                                result = _fetch_app_data_from_db(ws, team_id, uid)
+                                _cache_set(cache_key, result)
+                            except Exception as _e:
+                                log.warning("[app-data bg-refresh] %s", _e)
+                            finally:
+                                try: _redis_client.delete(lock_key)
+                                except: pass
+                        _cthread.Thread(target=_bg_refresh_redis, daemon=True).start()
+                    return jsonify(entry["val"])   # stale but fast
+        except Exception:
+            pass  # Redis blip — fall through to dict
+
+    # --- In-process dict SWR path ---
     entry = _CACHE.get(cache_key)
-    now   = _time.time()
 
     if entry:
         age = now - entry["ts"]
         if age < _CACHE_TTL:
-            # Fresh — return immediately, no DB touch
             return jsonify(entry["val"])
         if age < _CACHE_STALE and not entry.get("refreshing"):
-            # Stale but usable — serve immediately, refresh in background
             with _CACHE_LOCK:
                 if cache_key in _CACHE:
                     _CACHE[cache_key]["refreshing"] = True
@@ -2294,7 +2396,7 @@ def get_app_data():
                         if cache_key in _CACHE:
                             _CACHE[cache_key]["refreshing"] = False
             _cthread.Thread(target=_bg_refresh, daemon=True).start()
-            return jsonify(entry["val"])   # return stale instantly
+            return jsonify(entry["val"])   # stale but fast
 
     # Cache cold or too stale — block on DB (first load only)
     result = _fetch_app_data_from_db(ws, team_id, uid)
@@ -3178,10 +3280,10 @@ def get_timelogs():
             "SELECT tl.*, u.name as user_name, me.role as _my_role "
             "FROM time_logs tl "
             "LEFT JOIN users u ON tl.user_id=u.id "
-            "JOIN users me ON me.id=:uid AND me.workspace_id=:ws "
-            "WHERE tl.workspace_id=:ws "
+            "JOIN users me ON me.id=? AND me.workspace_id=? "
+            "WHERE tl.workspace_id=? "
             "ORDER BY tl.date DESC, tl.created DESC LIMIT 500",
-            (), fetch=True
+            (uid, ws, ws), fetch=True
         ) or []
         # The JOIN returns rows for all timelogs — filter by role client-side
         # (role comes from the first row)
@@ -4150,19 +4252,26 @@ def icon_512():
         headers={'Cache-Control':'public,max-age=86400'})
 
 # ── Main Application Routes ────────────────────────────────────────────────────
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def index():
     """Serve the landing page for non-authenticated users."""
+    # Health-check / uptime probes use HEAD — respond instantly, no DB needed
+    if request.method == "HEAD":
+        return "", 200
+
     if "user_id" in session and session.get("workspace_id"):
         ws_id = session["workspace_id"]
         try:
             import re as _re2
-            with get_db() as db:
-                ws_row = db.execute(
-                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
-                ).fetchone()
+            rows = _raw_pg(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (ws_id,), fetch=True
+            )
+            ws_row = rows[0] if rows else None
             if ws_row:
-                slug = ws_row["workspace_slug"] or                        _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                slug = ws_row.get("workspace_slug") or \
+                       _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or \
+                       "workspace"
                 return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
         except Exception:
             pass

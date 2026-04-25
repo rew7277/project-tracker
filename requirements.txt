@@ -13,3 +13,4 @@ sentry-sdk[flask]>=2.0.0
 # Slack: set SLACK_WEBHOOK_URL per workspace in workspace settings
 # GitHub: set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET env vars
 # No stripe/slack/github pip packages needed — uses built-in urllib for direct API calls
+redis>=5.0.0
