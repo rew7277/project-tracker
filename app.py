@@ -1328,32 +1328,40 @@ def _seed_demo(db, ws_id):
         try: db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",(n[0],ws_id,n[1],n[2],n[3],n[4],ts()))
         except: pass
 
-# Cache of logged_out_at timestamps: {uid: logged_out_at_str}
-# Checked in login_required so we don't hit DB on every request.
-# Busted when logout is called.
+# Server-side session invalidation cache.
+# On logout: logged_out_at is written to DB and cached here.
+# On login_required: any session issued before logged_out_at is rejected instantly.
+# On login: cache is cleared so the new session is always accepted.
 _logout_cache: dict = {}
 _logout_cache_lock = _cthread.Lock()
 
 def _get_logged_out_at(uid):
-    """Return the user's logged_out_at value. Cached in memory (Redis if available)."""
-    cache_key = f"logout_ts:{uid}"
-    # Try Redis first
+    """Return the user's logged_out_at value, or None if not cached.
+    None = not in cache (caller must fetch from DB).
+    ""  = cached and confirmed empty (user never logged out or just logged in).
+    "ts" = cached logout timestamp (session before this ts is invalid).
+    """
+    cache_key = f"ptcache:logout_ts:{uid}"
     if _redis_client is not None:
         try:
-            val = _redis_client.get(f"ptcache:{cache_key}")
-            return val or ""
+            val = _redis_client.get(cache_key)
+            if val is None:
+                return None   # key does not exist in Redis — not cached
+            return val        # "" or a timestamp string
         except Exception:
             pass
     # In-process dict
     with _logout_cache_lock:
-        return _logout_cache.get(uid, None)  # None = not cached yet
+        if uid not in _logout_cache:
+            return None       # not cached yet
+        return _logout_cache[uid]  # "" or timestamp
 
 def _set_logged_out_at(uid, ts_val):
     """Store logged_out_at in cache (all workers via Redis, or local dict)."""
-    cache_key = f"logout_ts:{uid}"
+    cache_key = f"ptcache:logout_ts:{uid}"
     if _redis_client is not None:
         try:
-            _redis_client.set(f"ptcache:{cache_key}", ts_val or "", ex=86400*30)
+            _redis_client.set(cache_key, ts_val or "", ex=86400*30)
             return
         except Exception:
             pass
@@ -1451,6 +1459,9 @@ def login():
             # Clear logged_out_at so this new login is valid
             db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
         except Exception: pass
+        # CRITICAL: clear the logout cache so login_required doesn't reject
+        # this new session using a stale cached logout timestamp
+        _set_logged_out_at(u["id"], "")
         _audit("user_login", u["id"], f"{u['name']} ({email}) logged in")
         result = dict(u)
         result.pop("totp_secret", None)
@@ -1896,12 +1907,16 @@ def totp_verify_login():
             return jsonify({"error": "TOTP not configured for this user"}), 400
         if not _totp_verify(u["totp_secret"], token):
             return jsonify({"error": "Invalid authenticator code. Try again."}), 401
+        login_ts = ts()
         session.permanent = True
         session["user_id"] = u["id"]
         session["workspace_id"] = u["workspace_id"]
+        session["login_at"] = login_ts   # needed for remote logout detection
         try:
-            db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), u["id"]))
+            db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
         except Exception: pass
+        # Clear logout cache so login_required accepts this new session
+        _set_logged_out_at(u["id"], "")
         _audit("user_login_totp", u["id"], f"{u['name']} logged in via Google Authenticator")
         result = dict(u)
         result.pop("password", None)
@@ -1939,23 +1954,27 @@ def totp_reset():
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
     uid = session.get("user_id", "")
+    ws  = session.get("workspace_id", "")
+    # Clear session cookie immediately — this device is logged out right now
+    session.clear()
     if uid:
         logout_ts = ts()
-        # Write logged_out_at to DB — this invalidates ALL sessions for this user
-        # on all devices immediately (checked in login_required on next request)
-        try:
-            _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
-        except Exception as _e:
-            log.warning("[logout] failed to set logged_out_at: %s", _e)
-        # Update cache so this worker knows immediately too
+        # Cache logout timestamp FIRST (instant, in-memory/Redis)
+        # so all workers reject other devices immediately on next request
         _set_logged_out_at(uid, logout_ts)
-        # Bust the auth/me cache for this user
-        try:
-            _cache_bust_ws(session.get("workspace_id",""))
-        except Exception:
-            pass
+        # Write to DB in background so the logout() returns instantly to client
+        # (prevents 499 client-disconnect errors when DB is slow)
+        def _bg_logout():
+            try:
+                _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
+            except Exception as _e:
+                log.warning("[logout] DB write failed: %s", _e)
+            try:
+                _cache_bust_ws(ws)
+            except Exception:
+                pass
+        _cthread.Thread(target=_bg_logout, daemon=True).start()
         _audit("user_logout", uid, "User signed out — all sessions invalidated")
-    session.clear()
     return jsonify({"ok": True})
 
 @app.route("/signout")
@@ -2030,9 +2049,8 @@ def update_presence():
                 (ts(), uid, ws))
     except Exception as _e:
         log.warning("[presence] write failed: %s", _e)
-    # Mark as written for 60s (matches frontend heartbeat interval)
-    with _CACHE_LOCK:
-        _CACHE[throttle_key] = {"val": True, "ts": _time.time()}
+    # Mark throttle via proper cache (Redis if available, dict otherwise)
+    _cache_set(throttle_key, True)
     # Bust presence cache so next GET sees the fresh timestamp
     _cache_bust(ws, "presence")
     return jsonify({"ok": True})
