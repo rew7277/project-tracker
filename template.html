@@ -850,10 +850,13 @@ function AppLoader(){
   </div>`;
 }
 
+// Global abort controller — cancelled on logout to kill all in-flight requests
+let _apiAbortCtrl = new AbortController();
 const api={
+  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get: async (u) => {
     try {
-      const r = await fetch(u, {credentials: 'include'});
+      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal});
       if (!r.ok) {
         if (r.status === 401) {
           console.warn('[API] 401 Unauthorized:', u);
@@ -864,6 +867,7 @@ const api={
       }
       return await r.json();
     } catch (e) {
+      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -883,6 +887,7 @@ const api={
       }
       return await r.json();
     } catch (e) {
+      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -8822,11 +8827,16 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
-    try{ await api.post('/api/auth/logout',{}); }catch(e){}
+    // 1. Abort all in-flight API requests immediately so polling stops
+    api._abort();
+    // 2. Unsubscribe from push notifications
+    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
+    // 3. Call logout endpoint (best-effort, don't await — we're leaving anyway)
+    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+    // 4. Clear React state
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // Redirect to login immediately — clears all state and shows auth page
-    window.location.href='/?action=login';
+    // 5. Hard redirect — instant, no waiting for any network
+    window.location.replace('/?action=login');
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);

@@ -47,8 +47,15 @@ function AppLoader(){
   </div>`;
 }
 
+// Global abort controller — cancelled on logout to stop all in-flight requests
+let _apiAbortCtrl = new AbortController();
 const api={
-  get:u=>fetch(u,{credentials:'include'}).then(r=>r.json()).catch(()=>({})), post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})), upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
+  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
+  get:u=>fetch(u,{credentials:'include',signal:_apiAbortCtrl.signal}).then(r=>r.json()).catch(e=>{if(e.name==='AbortError')return null;return {};}),
+  post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
+  put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
+  del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})),
+  upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
 };
 
 const STAGES={
@@ -7106,11 +7113,16 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
-    try{ await api.post('/api/auth/logout',{}); }catch(e){}
+    // 1. Abort all in-flight API requests immediately so polling stops
+    api._abort();
+    // 2. Unsubscribe from push notifications
+    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
+    // 3. Call logout endpoint (fire-and-forget — don't await)
+    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+    // 4. Clear React state
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // Redirect to login immediately — clears all state and shows auth page
-    window.location.href='/';
+    // 5. Hard redirect instantly
+    window.location.replace('/');
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);

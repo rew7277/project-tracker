@@ -4618,19 +4618,20 @@ def admin_api_add_user():
 @app.route("/<path:path>")
 def catch_all(path):
     """Catch-all route for SPA client-side routing."""
-    # If it looks like a file request, return 404
+    # Reject file requests (have an extension)
     if "." in path.split("/")[-1]:
         return "", 404
 
+    # Reject unresolved JS template literals like ${imgSrc}, ${variable}
+    # These happen when a variable is used as a URL before it has a value
+    if path.startswith("${") or "${" in path:
+        return "", 400
+
     # Let explicitly registered routes handle /<ws_name>/<ws_id>/... paths
-    # (Flask already matches those first, so this is just a safety guard)
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
-        # Pattern: <anything>/<ws_id_like>/... where ws_id starts with "ws"
         potential_ws_id = parts[1] if len(parts) >= 2 else ""
         if potential_ws_id.startswith("ws"):
-            # Route not matched above means it's an unrecognised sub-path;
-            # still serve the SPA so client-side router can handle it.
             return HTML
 
     # Otherwise serve the app (for client-side routing)
