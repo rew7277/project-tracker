@@ -8603,19 +8603,17 @@ function App(){
     if(!cu)return;
     const tCtx=overrideTeamCtx!==undefined?overrideTeamCtx:teamCtx;
     try{
-      const projUrl=tCtx?'/api/projects?team_id='+tCtx:'/api/projects';
-      const taskUrl=tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks';
-      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw,rems]=await Promise.all([
-        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'),api.get('/api/reminders'), ]);
-      
-      // Handle 401 errors - API returns null for auth failures
-      if (users === null || projects === null || tasks === null) {
-        console.warn('[Load] Authentication failed, clearing session');
+      // Single combined request instead of 9 parallel calls.
+      // Eliminates the Promise.all waterfall that serialised across Gunicorn workers.
+      const appDataUrl='/api/app-data'+(tCtx?'?team_id='+tCtx:'');
+      const d=await api.get(appDataUrl);
+      if(!d||d.error){
+        console.warn('[Load] Authentication failed or server error, clearing session');
         setCu(null);
         setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
         return;
       }
-      
+      const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
       setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
