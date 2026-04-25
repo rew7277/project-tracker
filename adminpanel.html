@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>VEWIT Super Admin</title>
+<title>Project Tracker Super Admin</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -231,12 +231,12 @@ tr:hover td{background:rgba(255,255,255,.018)}
 <!-- LOGIN -->
 <div id="login-screen">
   <div class="login-box">
-    <div class="login-logo">VEWIT</div>
+    <div class="login-logo">Project Tracker</div>
     <h1>Super Admin Panel</h1>
     <p class="login-sub">Restricted access — all actions are logged and monitored.</p>
     <div class="fg">
       <label>Admin Email</label>
-      <input type="email" id="l-email" placeholder="admin@vewit.in" autocomplete="username"/>
+      <input type="email" id="l-email" placeholder="admin@project-tracker.in" autocomplete="username"/>
     </div>
     <div class="fg">
       <label>Password</label>
@@ -252,7 +252,7 @@ tr:hover td{background:rgba(255,255,255,.018)}
 <div id="app-shell">
   <div class="topbar">
     <div class="tl">
-      <div class="tl-logo">VEWIT</div>
+      <div class="tl-logo">Project Tracker</div>
       <div class="tl-div"></div>
       <div class="tl-sub">Super Admin Console</div>
     </div>
@@ -527,7 +527,7 @@ async function dashboard(){
       <div class="sc">
         <div class="acc" style="background:linear-gradient(90deg,var(--blue),var(--purple))"></div>
         <div class="si">🏢</div><div class="sl">Workspaces</div>
-        <div class="sv">${total}</div><div class="ss">Companies on VEWIT</div>
+        <div class="sv">${total}</div><div class="ss">Companies on Project Tracker</div>
       </div>
       <div class="sc">
         <div class="acc" style="background:linear-gradient(90deg,var(--green),var(--cyan))"></div>
@@ -1006,7 +1006,7 @@ async function health(){
         <div class="ir"><span class="il">Admin Account</span><span class="iv">${esc(EMAIL)}</span></div>
         <div class="ir"><span class="il">Token Status</span><span class="iv"><span class="badge bg-green">Active</span></span></div>
         <div class="ir"><span class="il">Console Version</span><span class="iv"><span class="badge bg-blue">v2.0</span></span></div>
-        <div class="ir"><span class="il">Stack</span><span class="iv">VEWIT v4.0 · PostgreSQL · Gunicorn · Python 3.12</span></div>
+        <div class="ir"><span class="il">Stack</span><span class="iv">Project Tracker v4.0 · PostgreSQL · Gunicorn · Python 3.12</span></div>
         <div class="ir"><span class="il">Checked At</span><span class="iv">${now.toISOString().replace('T',' ').slice(0,19)} UTC</span></div>
       </div>
     </div>
@@ -1111,7 +1111,7 @@ function vaultGetIcon(title, tags){
   return VAULT_ICON_DEFAULT;
 }
 
-const VAULT_KEY = 'vewit_vault_v1'; // kept for offline fallback read only
+const VAULT_KEY = 'project-tracker_vault_v1'; // kept for offline fallback read only
 let vaultData = [];       // Array of card objects
 let vaultFilter = '';     // Current search string
 let vaultUnlocked = {};   // cardId -> true when temporarily unlocked
@@ -1179,7 +1179,7 @@ function vaultCardId(){ return 'c'+Date.now()+Math.random().toString(36).slice(2
 
 // Simple client-side hash (not cryptographic – just UI-level gating)
 async function vaultHash(pw){
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vewit::'+pw));
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('project-tracker::'+pw));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Security &#8212; VEWIT</title>
-<meta name="description" content="How VEWIT protects your data &#8212; encryption, 2FA, role-based access control, and responsible disclosure."/>
-<link rel="canonical" href="https://www.vewit.in/security"/>
+<title>Security &#8212; Project Tracker</title>
+<meta name="description" content="How Project Tracker protects your data &#8212; encryption, 2FA, role-based access control, and responsible disclosure."/>
+<link rel="canonical" href="https://www.project-tracker.in/security"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
@@ -82,7 +82,7 @@ footer a:hover{color:var(--blue)}
 </head>
 <body>
 <nav>
-  <a href="/" class="nav-logo">VEWIT</a>
+  <a href="/" class="nav-logo">Project Tracker</a>
   <div class="nav-right">
     <a href="/?action=login" class="nav-in">Sign In</a>
     <a href="/?action=register" class="nav-go">Get Started</a>
@@ -90,7 +90,7 @@ footer a:hover{color:var(--blue)}
 </nav>
 <div class="wrap">
   <div class="page-badge badge-green">&#128737;&#65039; Security</div>
-  <h1>Security at VEWIT</h1>
+  <h1>Security at Project Tracker</h1>
   <p class="subtitle" style="margin-bottom:48px;padding-bottom:28px;border-bottom:1px solid var(--b1)">Security is a core design principle, not an afterthought. Every feature, API endpoint, and database query is built with security-first thinking. Here is exactly how we protect your data and your team.</p>
 
   <div class="pillars">
@@ -127,7 +127,7 @@ footer a:hover{color:var(--blue)}
     <div class="sc-hd">&#128241; Two-Factor Authentication (2FA)</div>
     <div class="sc-bd">
       <ul class="cl">
-        <li><span class="ck">&#10003;</span><span><strong>TOTP via Google Authenticator</strong> &#8212; VEWIT supports time-based one-time passwords (RFC 6238) compatible with Google Authenticator, Authy, and any standard TOTP app.</span></li>
+        <li><span class="ck">&#10003;</span><span><strong>TOTP via Google Authenticator</strong> &#8212; Project Tracker supports time-based one-time passwords (RFC 6238) compatible with Google Authenticator, Authy, and any standard TOTP app.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>Per-workspace enforcement</strong> &#8212; Workspace Admins can make 2FA mandatory for all members before accessing the workspace.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>TOTP secrets encrypted at rest</strong> &#8212; Your authenticator secret key is stored encrypted in the database.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>Admin 2FA reset</strong> &#8212; Admins can reset 2FA for any team member (e.g., lost phone). Super-admins can reset 2FA for entire workspaces.</span></li>
@@ -163,7 +163,7 @@ footer a:hover{color:var(--blue)}
   <div class="sc">
     <div class="sc-hd">&#128101; Six Access Roles</div>
     <div class="sc-bd">
-      <p>VEWIT defines six roles with progressively restricted permissions, all enforced server-side.</p>
+      <p>Project Tracker defines six roles with progressively restricted permissions, all enforced server-side.</p>
       <table class="rt">
         <tr><th>Role</th><th>Tasks</th><th>Projects</th><th>Members</th><th>Settings</th></tr>
         <tr><td><span class="rb" style="background:#5a8cff18;color:#5a8cff">Admin</span></td><td>Full</td><td>Full</td><td>Full</td><td>Full</td></tr>
@@ -217,7 +217,7 @@ footer a:hover{color:var(--blue)}
     <div class="sc-hd">&#9729;&#65039; Hosting &amp; Reliability</div>
     <div class="sc-bd">
       <ul class="cl">
-        <li><span class="ck">&#10003;</span><span><strong>Managed cloud infrastructure</strong> &#8212; VEWIT runs on managed cloud infrastructure with automatic failover and DDoS protection.</span></li>
+        <li><span class="ck">&#10003;</span><span><strong>Managed cloud infrastructure</strong> &#8212; Project Tracker runs on managed cloud infrastructure with automatic failover and DDoS protection.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>Daily automated backups</strong> &#8212; Database backups are taken daily and retained for 30 days.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>Dependency monitoring</strong> &#8212; Third-party library vulnerabilities are monitored and patches applied promptly.</span></li>
         <li><span class="ck">&#10003;</span><span><strong>Rate limiting</strong> &#8212; API endpoints are rate-limited to prevent abuse and brute-force attacks.</span></li>
@@ -228,13 +228,13 @@ footer a:hover{color:var(--blue)}
   <div class="disc">
     <div style="font-size:34px;margin-bottom:12px">&#128269;</div>
     <h3>Found a Security Issue?</h3>
-    <p>We appreciate responsible disclosure. If you discover a vulnerability in VEWIT, please report it privately. We commit to acknowledging your report within 48 hours and resolving confirmed issues within 14 days.</p>
-    <a class="cta" href="mailto:security@vewit.in">Report to security&#64;vewit&#46;in &#8594;</a>
-    <p class="disc-note">Please do not publicly disclose vulnerabilities before we have had an opportunity to investigate and patch. We are grateful to researchers who help keep VEWIT secure.</p>
+    <p>We appreciate responsible disclosure. If you discover a vulnerability in Project Tracker, please report it privately. We commit to acknowledging your report within 48 hours and resolving confirmed issues within 14 days.</p>
+    <a class="cta" href="mailto:security@project-tracker.in">Report to security&#64;project-tracker&#46;in &#8594;</a>
+    <p class="disc-note">Please do not publicly disclose vulnerabilities before we have had an opportunity to investigate and patch. We are grateful to researchers who help keep Project Tracker secure.</p>
   </div>
 </div>
 <footer>
-  <p>&#169; 2026 VEWIT. Made in India &#127470;&#127475;</p>
+  <p>&#169; 2026 Project Tracker. Made in India &#127470;&#127475;</p>
   <div class="fl">
     <a href="/privacy">Privacy Policy</a>
     <a href="/terms">Terms of Service</a>
