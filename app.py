@@ -336,23 +336,38 @@ def bust_cache_on_write(response):
                 _cache_bust_ws(ws)
     return response
 
+# ── Per-request CSP nonce (stored in Flask g) ────────────────────────────────
+from flask import g as _g
+import base64 as _b64
+
+@app.before_request
+def _generate_csp_nonce():
+    """Generate a fresh cryptographic nonce for every request.
+    Stored in Flask g so route handlers can access it via g.csp_nonce.
+    The nonce is injected into the HTML template and into the CSP header
+    so inline scripts are allowed ONLY when they carry this exact nonce."""
+    _g.csp_nonce = _b64.b64encode(secrets.token_bytes(16)).decode()
+
 @app.after_request
 def add_security_headers(response):
-    """Add security headers to every response."""
+    """Add security headers to every response. Uses per-request nonce for CSP."""
+    nonce = getattr(_g, "csp_nonce", "")
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # 'unsafe-inline' removed — nonce-gated inline scripts only
+    nonce_src = f"'nonce-{nonce}'" if nonce else ""
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com; "  # FIX (Bug 7): removed 'unsafe-inline' — use nonces or hashes for any inline scripts
+        f"script-src 'self' {nonce_src} https://unpkg.com https://cdnjs.cloudflare.com https://accounts.google.com; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
-        "connect-src 'self' wss: https://api.anthropic.com; "
-        "frame-ancestors 'self';"
+        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com; "
+        "frame-ancestors 'self'; "
+        "frame-src https://accounts.google.com;"
     )
-    # Only set HSTS on HTTPS
     if request.is_secure:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -1039,7 +1054,10 @@ def init_db():
                 password TEXT, role TEXT, avatar TEXT, color TEXT, created TEXT,
                 two_fa_enabled INTEGER DEFAULT 0, totp_secret TEXT DEFAULT '',
                 totp_verified INTEGER DEFAULT 0,
-                logged_out_at TEXT DEFAULT '');
+                logged_out_at TEXT DEFAULT '',
+                google_id TEXT DEFAULT '',
+                google_picture TEXT DEFAULT '',
+                auth_provider TEXT DEFAULT 'password');
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, description TEXT,
                 owner TEXT, members TEXT DEFAULT '[]', start_date TEXT,
@@ -1154,6 +1172,9 @@ def init_db():
             "ALTER TABLE call_rooms ADD COLUMN invited_users TEXT DEFAULT '[]'",
             "ALTER TABLE notifications ADD COLUMN sender_id TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN last_active TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN google_picture TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'password'",
             "CREATE TABLE IF NOT EXISTS time_logs (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, team_id TEXT DEFAULT '', date TEXT, task_name TEXT, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '', hours REAL DEFAULT 0, minutes INTEGER DEFAULT 0, comments TEXT DEFAULT '', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_ws ON tasks(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(workspace_id, assignee)",
@@ -1396,6 +1417,182 @@ def login_required(f):
 def wid(): return session.get("workspace_id","")
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE OAUTH 2.0
+# Set env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, APP_BASE_URL
+# Redirect URI to register in Google Cloud Console:
+#   {APP_BASE_URL}/api/auth/google/callback
+# ══════════════════════════════════════════════════════════════════════════════
+import urllib.parse as _urlparse
+import urllib.request as _urlrequest
+import json as _json_mod
+
+_GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+_GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+_APP_BASE_URL         = os.environ.get("APP_BASE_URL", "").rstrip("/")
+
+_GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+@app.route("/api/auth/google/login")
+def google_login():
+    """Step 1 — redirect browser to Google's consent screen."""
+    if not _GOOGLE_CLIENT_ID:
+        return jsonify({"error": "Google OAuth not configured (missing GOOGLE_CLIENT_ID)"}), 503
+
+    # CSRF protection: random state stored in session
+    state = secrets.token_urlsafe(24)
+    session["google_oauth_state"] = state
+
+    redirect_uri = f"{_APP_BASE_URL}/api/auth/google/callback"
+    params = _urlparse.urlencode({
+        "client_id":     _GOOGLE_CLIENT_ID,
+        "redirect_uri":  redirect_uri,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "access_type":   "online",
+        "prompt":        "select_account",
+    })
+    return redirect(f"{_GOOGLE_AUTH_URL}?{params}")
+
+
+@app.route("/api/auth/google/callback")
+def google_callback():
+    """Step 2 — Google redirects here with ?code=... Exchange code for tokens,
+    fetch user-info, then create or log in the matching account."""
+    error = request.args.get("error")
+    if error:
+        log.warning("[google_oauth] denied: %s", error)
+        return redirect(f"/?action=login&error={_urlparse.quote(error)}")
+
+    # CSRF check
+    state = request.args.get("state", "")
+    if state != session.pop("google_oauth_state", ""):
+        log.warning("[google_oauth] state mismatch — possible CSRF")
+        return redirect("/?action=login&error=state_mismatch")
+
+    code = request.args.get("code", "")
+    if not code:
+        return redirect("/?action=login&error=no_code")
+
+    redirect_uri = f"{_APP_BASE_URL}/api/auth/google/callback"
+
+    # ── Exchange code for tokens ──────────────────────────────────────────────
+    try:
+        token_data = _urlparse.urlencode({
+            "code":          code,
+            "client_id":     _GOOGLE_CLIENT_ID,
+            "client_secret": _GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  redirect_uri,
+            "grant_type":    "authorization_code",
+        }).encode()
+        req = _urlrequest.Request(_GOOGLE_TOKEN_URL, data=token_data,
+                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with _urlrequest.urlopen(req, timeout=10) as resp:
+            tokens = _json_mod.loads(resp.read())
+    except Exception as exc:
+        log.error("[google_oauth] token exchange failed: %s", exc)
+        return redirect("/?action=login&error=token_exchange_failed")
+
+    access_token = tokens.get("access_token", "")
+    if not access_token:
+        return redirect("/?action=login&error=no_access_token")
+
+    # ── Fetch Google user info ────────────────────────────────────────────────
+    try:
+        ui_req = _urlrequest.Request(_GOOGLE_USERINFO,
+                                     headers={"Authorization": f"Bearer {access_token}"})
+        with _urlrequest.urlopen(ui_req, timeout=10) as resp:
+            guser = _json_mod.loads(resp.read())
+    except Exception as exc:
+        log.error("[google_oauth] userinfo fetch failed: %s", exc)
+        return redirect("/?action=login&error=userinfo_failed")
+
+    g_id      = guser.get("sub", "")           # stable Google user ID
+    g_email   = (guser.get("email") or "").lower().strip()
+    g_name    = guser.get("name") or g_email.split("@")[0]
+    g_picture = guser.get("picture", "")
+    g_verified = guser.get("email_verified", False)
+
+    if not g_email or not g_verified:
+        return redirect("/?action=login&error=email_not_verified")
+
+    # ── Find or create user ───────────────────────────────────────────────────
+    with get_db() as db:
+        # 1. Try match by google_id (returning user who already linked)
+        user = db.execute(
+            "SELECT * FROM users WHERE google_id=? AND deleted_at=''",
+            (g_id,)
+        ).fetchone()
+
+        # 2. Try match by email (first-time Google login for existing password user)
+        if not user:
+            user = db.execute(
+                "SELECT * FROM users WHERE email=? AND deleted_at=''",
+                (g_email,)
+            ).fetchone()
+            if user:
+                # Link google_id to this existing account
+                db.execute(
+                    "UPDATE users SET google_id=?, google_picture=?, auth_provider='google' WHERE id=?",
+                    (g_id, g_picture, user["id"])
+                )
+
+        # 3. No existing account — auto-create in a default workspace
+        #    We create a standalone workspace named after the user's domain/name.
+        if not user:
+            ws_id  = f"ws{secrets.token_hex(8)}"
+            ws_name = f"{g_name}'s Workspace"
+            uid    = f"u{secrets.token_hex(8)}"
+            color  = CLRS[hash(g_email) % len(CLRS)]
+            initials = "".join(p[0].upper() for p in g_name.split()[:2]) or "?"
+            created_ts = ts()
+
+            db.execute(
+                "INSERT INTO workspaces (id, name, created) VALUES (?, ?, ?)",
+                (ws_id, ws_name, created_ts)
+            )
+            db.execute(
+                """INSERT INTO users
+                   (id, workspace_id, name, email, password, role, avatar, color,
+                    created, google_id, google_picture, auth_provider)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid, ws_id, g_name, g_email, "", "Admin", initials, color,
+                 created_ts, g_id, g_picture, "google")
+            )
+            user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+
+        if not user:
+            return redirect("/?action=login&error=user_creation_failed")
+
+        # ── Set session (same shape as password login) ────────────────────────
+        login_ts = ts()
+        session.permanent = True
+        session["user_id"]      = user["id"]
+        session["workspace_id"] = user["workspace_id"]
+        session["role"]         = user.get("role", "")
+        session["login_at"]     = login_ts
+
+        db.execute(
+            "UPDATE users SET last_active=?, logged_out_at='' WHERE id=?",
+            (login_ts, user["id"])
+        )
+        _set_logged_out_at(user["id"], "")
+        _clear_attempts(f"login:{request.remote_addr}:{g_email}")
+        _audit("google_login", user["id"], f"{g_name} ({g_email}) signed in via Google")
+
+    # Redirect to app — JS will detect the active session on next /api/auth/me
+    return redirect("/?google_auth=1")
+
+
+@app.route("/api/auth/google/config")
+def google_auth_config():
+    """Return whether Google OAuth is configured so the frontend can show/hide button."""
+    return jsonify({"enabled": bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET and _APP_BASE_URL)})
 
 # ── Login rate limiter (brute-force protection) ───────────────────────────────
 import time as _time_mod
@@ -4502,10 +4699,10 @@ def index():
                 return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
         except Exception:
             pass
-        return HTML
+        return _serve_html()
     action = request.args.get("action", "")
     if action in ("login", "register"):
-        return HTML
+        return _serve_html()
     return LANDING_HTML
 
 @app.route("/app")
@@ -4543,7 +4740,7 @@ def serve_app():
                 return redirect(f"/{slug}/{ws_id}/{path_segment}", code=302)
         except Exception:
             pass
-    return HTML
+    return _serve_html()
 
 @app.route("/password-generator")
 def password_generator_page():
@@ -4704,7 +4901,7 @@ def ws_app_page(ws_name, ws_id, **kwargs):
     if session.get("workspace_id") != ws_id:
         return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
 
-    return HTML
+    return _serve_html()
 
 
 # ── SSO configuration API  ────────────────────────────────────────────────────
@@ -5355,10 +5552,10 @@ def catch_all(path):
     if len(parts) >= 2:
         potential_ws_id = parts[1] if len(parts) >= 2 else ""
         if potential_ws_id.startswith("ws"):
-            return HTML
+            return _serve_html()
 
     # Otherwise serve the app (for client-side routing)
-    return HTML
+    return _serve_html()
 
 import os as _os
 
@@ -5376,6 +5573,24 @@ def _load_template(filename, fallback=''):
         return fallback
 
 HTML                    = _load_template('template.html')
+
+_RE_SCRIPT_TAG = __import__('re').compile(r'<script([^>]*)>', __import__('re').IGNORECASE)
+
+def _serve_html():
+    """Return template.html with CSP nonce stamped onto every <script> tag.
+    Both inline scripts (<script>) and external scripts (<script src="...">) need
+    the nonce when unsafe-inline is absent from the CSP."""
+    nonce = getattr(_g, "csp_nonce", "")
+    if not nonce:
+        # Fallback — should never happen in normal flow
+        return HTML
+    def _stamp(m):
+        attrs = m.group(1)
+        # Avoid double-stamping if somehow already has nonce
+        if 'nonce=' in attrs:
+            return m.group(0)
+        return f'<script nonce="{nonce}"{attrs}>'
+    return _RE_SCRIPT_TAG.sub(_stamp, HTML)
 LANDING_HTML            = _load_template('landing.html')
 PASSWORD_GENERATOR_HTML = _load_template('password-generator.html')
 ADMIN_HTML              = _load_template('adminpanel.html')
