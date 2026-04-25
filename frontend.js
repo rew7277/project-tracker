@@ -6864,11 +6864,11 @@ function App(){
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
     // Fire beat immediately on mount (beat already calls fetchPresence — no double-fetch)
     beat();
-    const beatId=setInterval(beat,30000); // 15s→30s: heartbeat every 30s
+    const beatId=setInterval(beat,30000); // heartbeat every 30s — also refreshes presence
     const onFocus=()=>{beat();};
     window.addEventListener('focus',onFocus);
-    const presId=setInterval(fetchPresence,30000); // passive refresh every 30s
-    return()=>{clearInterval(beatId);clearInterval(presId);window.removeEventListener('focus',onFocus);};
+    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
+    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -7169,7 +7169,9 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      const [due,rems]=await Promise.all([api.get('/api/reminders/due'),api.get('/api/reminders')]);
+      // Only fetch /api/reminders/due — reminders list already kept fresh by load()
+      const due=await api.get('/api/reminders/due');
+      const rems=upcomingReminders; // use already-loaded state — no extra API call
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
           addToast('reminder','⏰ Reminder: '+r.task_title,'Click to view');

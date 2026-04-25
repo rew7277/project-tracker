@@ -264,6 +264,21 @@ if not _ALLOWED_ORIGINS:
 CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
 
 # ── Gzip compression for all compressible responses ───────────────────────────
+@app.before_request
+def block_scanners():
+    """Block common security scanner probes — archive/backup file probing, path traversal."""
+    path = request.path.lower()
+    # Block probes for exposed archive/backup files (seen in logs)
+    BAD_EXTS = ('.zip', '.rar', '.tar', '.tar.gz', '.tgz', '.bak', '.sql', '.db', '.env', '.git')
+    if any(path.endswith(ext) for ext in BAD_EXTS):
+        return '', 404
+    # Block obvious scanner paths
+    BAD_PATHS = ('/.env', '/.git', '/wp-admin', '/phpMyAdmin', '/admin.php',
+                 '/shell.php', '/.well-known/security.txt', '/xmlrpc.php',
+                 '/wp-login', '/config.php', '/setup.php', '/install.php')
+    if any(path.startswith(p.lower()) for p in BAD_PATHS):
+        return '', 404
+
 @app.after_request
 def compress_response(response):
     """Gzip-compress HTML, JS, CSS and JSON responses when client supports it."""
@@ -1737,13 +1752,18 @@ def update_presence():
 @app.route("/api/presence")
 @login_required
 def get_presence():
-    """Returns list of user IDs active in last 2 minutes."""
+    """Returns list of user IDs active in last 3 minutes. Cached 10s — no need for realtime."""
+    cache_key = f"presence:{wid()}"
+    cached = _cache_get(cache_key)
+    if cached is not None: return jsonify(cached)
     with get_db() as db:
         cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
         rows = db.execute(
             "SELECT id FROM users WHERE workspace_id=? AND last_active>?",
             (wid(), cutoff)).fetchall()
-        return jsonify([r["id"] for r in rows])
+        result = [r["id"] for r in rows]
+        _cache_set(cache_key, result)
+        return jsonify(result)
 
 @app.route("/api/meet/notify", methods=["POST"])
 @login_required
@@ -2250,6 +2270,7 @@ def create_task():
             nid=f"n{base_ts}"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
+            _cache_bust(wid(), "notifs")  # new notification — bust cache
             assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_user and assignee_user["email"]:
                 threading.Thread(target=send_task_assigned_email,
@@ -3044,10 +3065,15 @@ def due_reminders():
 @app.route("/api/notifications")
 @login_required
 def get_notifs():
+    cache_key = f"notifs:{wid()}:{session['user_id']}"
+    cached = _cache_get(cache_key)
+    if cached is not None: return jsonify(cached)
     with get_db() as db:
         rows=db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
             ORDER BY ts DESC LIMIT 50""",(wid(),session["user_id"])).fetchall()
-        return jsonify([dict(r) for r in rows])
+        result = [dict(r) for r in rows]
+        _cache_set(cache_key, result)
+        return jsonify(result)
 
 @app.route("/api/notifications/read-all",methods=["PUT"])
 @login_required
