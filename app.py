@@ -3373,12 +3373,13 @@ Prioritized list of immediate actions.
 @login_required
 def export_csv():
     with get_db() as db:
-        tasks=db.execute("SELECT * FROM tasks WHERE workspace_id=?",(wid(),)).fetchall()
-    lines=["id,title,project,assignee,priority,stage,due,pct"]
+        tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchall()
+    lines = ["id,title,project,assignee,priority,stage,due,pct"]
     for t in tasks:
-        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}","{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
-    return Response("\n".join(lines),mimetype="text/csv",
-                    headers={"Content-Disposition":"attachment;filename=tasks.csv"})
+        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}",'
+                     f'"{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
+    return Response("\n".join(lines), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment;filename=tasks.csv"})
 
 @app.route("/api/import/csv", methods=["POST"])
 @login_required
@@ -5874,18 +5875,6 @@ def email_to_task():
     _raw_pg("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, ws_id, subject, body, "", reporter_id, "medium", "backlog", ts(), "", 0, "[]", "", ""))
     return jsonify({"ok": True, "task_id": tid})
-
-@app.route("/api/export/csv")
-@login_required
-def export_csv():
-    with get_db() as db:
-        tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchall()
-    lines = ["id,title,project,assignee,priority,stage,due,pct"]
-    for t in tasks:
-        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}",'
-                     f'"{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
-    return Response("\n".join(lines), mimetype="text/csv",
-                    headers={"Content-Disposition": "attachment;filename=tasks.csv"})
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPENAPI DOCS
