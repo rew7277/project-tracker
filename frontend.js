@@ -6911,7 +6911,34 @@ function App(){
     }catch(e){console.error(e);}
   },[cu]);
 
-  useEffect(()=>{api.get('/api/auth/me').then(u=>{if(u&&!u.error){if(u.workspace_dashboard_url)window._pfWsBase=u.workspace_dashboard_url;setCu(u);}setLoading(false);}).catch(()=>setLoading(false));},[]);
+  useEffect(()=>{
+    api.get('/api/auth/me').then(u=>{
+      if(u&&!u.error){
+        if(u.workspace_dashboard_url){
+          window._pfWsBase=u.workspace_dashboard_url;
+          // If currently on a bare path, redirect to ws-scoped URL immediately
+          try{
+            const loc=window.location.pathname;
+            const parts=loc.split('/');
+            const isAlreadyWsScoped=parts.length>=3&&parts[2]&&parts[2].startsWith('ws');
+            if(!isAlreadyWsScoped){
+              // Extract page segment from bare path (e.g. /dashboard → dashboard)
+              const barePage=parts[1]||'dashboard';
+              const validPages=['dashboard','projects','tasks','messages','channels','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','vault','app'];
+              const page=validPages.includes(barePage)?barePage:'dashboard';
+              const wsParts=u.workspace_dashboard_url.split('/');
+              if(wsParts.length>=3){
+                const wsUrl='/'+wsParts[1]+'/'+wsParts[2]+'/'+page;
+                window.history.replaceState({},'',wsUrl);
+              }
+            }
+          }catch(_){}
+        }
+        setCu(u);
+      }
+      setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
   // Expose DM target setter for notification click handlers
@@ -7173,7 +7200,15 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{ if(u.workspace_dashboard_url){window.history.replaceState({},'',u.workspace_dashboard_url);window._pfWsBase=u.workspace_dashboard_url;} setCu(u); }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
+    if(u.workspace_dashboard_url){
+      window._pfWsBase=u.workspace_dashboard_url;
+      // Hard redirect to ws-scoped URL so page reloads with correct URL from the start
+      window.location.replace(u.workspace_dashboard_url);
+    } else {
+      setCu(u);
+    }
+  }}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>

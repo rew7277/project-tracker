@@ -1564,6 +1564,19 @@ def totp_verify_login():
         result.pop("password", None)
         result.pop("totp_secret", None)
         result.pop("avatar_data", None)
+        # Include workspace-scoped dashboard URL (same as regular login)
+        try:
+            import re as _re_t
+            ws_row = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (u["workspace_id"],)
+            ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_slug"] = slug
+        except Exception:
+            pass
         return jsonify(result)
 
 @app.route("/api/auth/totp/reset", methods=["POST"])
