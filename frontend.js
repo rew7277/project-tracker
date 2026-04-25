@@ -1,15 +1,3 @@
-// ── Workspace URL prefix bootstrap ─────────────────────────────────────────
-// Set _pfWsBase immediately from the current URL if it looks ws-scoped.
-// This runs synchronously before React mounts, so _wsPath works from frame 0.
-(function(){
-  try{
-    var p=window.location.pathname.split('/');
-    // ws-scoped pattern: /slug/wsXXX/page  → p[2] starts with 'ws'
-    if(p.length>=3&&p[2]&&p[2].startsWith('ws')){
-      window._pfWsBase='/'+p[1]+'/'+p[2]+'/dashboard';
-    }
-  }catch(e){}
-})();
 const {useState,useEffect,useRef,useCallback,useMemo}=React;
 const RC=Recharts;
 
@@ -38,7 +26,7 @@ function AppLoader(){
           <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" strokeWidth="3.5" strokeLinecap="round"/>
         </svg>
       </div>
-      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>Project Tracker</div>
+      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>VEWIT</div>
       <div style=${{fontSize:13,color:'rgba(174,174,178,0.6)',letterSpacing:'0.05em',marginBottom:36}}>AI-Powered Workspace</div>
       <div style=${{width:180,height:2,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',margin:'0 auto'}}>
         <div style=${{height:'100%',borderRadius:2,background:'linear-gradient(90deg,#5a8cff,#a855f7,#ec4899)',animation:'vwBoot-bar 1.8s cubic-bezier(0.4,0,0.2,1) infinite'}}></div>
@@ -47,15 +35,8 @@ function AppLoader(){
   </div>`;
 }
 
-// Global abort controller — cancelled on logout to stop all in-flight requests
-let _apiAbortCtrl = new AbortController();
 const api={
-  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:u=>fetch(u,{credentials:'include',signal:_apiAbortCtrl.signal}).then(r=>r.json()).catch(e=>{if(e.name==='AbortError')return null;return {};}),
-  post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})),
-  upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
+  get:u=>fetch(u,{credentials:'include'}).then(r=>r.json()).catch(()=>({})), post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})), upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
 };
 
 const STAGES={
@@ -121,8 +102,6 @@ class ErrorBoundary extends React.Component{
 /* ─── AuthScreen — Apple iPhone 17 Pro Design Language ──────────────────── */
 function AuthScreen({onLogin}){
   const _initTab=(()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='register'?'register':'login';}catch{return 'login';}})();
-  const _initWsId=(()=>{try{return new URLSearchParams(window.location.search).get('ws')||'';}catch{return '';}})();
-  const _initWsName=(()=>{try{return decodeURIComponent(new URLSearchParams(window.location.search).get('ws_name')||'');}catch{return '';}})();
   const [tab,setTabRaw]=useState(_initTab);
   const [regMode,setRegMode]=useState('create');
   const [wsName,setWsName]=useState('');
@@ -408,7 +387,7 @@ function AuthScreen({onLogin}){
       if(regMode==='join'&&!inviteCode){setErr('Enter the invite code.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       const r=await api.post('/api/auth/register',{mode:regMode,workspace_name:wsName,invite_code:inviteCode,name,email,password:pw,role});
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
-      else{setSuccessMsg('Welcome to Project Tracker, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
+      else{setSuccessMsg('Welcome to VEWIT, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
     }
   };
 
@@ -417,7 +396,6 @@ function AuthScreen({onLogin}){
     if(tok.length!==6){setErr('Enter the 6-digit code.');return;}
     setErr('');setPhase('loading');
     const r=await api.post('/api/auth/totp/verify',{user_id:totpUserId,token:tok});
-    if(!r){setErr('Server error. Please try again.');setPhase('idle');return;}
     if(r.error){setErr(r.error);setTotpToken('');setPhase('idle');}
     else{setSuccessMsg('Verified! Welcome back, '+totpUserName);setPhase('success');setTimeout(()=>onLogin(r),1800);}
   };
@@ -445,7 +423,7 @@ function AuthScreen({onLogin}){
             <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
           </svg>
         </div>
-        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>Project Tracker</span>
+        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>VEWIT</span>
       </div>
 
       <!-- Center hero -->
@@ -584,7 +562,7 @@ function AuthScreen({onLogin}){
           <div style=${{width:30,height:30,borderRadius:9,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 3px 14px rgba(90,140,255,0.45)'}}>
             <svg width="17" height="17" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="8.5" fill="white"/><circle cx="32" cy="11" r="5.5" fill="white" opacity=".9"/><circle cx="51" cy="43" r="5.5" fill="white" opacity=".9"/><circle cx="13" cy="43" r="5.5" fill="white" opacity=".9"/><line x1="32" y1="16.5" x2="32" y2="23.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="46" y1="40" x2="40.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/></svg>
           </div>
-          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>Project Tracker</span>
+          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>VEWIT</span>
         </div>
 
         <!-- Headline -->
@@ -592,7 +570,7 @@ function AuthScreen({onLogin}){
           ${tab==='login'?'Sign in.':'Get started.'}
         </h1>
         <p style=${{fontSize:14,color:'rgba(175,170,210,0.5)',marginBottom:28,lineHeight:1.6}}>
-          ${tab==='login'?'Access your Project Tracker workspace.':'Create your team workspace.'}
+          ${tab==='login'?'Access your VEWIT workspace.':'Create your team workspace.'}
         </p>
 
         <!-- Tab switcher — Apple segmented control -->
@@ -678,19 +656,19 @@ function AuthScreen({onLogin}){
         <!-- Switch tab -->
         <p style=${{fontSize:13.5,color:'rgba(175,170,210,0.4)',textAlign:'center',marginTop:22,lineHeight:1.7}}>
           ${tab==='login'
-            ?html`New to Project Tracker? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
+            ?html`New to VEWIT? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
             :html`Already have an account? <button class="ap-link" onClick=${()=>setTab('login')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Sign in</button>`}
         </p>
 
         <!-- Help / legal -->
         <div style=${{marginTop:28,paddingTop:20,borderTop:'1px solid rgba(255,255,255,0.05)',display:'flex',justifyContent:'center',gap:20,flexWrap:'wrap'}}>
-          <a href="mailto:support@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:support@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(90,140,255,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🛟 support@project-tracker.in
+            🛟 support@vewit.in
           </a>
-          <a href="mailto:ceo@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:ceo@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(168,85,247,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🤝 ceo@project-tracker.in
+            🤝 ceo@vewit.in
           </a>
         </div>
 
@@ -1100,7 +1078,7 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
           <svg width="14" height="14" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="9" fill="white"/><circle cx="32" cy="11" r="6" fill="white" opacity=".9"/><circle cx="51" cy="43" r="6" fill="white" opacity=".9"/><circle cx="13" cy="43" r="6" fill="white" opacity=".9"/><line x1="32" y1="17" x2="32" y2="23" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="46" y1="40" x2="40" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="18" y1="40" x2="24" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/></svg>
         </div>
         ${!col?html`<div style=${{flex:1,minWidth:0}}>
-          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'Project Tracker'}</div>
+          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'VEWIT'}</div>
           ${activeTeam?html`<div style=${{fontSize:10,color:'var(--ac)',fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:4}}>
             ${!isAdminManager?html`<span style=${{color:'rgba(255,255,255,.3)',fontWeight:400}}>My Team</span>`:null}
             ${activeTeam.name}
@@ -1797,7 +1775,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
 }
 
 /* ─── ProjectDetail ───────────────────────────────────────────────────────── */
-function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,onSetReminder,teams,activeTeam}){
+function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,onSetReminder,teams,activeTeam}){
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
@@ -1829,16 +1807,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
     await onReload();setSaving(false);setEdit(false);
   };
-  const delProject=async()=>{
-    if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
-    onClose(); // close modal immediately for snappy feel
-    // Optimistic: remove project + its tasks from UI right away
-    setData&&setData(prev=>({...prev,
-      projects:prev.projects.filter(p=>p.id!==project.id),
-      tasks:prev.tasks.filter(t=>t.project!==project.id)
-    }));
-    api.del('/api/projects/'+project.id).then(()=>onReload()).catch(()=>onReload());
-  };
+  const delProject=async()=>{if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;await api.del('/api/projects/'+project.id);await onReload();onClose();};
   const saveTask=async p=>{
     let r;
     if(p.id&&allTasks.find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
@@ -1993,7 +1962,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
+function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -2026,25 +1995,15 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      // Build ws-scoped project URL if possible
-      try{
-        const dashUrl=window._pfWsBase||window.location.pathname;
-        const wsParts=dashUrl.split('/');
-        const wsBase=(wsParts.length>=3&&wsParts[2]&&wsParts[2].startsWith('ws'))?'/'+wsParts[1]+'/'+wsParts[2]:'';
-        history.pushState(null,'',wsBase+'/projects/'+slug);
-      }catch(_){history.pushState(null,'','/projects/'+slug);}
-      document.title='Project Tracker — '+detail.name+' | Projects';
+      history.pushState(null,'','/projects/'+slug);
+      document.title='VEWIT — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      const _cp=window.location.pathname;
-      if(_cp.includes('/projects/')){
-        // Restore to ws-scoped /projects or bare /projects
-        const _wsParts=_cp.split('/');
-        const _wsBase=(_wsParts.length>=3&&_wsParts[2]&&_wsParts[2].startsWith('ws'))?'/'+_wsParts[1]+'/'+_wsParts[2]:'';
-        history.pushState(null,'',_wsBase+'/projects');
-        document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
+      if(window.location.pathname.startsWith('/projects/')){
+        history.pushState(null,'','/projects');
+        document.title='VEWIT — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
   }},[detail]);
@@ -2054,15 +2013,13 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
   useEffect(()=>{
     const onPop=()=>{
       const parts=window.location.pathname.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        const p=safe(projects).find(proj=>proj.id===pidSeg);
+      if(parts[1]==='projects'&&parts[2]){
+        const p=safe(projects).find(proj=>proj.id===parts[2]);
         if(p){setDetail(p);return;}
       }
-      if(projSeg==='projects'&&!pidSeg){setDetail(null);}
+      if(window.location.pathname==='/projects'||window.location.pathname==='/projects/'){
+        setDetail(null);
+      }
     };
     window.addEventListener('popstate',onPop);
     return()=>window.removeEventListener('popstate',onPop);
@@ -2083,8 +2040,9 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Optimistic: inject new project immediately, then sync once in background
-      reload();
+      await new Promise(r=>setTimeout(r,300));
+      await reload();
+      setTimeout(()=>reload(),1000);
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
 
@@ -2302,7 +2260,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
         </div>`:null}
 
       ${detail?html`<${ProjectDetail} project=${detail} allTasks=${tasks} allUsers=${users} cu=${cu}
-        onClose=${()=>setDetail(null)} onReload=${reload} setData=${setData} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
+        onClose=${()=>setDetail(null)} onReload=${reload} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
     </div>`;
 }
 
@@ -2311,7 +2269,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2422,17 +2380,9 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Optimistic: reflect change immediately, server will confirm
-    if(p.id){
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-    }
     reload();return r;
   };
-  const delT=async id=>{
-    // Optimistic: remove from UI immediately
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
-    api.del('/api/tasks/'+id).then(()=>reload()).catch(()=>reload());
-  };
+  const delT=async id=>{await api.del('/api/tasks/'+id);reload();};
   const quickStage=async(tid,stage)=>{
     const autoPct=STAGE_PCT[stage];
     const payload={stage};
@@ -2442,9 +2392,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tk=safe(tasks).find(t=>t.id===tid);
       if(tk)triggerTaskCelebration(tk.title,tk.project);
     }
-    // Optimistic: update stage in UI immediately
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tid?{...t,...payload}:t)}));
-    api.put('/api/tasks/'+tid,payload).then(()=>reload()).catch(()=>reload());
+    await api.put('/api/tasks/'+tid,payload);reload();
   };
 
   // Export filtered tasks as CSV
@@ -2468,7 +2416,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     const csv='data:text/csv;charset=utf-8,'+[headers,...rows].map(r=>r.join(',')).join('\n');
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
-    a.setAttribute('download','project-tracker_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
+    a.setAttribute('download','vewit_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -3459,7 +3407,7 @@ function MessagesView({projects,users,cu,tasks}){
       }
     };
     fetchTs();
-    const id=setInterval(()=>{if(!document.hidden)fetchTs();},45000); // 45s, skip when tab hidden
+    const id=setInterval(fetchTs,15000); // reduced 8s→15s
     return()=>clearInterval(id);
   },[]);
 
@@ -3513,7 +3461,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },30000); // 30s channel message poll — SSE handles real-time, this is fallback
+    },2000);
     return()=>clearInterval(id);
   },[pid]);
 
@@ -3801,7 +3749,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },30000); // 30s DM message poll — SSE handles real-time, this is fallback
+    },3000);
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -4828,7 +4776,7 @@ function WorkspaceSettings({cu,onReload}){
               <div>
                 <div style=${{fontSize:13,fontWeight:700,color:planColors[plan]||'var(--tx)'}}>${planLabels[plan]||plan}</div>
                 <div style=${{fontSize:11,color:'var(--tx3)',marginTop:2}}>
-                  ${limit?html\`Member limit: \${limit} · Contact ceo@project-tracker.in to upgrade\`:html\`Unlimited members\`}
+                  ${limit?html\`Member limit: \${limit} · Contact ceo@vewit.in to upgrade\`:html\`Unlimited members\`}
                 </div>
               </div>
               <div style=${{fontSize:22,padding:'6px 14px',background:plan==='team'?'rgba(90,140,255,.12)':plan==='enterprise'?'rgba(168,85,247,.12)':'var(--sf2)',borderRadius:8,fontWeight:700,color:planColors[plan]||'var(--tx3)',border:'1px solid var(--bd)'}}>
@@ -4837,7 +4785,7 @@ function WorkspaceSettings({cu,onReload}){
             </div>
             ${plan==='starter'?html\`
               <div style=${{fontSize:12,padding:'9px 12px',background:'rgba(90,140,255,.06)',borderRadius:8,border:'1px solid rgba(90,140,255,.15)',color:'var(--tx2)'}}>
-                🚀 <b>Upgrade to Team</b> — Get up to 30 members, analytics, custom SMTP & more for ₹999/mo. Email <a href="mailto:ceo@project-tracker.in" style=${{color:'var(--ac)'}}>ceo@project-tracker.in</a>
+                🚀 <b>Upgrade to Team</b> — Get up to 30 members, analytics, custom SMTP & more for ₹999/mo. Email <a href="mailto:ceo@vewit.in" style=${{color:'var(--ac)'}}>ceo@vewit.in</a>
               </div>
             \`:null}
           \`;
@@ -4940,157 +4888,6 @@ function WorkspaceSettings({cu,onReload}){
           ${saving?html`<span class="spin"></span>`:saved?'✓ Saved!':'Save Settings'}
         </button>
       </div>
-    </div>
-    <${SSOSettingsCard} cu=${cu} ws=${ws}/>
-  </div>`;
-}
-
-/* ─── SSO Settings Card ───────────────────────────────────────────────────── */
-function SSOSettingsCard({cu,ws}){
-  const isAdmin=cu&&(cu.role==='Admin'||cu.role==='Owner');
-  const [cfg,setCfg]=useState(null);
-  const [saving,setSaving]=useState(false);
-  const [saved,setSaved]=useState(false);
-  const [testing,setTesting]=useState(false);
-  const [testResult,setTestResult]=useState(null);
-  const [metaUrl,setMetaUrl]=useState('');
-  const [wsUrl,setWsUrl]=useState(null);
-
-  useEffect(()=>{
-    if(!isAdmin)return;
-    api.get('/api/sso/config').then(d=>{if(!d.error)setCfg(d);});
-    api.get('/api/sso/workspace-url').then(d=>{if(!d.error)setWsUrl(d);});
-  },[]);
-
-  const save=async()=>{
-    if(!cfg)return;
-    setSaving(true);
-    await api.put('/api/sso/config',cfg);
-    setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2500);
-  };
-
-  const testMeta=async()=>{
-    if(!metaUrl){alert('Enter a metadata URL first');return;}
-    setTesting(true);setTestResult(null);
-    const r=await api.post('/api/sso/test-metadata',{metadata_url:metaUrl});
-    setTesting(false);
-    if(r.ok){
-      setCfg(prev=>({...prev,sso_idp_url:r.idp_sso_url||prev.sso_idp_url,sso_entity_id:r.entity_id||prev.sso_entity_id}));
-      setTestResult({ok:true,msg:`\u2713 Metadata parsed \u2014 IdP SSO URL: ${r.idp_sso_url||'(not found)'}`});
-    } else {
-      setTestResult({ok:false,msg:`\u2717 ${r.error}`});
-    }
-    setTimeout(()=>setTestResult(null),6000);
-  };
-
-  const copy=t=>navigator.clipboard&&navigator.clipboard.writeText(t);
-
-  const ROW=({label,children,hint})=>html`
-    <div style=${{marginBottom:18}}>
-      <label style=${{display:'block',fontSize:11,fontWeight:700,letterSpacing:'.07em',textTransform:'uppercase',color:'var(--tx3)',marginBottom:6}}>${label}</label>
-      ${children}
-      ${hint&&html`<div style=${{fontSize:11,color:'var(--tx3)',marginTop:4}}>${hint}</div>`}
-    </div>`;
-
-  if(!isAdmin)return null;
-  if(!cfg)return html`<div style=${{padding:'24px',textAlign:'center'}}><span class="spin"></span></div>`;
-
-  return html`
-  <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'24px',marginTop:24}}>
-    <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:20}}>
-      <div style=${{width:38,height:38,borderRadius:11,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>&#128273;</div>
-      <div>
-        <h3 style=${{fontSize:14,fontWeight:700,color:'var(--tx)',margin:0}}>SSO / SAML Authentication</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',margin:0,marginTop:2}}>Let team members sign in via your Identity Provider (Okta, Azure AD, Google Workspace, etc.)</p>
-      </div>
-    </div>
-
-    ${wsUrl&&html`
-    <div style=${{background:'var(--bg)',border:'1px solid var(--bd)',borderRadius:12,padding:'14px 16px',marginBottom:20}}>
-      <div style=${{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--tx3)',marginBottom:10}}>Your Workspace URLs</div>
-      ${[
-        {label:'Dashboard',val:wsUrl.dashboard_url},
-        {label:'SSO Login',val:wsUrl.sso_login_url},
-        {label:'SSO Callback (ACS)',val:wsUrl.sso_callback_url},
-      ].map(({label,val})=>html`
-        <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-          <span style=${{fontSize:11,fontWeight:600,color:'var(--tx3)',width:100,flexShrink:0}}>${label}</span>
-          <code style=${{flex:1,fontSize:11,background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:7,padding:'5px 10px',color:'var(--ac)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${val}</code>
-          <button class="btn bg" style=${{padding:'5px 10px',fontSize:11}} onClick=${()=>copy(val)}>Copy</button>
-        </div>
-      `)}
-    </div>`}
-
-    <${ROW} label="Enable SSO">
-      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
-        <input type="checkbox" checked=${!!cfg.sso_enabled}
-          onChange=${e=>setCfg(p=>({...p,sso_enabled:e.target.checked?1:0}))}
-          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
-        <span style=${{fontSize:13,color:'var(--tx)'}}>Enable SAML 2.0 SSO for this workspace</span>
-      </label>
-    <//>
-
-    ${cfg.sso_enabled?html`
-    <${ROW} label="Import from IdP Metadata URL" hint="Paste your IdP metadata URL and click Test \u2014 it will auto-fill the fields below.">
-      <div style=${{display:'flex',gap:8}}>
-        <input class="vinp" style=${{flex:1,fontSize:13}} placeholder="https://login.microsoftonline.com/\u2026/federationmetadata/\u2026"
-          value=${metaUrl} onInput=${e=>setMetaUrl(e.target.value)}/>
-        <button class="btn bp" style=${{fontSize:12,padding:'8px 16px',whiteSpace:'nowrap'}} onClick=${testMeta} disabled=${testing}>
-          ${testing?html`<span class="spin"></span>`:'Test & Import'}
-        </button>
-      </div>
-      ${testResult&&html`<div style=${{marginTop:8,fontSize:12,padding:'8px 12px',borderRadius:8,
-        background:testResult.ok?'rgba(48,209,88,.1)':'rgba(255,59,48,.1)',
-        color:testResult.ok?'var(--green)':'var(--red)',border:'1px solid '+(testResult.ok?'rgba(48,209,88,.3)':'rgba(255,59,48,.3)')
-      }}>${testResult.msg}</div>`}
-    <//>
-
-    <${ROW} label="IdP SSO URL" hint="The SAML endpoint where AuthnRequests are sent.">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://idp.example.com/sso/saml"
-        value=${cfg.sso_idp_url||''} onInput=${e=>setCfg(p=>({...p,sso_idp_url:e.target.value}))}/>
-    <//>
-
-    <${ROW} label="Entity ID / Issuer" hint="Your Service Provider entity ID (usually your app URL).">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://app.project-tracker.in"
-        value=${cfg.sso_entity_id||''} onInput=${e=>setCfg(p=>({...p,sso_entity_id:e.target.value}))}/>
-    <//>
-
-    <${ROW} label="IdP x.509 Certificate" hint="Paste the raw PEM certificate from your IdP (starts with -----BEGIN CERTIFICATE-----)">
-      <textarea class="vinp" style=${{width:'100%',fontSize:11,fontFamily:'monospace',minHeight:80,resize:'vertical'}}
-        placeholder="-----BEGIN CERTIFICATE-----&#10;MIIxxxxx\u2026&#10;-----END CERTIFICATE-----"
-        value=${cfg.sso_x509_cert||''} onInput=${e=>setCfg(p=>({...p,sso_x509_cert:e.target.value}))}></textarea>
-    <//>
-
-    <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-      <${ROW} label="Email Attribute" hint="SAML attribute name for user email">
-        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="email"
-          value=${cfg.sso_attr_email||'email'} onInput=${e=>setCfg(p=>({...p,sso_attr_email:e.target.value}))}/>
-      <//>
-      <${ROW} label="Name Attribute" hint="SAML attribute name for display name">
-        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="name"
-          value=${cfg.sso_attr_name||'name'} onInput=${e=>setCfg(p=>({...p,sso_attr_name:e.target.value}))}/>
-      <//>
-    </div>
-
-    <${ROW} label="Workspace URL Slug" hint="Customise the slug in your workspace URL (e.g. 'acme' \u2192 /acme/wsXXX/dashboard)">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="my-company"
-        value=${cfg.workspace_slug||''} onInput=${e=>setCfg(p=>({...p,workspace_slug:e.target.value.toLowerCase().replace(/[^a-z0-9-]/g,'-')}))}/>
-    <//>
-
-    <${ROW} label="Allow Password Login">
-      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
-        <input type="checkbox" checked=${cfg.sso_allow_password_login!==0}
-          onChange=${e=>setCfg(p=>({...p,sso_allow_password_login:e.target.checked?1:0}))}
-          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
-        <span style=${{fontSize:13,color:'var(--tx)'}}>Allow members to also use email + password login</span>
-      </label>
-    <//>
-    `:null}
-
-    <div style=${{display:'flex',gap:10,justifyContent:'flex-end',marginTop:8}}>
-      <button class="btn bp" onClick=${save} disabled=${saving}>
-        ${saving?html`<span class="spin"></span>`:saved?'\u2713 Saved!':'Save SSO Settings'}
-      </button>
     </div>
   </div>`;
 }
@@ -5208,7 +5005,7 @@ Your workspace has **${safe(projects).length} projects**, **${safe(tasks).length
     const taskCtx=safe(tasks).filter(t=>t.stage!=='completed').slice(0,20).map(t=>`- [${t.id}] ${t.title} | ${t.stage} | ${t.priority}`).join('\n');
     const teamCtx=safe(users).map(u=>`- ${u.name} (${u.role})`).join('\n');
 
-    const systemPrompt=`You are an expert technical documentation assistant for Project Tracker, an AI-powered project management platform.
+    const systemPrompt=`You are an expert technical documentation assistant for VEWIT, an AI-powered project management platform.
 
 WORKSPACE CONTEXT:
 Projects (${safe(projects).length} total):
@@ -5233,19 +5030,29 @@ INSTRUCTIONS:
     const history=messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-12).map(m=>({role:m.role,content:m.content}));
     history.push({role:'user',content:text});
 
-    // Route ALL AI calls through backend — API key never exposed to browser
+    // Check for API key
+    const ws=await api.get('/api/workspace');
+    if(!ws.ai_api_key){
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.\n\nYou can get a key at [anthropic.com](https://anthropic.com).'}:msg));
+      setSending(false);scrollToBottom();return;
+    }
+
     try{
-      const r=await api.post('/api/ai/chat',{message:text,history:messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-10).map(m=>({role:m.role,content:m.content}))});
-      if(r.error==='NO_KEY'){
-        setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.'}:msg));
-        setSending(false);scrollToBottom();return;
+      const r=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-api-key':ws.ai_api_key,'anthropic-version':'2023-06-01'},
+        body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:3000,system:systemPrompt,messages:history})
+      });
+      if(!r.ok){
+        const e=await r.json().catch(()=>({}));
+        throw new Error(e.error?.message||'API error '+r.status);
       }
-      if(r.error){throw new Error(r.message||r.error);}
-      const reply=r.message||'Sorry, I could not generate a response.';
+      const data=await r.json();
+      const reply=data.content?.[0]?.text||'Sorry, I could not generate a response.';
       setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'assistant',content:reply}:msg));
     }catch(e){
       const errMsg=e.message||'Network error';
-      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nCheck your API key in Workspace Settings.`}:msg));
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nPlease check your API key in Workspace Settings.`}:msg));
     }
     setSending(false);scrollToBottom();
     // Auto-save to recents after AI responds
@@ -5723,7 +5530,7 @@ function updateBadge(count){
       }
       const links=document.querySelectorAll("link[rel*='icon']");
       links.forEach(l=>{l.href=canvas.toDataURL();});
-      document.title=count>0?'('+count+') Project Tracker':'Project Tracker';
+      document.title=count>0?'('+count+') VEWIT':'VEWIT';
     };
     img.src=NOTIF_ICON;
   }catch(e){}
@@ -5735,7 +5542,7 @@ async function requestNotifPermission(){
       const {isPermissionGranted,requestPermission,sendNotification}=window.__TAURI__.notification;
       let ok=await isPermissionGranted();
       if(!ok){const p=await requestPermission();ok=(p==='granted');}
-      if(ok)await sendNotification({title:'Project Tracker',body:'Notifications enabled.'});
+      if(ok)await sendNotification({title:'VEWIT',body:'Notifications enabled.'});
       return;
     }catch(e){}
   }
@@ -5759,7 +5566,7 @@ async function requestNotifPermission(){
           }
         }catch(e){}
       }
-      new Notification('Project Tracker',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
+      new Notification('VEWIT',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
     }
   }
 }
@@ -6386,7 +6193,7 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
     const lbl=filterMode==='today'?localToday():filterMode==='yesterday'?'yesterday':filterMode==='week'?'thisweek':filterMode==='month'?filterMonth:'custom';
-    a.setAttribute('download','project-tracker_timelogs_'+lbl+'.csv');
+    a.setAttribute('download','vewit_timelogs_'+lbl+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -6716,24 +6523,16 @@ function TimesheetView({cu,teams,users,projects,tasks}){
   </div>`;
 }
 function App(){
-  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
-  // Skip loading screen if we know user has no active session — show login instantly
-  const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
-  const [loading,setLoading]=useState(_hadSession);
+  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);const [loading,setLoading]=useState(true);
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet'];
   // Also treat /projects/<id> as valid
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      const parts=p.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>  → parts[3]==='projects'
-      // bare:      /projects/<pid>                    → parts[1]==='projects'
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        setInitialProjectId(pidSeg);
+      if(p.startsWith('/projects/')&&p.length>10){
+        const pid=p.split('/')[2];
+        if(pid)setInitialProjectId(pid);
         setView('projects');
       }
     }catch(e){}
@@ -6741,23 +6540,16 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const p = wsView || parts[0].trim();
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
-      if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
-      else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
+      if(p&&VIEW_T[p]) document.title='VEWIT — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
+      else document.title='VEWIT — AI-Powered Team Collaboration Platform';
     }catch(e){}
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-      // bare:      /<view>                     → parts[0]
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const bareView = parts[0].trim();
-      const candidate = wsView || bareView;
-      if(candidate && VALID_VIEWS.includes(candidate)) return candidate;
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
@@ -6771,50 +6563,21 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
-  // Build ws-scoped path helper — reads prefix from multiple sources for robustness
-  const _wsPath=useCallback((page)=>{
-    try{
-      // Source 1: window._pfWsBase set synchronously on login / /api/auth/me
-      const base=window._pfWsBase;
-      if(base){
-        const p=base.split('/');
-        // p = ['','fsbl','ws123','dashboard']
-        if(p.length>=3&&p[2]&&p[2].startsWith('ws'))
-          return '/'+p[1]+'/'+p[2]+'/'+page;
-      }
-      // Source 2: current URL is already ws-scoped (e.g. /fsbl/ws123/dashboard)
-      const loc=window.location.pathname.split('/');
-      if(loc.length>=3&&loc[2]&&loc[2].startsWith('ws'))
-        return '/'+loc[1]+'/'+loc[2]+'/'+page;
-      // Source 3: React state cu (may be null on first render)
-      const url=cu&&cu.workspace_dashboard_url;
-      if(url){
-        const parts=url.split('/');
-        if(parts.length>=3&&parts[2]&&parts[2].startsWith('ws'))
-          return '/'+parts[1]+'/'+parts[2]+'/'+page;
-      }
-    }catch(e){}
-    return '/'+page; // last-resort fallback
-  },[cu]);
   const _setView=useCallback((v)=>{
     setView(v);
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'',_wsPath(base));
-        document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
+        history.pushState(null,'','/'+base);
+        document.title='VEWIT — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[_wsPath]);
+  },[]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const parts=window.location.pathname.replace(/^\//, '').split('/');
-        // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-        const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-        const bareView = parts[0].trim();
-        const p = wsView || bareView;
+        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -6863,15 +6626,13 @@ function App(){
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    // Fire beat immediately on mount (beat already calls fetchPresence — no double-fetch)
-    beat();
-    const beatId=setInterval(()=>{
-      // Skip heartbeat if tab is hidden — saves DB writes when user switches tabs
-      if(!document.hidden) beat();
-    },60000); // 60s heartbeat — presence updates are low-priority
-    const onFocus=()=>{beat();}; // immediate refresh when tab regains focus
-    window.addEventListener('focus',onFocus);
-    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
+    // Fire immediately on mount
+    fetchPresence(); // fetch current online users right away (don't wait for beat)
+    beat();          // then beat + fetch again
+    const beatId=setInterval(beat,15000);
+    window.addEventListener('focus',()=>{beat();});
+    const presId=setInterval(fetchPresence,20000); // reduced 8s→20s
+    return()=>{clearInterval(beatId);clearInterval(presId);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -6922,56 +6683,20 @@ function App(){
     try{
       const projUrl=tCtx?'/api/projects?team_id='+tCtx:'/api/projects';
       const taskUrl=tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks';
-      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw,rems]=await Promise.all([
-        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'),api.get('/api/reminders'), ]);
+      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw]=await Promise.all([
+        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'), ]);
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
       setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      // Keep _pfWsBase in sync if workspace slug changes
-      if(ws&&ws.id){
-        try{
-          const _slug=ws.workspace_slug||(ws.name||'workspace').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-          window._pfWsBase='/'+_slug+'/'+ws.id+'/dashboard';
-        }catch(_){}
-      }
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
+      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error(e);}
   },[cu]);
 
-  useEffect(()=>{
-    api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){
-        if(u.workspace_dashboard_url){
-          window._pfWsBase=u.workspace_dashboard_url;
-          // If currently on a bare path, redirect to ws-scoped URL immediately
-          try{
-            const loc=window.location.pathname;
-            const parts=loc.split('/');
-            const isAlreadyWsScoped=parts.length>=3&&parts[2]&&parts[2].startsWith('ws');
-            if(!isAlreadyWsScoped){
-              // Extract page segment from bare path (e.g. /dashboard → dashboard)
-              const barePage=parts[1]||'dashboard';
-              const validPages=['dashboard','projects','tasks','messages','channels','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','vault','app'];
-              const page=validPages.includes(barePage)?barePage:'dashboard';
-              const wsParts=u.workspace_dashboard_url.split('/');
-              if(wsParts.length>=3){
-                const wsUrl='/'+wsParts[1]+'/'+wsParts[2]+'/'+page;
-                window.history.replaceState({},'',wsUrl);
-              }
-            }
-          }catch(_){}
-        }
-        setCu(u);
-        try{localStorage.setItem('pf_had_session','1');}catch{} // cache: user has active session
-      } else {
-        try{localStorage.removeItem('pf_had_session');}catch{} // no session — next visit shows login instantly
-      }
-      setLoading(false);
-    }).catch(()=>{try{localStorage.removeItem('pf_had_session');}catch{}setLoading(false);});
-  },[]);
+  useEffect(()=>{api.get('/api/auth/me').then(u=>{if(u&&!u.error)setCu(u);setLoading(false);}).catch(()=>setLoading(false));},[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
   // Expose DM target setter for notification click handlers
@@ -7071,7 +6796,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },30000); // reduced 5s->30s: DM unread poll
+    },5000);
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -7094,7 +6819,7 @@ function App(){
         brandNew.forEach(n=>{
           if(n.type==='dm')return; // DMs handled by separate poll
           if(n.type==='call') return;
-          const title=NTITLES[n.type]||'Project Tracker';
+          const title=NTITLES[n.type]||'VEWIT';
           const nav=NNAV[n.type]||'notifs';
           addToast(n.type,title,n.content||'');
           showBrowserNotif(title,n.content||'',()=>{
@@ -7139,17 +6864,11 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
-    api._abort();
-    // 2. Unsubscribe from push notifications
-    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (fire-and-forget — don't await)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear React state
-    try{localStorage.removeItem('pf_had_session');}catch{} // clear session cache on logout
+    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
+    try{ await api.post('/api/auth/logout',{}); }catch(e){}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect instantly
-    window.location.replace('/');
+    // Redirect to login immediately — clears all state and shows auth page
+    window.location.href='/?action=login';
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
@@ -7172,9 +6891,7 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      // Only fetch /api/reminders/due — reminders list already kept fresh by load()
       const due=await api.get('/api/reminders/due');
-      const rems=upcomingReminders; // use already-loaded state — no extra API call
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
           addToast('reminder','⏰ Reminder: '+r.task_title,'Click to view');
@@ -7185,6 +6902,7 @@ function App(){
           playSound('reminder');
         });
       }
+      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){
         const now=new Date();
         rems.forEach(r=>{
@@ -7240,15 +6958,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
-    if(u.workspace_dashboard_url){
-      window._pfWsBase=u.workspace_dashboard_url;
-      // Hard redirect to ws-scoped URL so page reloads with correct URL from the start
-      window.location.replace(u.workspace_dashboard_url);
-    } else {
-      setCu(u);
-    }
-  }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
@@ -7324,8 +7034,8 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
-            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
+            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
@@ -7481,47 +7191,4 @@ ReactDOM.createRoot(document.getElementById('root')).render(html`<${ErrorBoundar
 if(window._vwHideBoot)window._vwHideBoot();
 };
 waitForLibs(window._pfStartApp);
-})();
-// ═══════════════════════════════════════════════════════════
-// REAL-TIME SSE CLIENT — auto-reconnect, event dispatch
-// ═══════════════════════════════════════════════════════════
-(function initSSE(){
-  if(window._ptSSEActive) return;
-  window._ptSSEActive = true;
-  let es, retryTimer, retryDelay = 2000;
-  const MAX_DELAY = 30000;
-
-  function connect(){
-    if(es){ try{es.close()}catch(e){} }
-    es = new EventSource("/api/stream");
-    es.onopen = () => { retryDelay = 2000; console.log("[PT] SSE connected"); };
-    es.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if(msg.type === "connected") return;
-        window.dispatchEvent(new CustomEvent("pt:realtime", {detail: msg}));
-        // Trigger a soft refresh on key events
-        if(["task.created","task.updated","task.deleted",
-            "ticket.created","ticket.updated",
-            "comment.added"].includes(msg.type)){
-          window.dispatchEvent(new CustomEvent("pt:refresh"));
-        }
-      } catch(err){}
-    };
-    es.onerror = () => {
-      es.close();
-      retryTimer = setTimeout(()=>{ retryDelay = Math.min(retryDelay*2, MAX_DELAY); connect(); }, retryDelay);
-    };
-  }
-
-  // Only connect when logged in (page has #root)
-  if(document.getElementById("root")){
-    connect();
-  }
-
-  // Show a live indicator dot in the header when connected
-  window.addEventListener("pt:realtime", ()=>{
-    const dot = document.getElementById("pt-live-dot");
-    if(dot){ dot.style.background="#34d399"; dot.title="Live — real-time sync active"; }
-  });
 })();

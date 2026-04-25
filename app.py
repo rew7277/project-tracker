@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 """
-Project Tracker v5.0 — Enterprise Edition
+VEWIT v4.0
 Multi-tenant workspaces | AI Assistant | Stage Dropdown | Direct Messages
 """
-# ── gevent monkey-patch — MUST be first import ───────────────────────────────
-# Enables non-blocking I/O for SSE streams and DB connections under gevent workers.
-# Safe to call even when running under gthread or development server.
-try:
-    from gevent import monkey as _monkey
-    _monkey.patch_all()
-except ImportError:
-    pass  # gevent not installed — falls back to gthread workers gracefully
-
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
 import socket, threading, time, webbrowser, mimetypes, base64, smtplib
 import re, struct, traceback, hmac, math, zlib, logging
@@ -25,7 +16,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
     stream=sys.stdout
 )
-log = logging.getLogger("project-tracker")
+log = logging.getLogger("vewit")
 try:
     import bcrypt as _bcrypt
 except ImportError:
@@ -101,7 +92,7 @@ def vault_decrypt(token: str) -> str:
         return token
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session, Response, send_file, redirect
+from flask import Flask, request, jsonify, session, Response, send_file
 from flask_cors import CORS
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -225,34 +216,9 @@ class _DB:
         self.close()
         return False
 
-class _PooledDB(_DB):
-    """Like _DB but returns connection to pool on exit instead of closing it."""
-    def __init__(self, conn, autocommit=False):
-        super().__init__(conn)
-        self._autocommit = autocommit
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self._autocommit:
-            try:
-                if exc_type: self._conn.run("ROLLBACK")
-                else: self._conn.run("COMMIT")
-            except Exception: pass
-        # Return to pool instead of closing — this is the key perf improvement
-        _return_pool_conn(self._conn)
-        return False
-
 def get_secret_key():
     env_key = os.environ.get("SECRET_KEY","")
     if len(env_key) >= 32: return env_key
-    # On Railway: derive a STABLE key from the service/project ID so that
-    # sessions survive dyno restarts (Railway filesystem is ephemeral).
-    # Without this, every restart regenerates the key → all sessions become 401.
-    for railway_var in ("RAILWAY_SERVICE_ID","RAILWAY_PROJECT_ID","RAILWAY_ENVIRONMENT"):
-        rid = os.environ.get(railway_var,"")
-        if rid:
-            import hashlib as _hl
-            stable = _hl.sha256(f"pt-stable-key::{rid}".encode()).hexdigest()
-            log.warning("[SECRET_KEY] Using Railway-derived key from %s. Set SECRET_KEY env var for best security.", railway_var)
-            return stable
     if os.path.exists(KEY_FILE):
         try:
             with open(KEY_FILE,"r") as f:
@@ -260,7 +226,6 @@ def get_secret_key():
                 if len(k)==64: return k
         except: pass
     k=secrets.token_hex(32)
-    log.warning("[SECRET_KEY] Generated ephemeral secret key — sessions will NOT survive restarts! Set SECRET_KEY env var.")
     try:
         with open(KEY_FILE,"w") as f: f.write(k)
     except: pass
@@ -275,110 +240,25 @@ app.config.update(
     SESSION_COOKIE_SECURE=_is_https,PERMANENT_SESSION_LIFETIME=86400*30,
     SESSION_COOKIE_NAME="pf_session",
     MAX_CONTENT_LENGTH=150*1024*1024)
-# CORS — restrict to known origins in production
-_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-if not _ALLOWED_ORIGINS:
-    _ALLOWED_ORIGINS = ["*"]
-    if _is_https:
-        log.warning("ALLOWED_ORIGINS not set — CORS is open in production.")
-CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
-
-# ── Gzip compression for all compressible responses ───────────────────────────
-@app.route("/healthz")
-def healthz():
-    """Lightweight health check for uptime monitors (UptimeRobot etc).
-    No DB query — just confirms the process is alive. Use this URL
-    in UptimeRobot with a 5-minute interval to prevent Railway cold starts."""
-    return jsonify({"ok": True, "uptime": str(datetime.utcnow() - APP_STARTED_AT)}), 200
-
-@app.before_request
-def block_scanners():
-    """Block common security scanner probes — archive/backup file probing, path traversal."""
-    path = request.path.lower()
-    # Block probes for exposed archive/backup files (seen in logs)
-    BAD_EXTS = ('.zip', '.rar', '.tar', '.tar.gz', '.tgz', '.bak', '.sql', '.db', '.env', '.git')
-    if any(path.endswith(ext) for ext in BAD_EXTS):
-        return '', 404
-    # Block obvious scanner paths
-    BAD_PATHS = ('/.env', '/.git', '/wp-admin', '/phpMyAdmin', '/admin.php',
-                 '/shell.php', '/.well-known/security.txt', '/xmlrpc.php',
-                 '/wp-login', '/config.php', '/setup.php', '/install.php')
-    if any(path.startswith(p.lower()) for p in BAD_PATHS):
-        return '', 404
-
-@app.after_request
-def compress_response(response):
-    """Gzip-compress HTML, JS, CSS and JSON responses when client supports it."""
-    accept_encoding = request.headers.get("Accept-Encoding", "")
-    if "gzip" not in accept_encoding:
-        return response
-    if response.status_code < 200 or response.status_code >= 300:
-        return response
-    content_type = response.content_type or ""
-    compressible = any(t in content_type for t in (
-        "text/html", "text/css", "application/javascript",
-        "application/json", "text/javascript", "text/plain"
-    ))
-    if not compressible:
-        return response
-    data = response.get_data()
-    if len(data) < 500:
-        return response
-    import gzip as _gzip
-    compressed = _gzip.compress(data, compresslevel=6)
-    if len(compressed) >= len(data):
-        return response
-    response.set_data(compressed)
-    response.headers["Content-Encoding"] = "gzip"
-    response.headers["Content-Length"] = len(compressed)
-    response.headers.pop("Content-MD5", None)
-    return response
-
-@app.after_request
-def bust_cache_on_write(response):
-    """Auto-bust cache on writes — ONLY for endpoints that don't already call
-    _cache_bust/_cache_bust_ws themselves. Uses targeted per-table bust instead
-    of full workspace bust to avoid the 30-second slowness on every mutation.
-    Endpoints like create_project, create_task already call _cache_bust directly,
-    so we skip those paths here."""
-    # NOTE: Individual endpoints call _cache_bust() with specific table names.
-    # A full _cache_bust_ws here would wipe ALL cached data on every POST/PUT/DELETE,
-    # forcing every subsequent API call to re-hit the DB — causing 30s perceived lag.
-    # Do NOT call _cache_bust_ws here. Endpoints manage their own cache invalidation.
-    return response
-
-# ── Per-request CSP nonce (stored in Flask g) ────────────────────────────────
-from flask import g as _g
-import base64 as _b64
-
-@app.before_request
-def _generate_csp_nonce():
-    """Generate a fresh cryptographic nonce for every request.
-    Stored in Flask g so route handlers can access it via g.csp_nonce.
-    The nonce is injected into the HTML template and into the CSP header
-    so inline scripts are allowed ONLY when they carry this exact nonce."""
-    _g.csp_nonce = _b64.b64encode(secrets.token_bytes(16)).decode()
+CORS(app, supports_credentials=True)
 
 @app.after_request
 def add_security_headers(response):
-    """Add security headers to every response. Uses per-request nonce for CSP."""
-    nonce = getattr(_g, "csp_nonce", "")
+    """Add security headers to every response."""
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    # 'unsafe-inline' removed — nonce-gated inline scripts only
-    nonce_src = f"'nonce-{nonce}'" if nonce else ""
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        f"script-src 'self' {nonce_src} https://unpkg.com https://cdnjs.cloudflare.com https://accounts.google.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdnjs.cloudflare.com; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
-        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com; "
-        "frame-ancestors 'self'; "
-        "frame-src https://accounts.google.com;"
+        "connect-src 'self' https://api.anthropic.com; "
+        "frame-ancestors 'self';"
     )
+    # Only set HSTS on HTTPS
     if request.is_secure:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -386,87 +266,42 @@ def add_security_headers(response):
 CLRS=["#7c3aed","#2563eb","#059669","#d97706","#dc2626","#ec4899","#0891b2","#5a8cff"]
 
 def get_db(autocommit=False):
-    """Get a DB wrapper using the connection pool for performance.
-    Falls back to a fresh connection if pool is exhausted."""
-    conn = _get_pool_conn()
-    conn.autocommit = autocommit
-    # Wrap with a pool-returning _DB
-    return _PooledDB(conn, autocommit=autocommit)
+    conn = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
+    conn.autocommit = autocommit  # pg8000 supports autocommit property
+    return _DB(conn)
 
-# ── pg8000 connection pool — pre-warmed, sized for gthread workers ──────────
-# 2 workers × 4 threads = 8 max concurrent. Keep 12 slots, pre-warm 4.
+# ── Simple pg8000 connection pool (3 reusable connections) ──────────────────
 import queue as _queue, threading as _poollock
-# Pool sized for: gunicorn workers × gevent greenlets per worker.
-# With POOL_SIZE env var support so Railway can tune without redeploy.
-import os as _os_pool
-_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "20"))
-_PG_POOL      = _queue.Queue(maxsize=_PG_POOL_SIZE)
+_PG_POOL = _queue.Queue(maxsize=5)
 _PG_POOL_LOCK = _poollock.Lock()
-_PG_KWARGS    = None   # cached once after first parse
-
-def _pg_kwargs():
-    global _PG_KWARGS
-    if _PG_KWARGS is None:
-        _PG_KWARGS = _parse_db_url(DATABASE_URL)
-    return _PG_KWARGS
-
-def _make_conn():
-    from pg8000.native import Connection as _PGConn
-    return _PGConn(**_pg_kwargs())
 
 def _get_pool_conn():
-    """Get a healthy connection from pool, or create a new one.
-    We skip the SELECT 1 health-check on every borrow — that check costs
-    one full India→US round-trip (180ms) per request, eliminating all the
-    savings from pooling. Instead we rely on try/except around real queries
-    and close broken connections there. Connections that die in the pool
-    (idle TCP timeout) are caught by _return_pool_conn's ping-before-put
-    for connections that have been idle a long time.
-    """
+    """Get a connection from pool or create a new one."""
+    from pg8000.native import Connection as _PGConn
     try:
         conn = _PG_POOL.get_nowait()
-        return conn   # trust the connection; let the real query catch breaks
+        # Test connection is still alive
+        try:
+            conn.run("SELECT 1")
+            return conn
+        except Exception:
+            try: conn.close()
+            except: pass
     except _queue.Empty:
-        return _make_conn()
-
-def _validate_conn(conn):
-    """Light ping — called only when a query fails, not on every borrow."""
-    try:
-        conn.run("SELECT 1")
-        return True
-    except Exception:
-        try: conn.close()
-        except: pass
-        return False
+        pass
+    return _PGConn(**_parse_db_url(DATABASE_URL))
 
 def _return_pool_conn(conn):
-    """Return connection to pool, or close if pool is full."""
+    """Return connection to pool, or close it if pool is full."""
     try:
         _PG_POOL.put_nowait(conn)
     except _queue.Full:
         try: conn.close()
         except: pass
 
-def _pool_conn_with_retry():
-    """Get a pool connection; if the first real query fails due to a dead
-    connection, discard it and open a fresh one. Called by _raw_pg and _DB."""
-    conn = _get_pool_conn()
-    return conn
-
-def _prewarm_pool(n=4):
-    """Open n connections at startup so first requests don't stall."""
-    for _ in range(n):
-        try:
-            conn = _make_conn()
-            _return_pool_conn(conn)
-        except Exception as _e:
-            log.warning("[pool prewarm] %s", _e)
-            break
-
 def _raw_pg(sql, params=(), fetch=False):
     """Execute SQL via pooled pg8000 native connection, bypassing _DB wrapper.
-    Returns rows if fetch=True, else None. Raises on error.
-    Retries once with a fresh connection if the pool gave a stale socket."""
+    Returns rows if fetch=True, else None. Raises on error."""
     import re as _re
     pdict = {}
     idx = [0]
@@ -476,185 +311,26 @@ def _raw_pg(sql, params=(), fetch=False):
         idx[0] += 1
         return f":{k}"
     pg_sql = _re.sub(r"\?", _rep, sql)
-
-    for attempt in range(2):
-        conn = _get_pool_conn()
-        try:
-            rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
-            cols = [c["name"] for c in (conn.columns or [])]
-            result = [dict(zip(cols, r)) for r in (rows or [])] if fetch else None
-            _return_pool_conn(conn)
-            return result
-        except Exception as _e:
-            try: conn.close()
-            except: pass
-            if attempt == 1:
-                raise
-            # first attempt failed — pool conn was stale; retry with fresh conn
-            continue
-
-# ── In-memory cache with stale-while-revalidate ─────────────────────────────
-# Serves stale data instantly while refreshing in background.
-# Result: 0ms for cached reads, fresh data within 1 refresh cycle.
-import time as _time
-import threading as _cthread
-
-_CACHE: dict = {}        # {key: {"val": ..., "ts": float, "refreshing": bool}}
-_CACHE_TTL   = 5         # serve fresh data up to 5s (was 20s — caused stale UI requiring cache clear)
-_CACHE_STALE = 60        # serve stale data up to 60s while refreshing (was 120s)
-_CACHE_LOCK  = _cthread.Lock()
-
-# ── Redis cache layer (optional, shared across workers) ──────────────────────
-# Set REDIS_URL env var (e.g. from Railway Redis service) to enable.
-# Falls back to the in-process dict cache if Redis is unavailable.
-import json as _json
-import os as _os_redis
-
-_redis_client = None
-try:
-    _REDIS_URL = _os_redis.environ.get("REDIS_URL", "")
-    if _REDIS_URL:
-        import redis as _redis_lib
-        _redis_client = _redis_lib.from_url(
-            _REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
-        _redis_client.ping()   # fail fast if unreachable
-        print("  [cache] Redis connected — shared cross-worker cache active")
-    else:
-        print("  [cache] REDIS_URL not set — using in-process dict cache")
-except Exception as _re:
-    print(f"  [cache] Redis unavailable ({_re}) — falling back to in-process cache")
-    _redis_client = None
-
-def _cache_get(key):
-    """Return cached value if fresh/stale-usable. Checks Redis first, then dict.
-    Returns None only when cache is cold or too stale."""
-    # --- Redis path ---
-    if _redis_client is not None:
-        try:
-            raw = _redis_client.get(f"ptcache:{key}")
-            if raw:
-                entry = _json.loads(raw)
-                age = _time.time() - entry["ts"]
-                if age < _CACHE_STALE:
-                    return entry["val"]
-            return None
-        except Exception:
-            pass  # Redis blip — fall through to dict cache
-
-    # --- In-process dict path ---
-    entry = _CACHE.get(key)
-    if not entry:
-        return None
-    age = _time.time() - entry["ts"]
-    if age < _CACHE_TTL:
-        return entry["val"]          # fresh — serve immediately
-    if age < _CACHE_STALE:
-        return entry["val"]          # stale but usable — caller gets it fast
-    return None                      # too old — force synchronous refresh
-
-def _cache_set(key, val):
-    # --- Redis path ---
-    if _redis_client is not None:
-        try:
-            payload = _json.dumps({"val": val, "ts": _time.time()})
-            _redis_client.setex(f"ptcache:{key}", _CACHE_STALE + 60, payload)
-            return
-        except Exception:
-            pass  # Redis blip — fall through to dict
-
-    # --- In-process dict path ---
-    with _CACHE_LOCK:
-        _CACHE[key] = {"val": val, "ts": _time.time(), "refreshing": False}
-
-def _cache_bust(workspace_id, *tables):
-    """Invalidate specific table caches for a workspace on writes."""
-    if _redis_client is not None:
-        try:
-            pattern = f"ptcache:*{workspace_id}*"
-            keys = _redis_client.keys(pattern)
-            for k in keys:
-                raw = _redis_client.get(k)
-                if raw:
-                    for t in tables:
-                        if t in k:
-                            _redis_client.delete(k)
-                            break
-            return
-        except Exception:
-            pass
-
-    with _CACHE_LOCK:
-        for key in list(_CACHE.keys()):
-            if workspace_id in key:
-                for t in tables:
-                    if t in key:
-                        _CACHE.pop(key, None)
-                        break
-
-def _cache_bust_ws(workspace_id):
-    """Bust ALL cache entries for a workspace."""
-    if _redis_client is not None:
-        try:
-            pattern = f"ptcache:*{workspace_id}*"
-            keys = _redis_client.keys(pattern)
-            if keys:
-                _redis_client.delete(*keys)
-            return
-        except Exception:
-            pass
-
-    with _CACHE_LOCK:
-        for key in list(_CACHE.keys()):
-            if workspace_id in key:
-                _CACHE.pop(key, None)
-
-
-def _cache_inject_item(workspace_id, table, item_dict):
-    """After a create, inject the new item into existing cache entries
-    so the next poll (background refresh) returns instantly from cache
-    rather than hitting the DB cold. Non-critical — failures are silent."""
+    conn = _get_pool_conn()
     try:
-        with _CACHE_LOCK:
-            for key, entry in list(_CACHE.items()):
-                if workspace_id not in key:
-                    continue
-                val = entry.get("val", {})
-                if table not in val:
-                    continue
-                if not isinstance(val[table], list):
-                    continue
-                # Only inject if not already present
-                ids = {x.get("id") for x in val[table]}
-                if item_dict.get("id") not in ids:
-                    val[table] = [item_dict] + val[table]
+        rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
+        cols = [c["name"] for c in (conn.columns or [])]
+        result = [dict(zip(cols, r)) for r in (rows or [])] if fetch else None
+        _return_pool_conn(conn)
+        return result
     except Exception:
-        pass
-
-# Shared DDL connection — reused across all _run_ddl calls to avoid opening
-# 170 separate connections on startup (which caused NO_SOCKET exhaustion).
-_DDL_CONN = None
-_DDL_LOCK = _poollock.Lock()
+        # Don't return broken connections to pool
+        try: conn.close()
+        except: pass
+        raise
 
 def _run_ddl(sql):
-    """Run a single DDL statement, reusing a shared DDL connection. Never raises."""
-    global _DDL_CONN
-    with _DDL_LOCK:
+    """Run a single DDL statement in its own fresh connection. Never raises."""
+    try:
+        conn = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
         try:
-            # Reuse existing connection if alive
-            if _DDL_CONN is not None:
-                try:
-                    _DDL_CONN.run("SELECT 1")
-                except Exception:
-                    try: _DDL_CONN.close()
-                    except: pass
-                    _DDL_CONN = None
-            if _DDL_CONN is None:
-                _DDL_CONN = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
-            _DDL_CONN.run(sql)
+            # pg8000 native does NOT auto-wrap in transactions — DDL runs directly
+            conn.run(sql)
             print(f"  [DDL OK] {sql[:80]!r}")
         except Exception as e:
             msg = str(e).lower()
@@ -664,23 +340,11 @@ def _run_ddl(sql):
                 print(f"  [DDL skip — already exists] {sql[:60]!r}")
             else:
                 print(f"  [DDL WARN] {sql[:60]!r}: {type(e).__name__}: {e}")
-                # Reset connection on real errors
-                try: _DDL_CONN.close()
-                except: pass
-                _DDL_CONN = None
-
-def _close_ddl_conn():
-    """Call after all DDL is done to release the shared connection."""
-    global _DDL_CONN
-    with _DDL_LOCK:
-        if _DDL_CONN is not None:
-            try: _DDL_CONN.close()
+        finally:
+            try: conn.close()
             except: pass
-            _DDL_CONN = None
-
-def _ensure_logout_column():
-    """Add logged_out_at column to users if it doesn't exist (migration)."""
-    _run_ddl("ALTER TABLE users ADD COLUMN logged_out_at TEXT DEFAULT ''")
+    except Exception as e:
+        print(f"  [DDL connect error] {e}")
 
 def ensure_timelog_schema():
     """Ensure time_logs has ALL required columns. Safe to call repeatedly."""
@@ -758,13 +422,13 @@ def generate_otp():
 
 def send_otp_email(to_email, otp_code, user_name):
     """Send OTP verification email."""
-    subject = "Project Tracker — Your Login Code"
+    subject = "VEWIT — Your Login Code"
     body = f"""
     <html>
     <body style="font-family: Arial, sans-serif; background:#f4f4f4; padding:20px;">
       <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
         <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-          <h1 style="color:#5a8cff;margin:0;font-size:22px;letter-spacing:-0.5px;">Project Tracker</h1>
+          <h1 style="color:#5a8cff;margin:0;font-size:22px;letter-spacing:-0.5px;">VEWIT</h1>
         </div>
         <div style="padding:32px;">
           <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
@@ -777,7 +441,7 @@ def send_otp_email(to_email, otp_code, user_name):
           <p style="color:#888;font-size:13px;margin:0;">If you didn't request this code, you can safely ignore this email. Do not share this code with anyone.</p>
         </div>
         <div style="background:#f9f9f9;padding:14px 32px;text-align:center;border-top:1px solid #eee;">
-          <p style="color:#aaa;font-size:11px;margin:0;">Project Tracker · Team Project Management</p>
+          <p style="color:#aaa;font-size:11px;margin:0;">VEWIT · Team Project Management</p>
         </div>
       </div>
     </body>
@@ -817,7 +481,7 @@ def _send_via_resend(to_email, subject, body_html, from_email):
     try:
         import json as _json
         payload = _json.dumps({
-            "from": f"Project Tracker <{from_email or 'noreply@project-tracker.in'}>",
+            "from": f"VEWIT <{from_email or 'noreply@vewit.in'}>",
             "to": [to_email],
             "subject": subject,
             "html": body_html
@@ -845,7 +509,7 @@ def _send_via_resend(to_email, subject, body_html, from_email):
 
 def send_email(to_email, subject, body_html, workspace_id=None):
     """Send email — tries Resend API first (works on Railway), falls back to SMTP."""
-    from_addr = FROM_EMAIL or SMTP_USERNAME or 'noreply@project-tracker.in'
+    from_addr = FROM_EMAIL or SMTP_USERNAME or 'noreply@vewit.in'
 
     # ── Try Resend API first (no port restrictions) ───────────────────────
     if RESEND_API_KEY:
@@ -935,7 +599,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
                 <h3 style="margin: 0 0 10px 0; color: #1f2937;">{task_title}</h3>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #6366f1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
         </div>
     </body>
     </html>
@@ -957,7 +621,7 @@ def send_status_change_email(user_email, user_name, task_title, new_stage, chang
                 <p style="margin: 0;"><strong>New Status:</strong> <span style="color: #10b981; font-weight: bold;">{new_stage}</span></p>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
         </div>
     </body>
     </html>
@@ -981,7 +645,7 @@ def send_comment_email(user_email, user_name, task_title, commenter_name, commen
                 </div>
             </div>
             <p><a href="{APP_URL}" style="display: inline-block; background: #f59e0b; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Comment</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
         </div>
     </body>
     </html>
@@ -1076,7 +740,7 @@ def init_db():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with get_db(autocommit=True) as db:
         db.executescript("""
-    CREATE TABLE IF NOT EXISTS workspaces (
+            CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY, name TEXT, invite_code TEXT,
                 owner_id TEXT, ai_api_key TEXT, created TEXT,
                 smtp_server TEXT, smtp_port INTEGER, smtp_username TEXT,
@@ -1086,11 +750,7 @@ def init_db():
                 id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, email TEXT,
                 password TEXT, role TEXT, avatar TEXT, color TEXT, created TEXT,
                 two_fa_enabled INTEGER DEFAULT 0, totp_secret TEXT DEFAULT '',
-                totp_verified INTEGER DEFAULT 0,
-                logged_out_at TEXT DEFAULT '',
-                google_id TEXT DEFAULT '',
-                google_picture TEXT DEFAULT '',
-                auth_provider TEXT DEFAULT 'password');
+                totp_verified INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, description TEXT,
                 owner TEXT, members TEXT DEFAULT '[]', start_date TEXT,
@@ -1205,9 +865,6 @@ def init_db():
             "ALTER TABLE call_rooms ADD COLUMN invited_users TEXT DEFAULT '[]'",
             "ALTER TABLE notifications ADD COLUMN sender_id TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN last_active TEXT DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN google_picture TEXT DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'password'",
             "CREATE TABLE IF NOT EXISTS time_logs (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, team_id TEXT DEFAULT '', date TEXT, task_name TEXT, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '', hours REAL DEFAULT 0, minutes INTEGER DEFAULT 0, comments TEXT DEFAULT '', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_ws ON tasks(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(workspace_id, assignee)",
@@ -1226,56 +883,8 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS vault_audit_log (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, card_id TEXT NOT NULL, action TEXT NOT NULL, detail TEXT DEFAULT '', ip TEXT DEFAULT '', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_vault_audit_user ON vault_audit_log(user_id, created)",
             "CREATE INDEX IF NOT EXISTS idx_vault_audit_card ON vault_audit_log(card_id)",
-            # Performance indexes for high-frequency polling queries
-            "CREATE INDEX IF NOT EXISTS idx_users_ws_active ON users(workspace_id, last_active)",
-            "CREATE INDEX IF NOT EXISTS idx_users_id ON users(id)",
-            "CREATE INDEX IF NOT EXISTS idx_dm_sender_ws ON direct_messages(workspace_id, sender, recipient, read)",
-            "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
-            "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
-            "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
             "ALTER TABLE workspaces ADD COLUMN plan TEXT DEFAULT 'starter'",
             "ALTER TABLE workspaces ADD COLUMN suspended INTEGER DEFAULT 0",
-            # ── Stripe billing ──
-            "ALTER TABLE workspaces ADD COLUMN stripe_customer_id TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN stripe_subscription_id TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN plan_expires TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN trial_ends TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN seat_count INTEGER DEFAULT 5",
-            # ── Usage metering ──
-            "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT, event_type TEXT, quantity INTEGER DEFAULT 1, meta TEXT DEFAULT '{}', created TEXT)",
-            "CREATE INDEX IF NOT EXISTS idx_usage_ws ON usage_events(workspace_id, event_type, created)",
-            # ── Public API keys ──
-            "CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, name TEXT, key_hash TEXT, key_prefix TEXT, scopes TEXT DEFAULT '[]', last_used TEXT DEFAULT '', created TEXT, expires TEXT DEFAULT '')",
-            "CREATE INDEX IF NOT EXISTS idx_apikeys_ws ON api_keys(workspace_id)",
-            "CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(key_hash)",
-            # ── Webhooks ──
-            "CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, url TEXT, events TEXT DEFAULT '[]', secret TEXT DEFAULT '', enabled INTEGER DEFAULT 1, last_triggered TEXT DEFAULT '', fail_count INTEGER DEFAULT 0, created TEXT)",
-            "CREATE TABLE IF NOT EXISTS webhook_logs (id TEXT PRIMARY KEY, webhook_id TEXT, event TEXT, status_code INTEGER DEFAULT 0, response TEXT DEFAULT '', created TEXT)",
-            "CREATE INDEX IF NOT EXISTS idx_webhooks_ws ON webhooks(workspace_id)",
-            "CREATE INDEX IF NOT EXISTS idx_whlogs_wh ON webhook_logs(webhook_id, created)",
-            # ── Custom fields ──
-            "CREATE TABLE IF NOT EXISTS custom_fields (id TEXT PRIMARY KEY, workspace_id TEXT, entity_type TEXT DEFAULT 'task', name TEXT, field_type TEXT DEFAULT 'text', options TEXT DEFAULT '[]', required INTEGER DEFAULT 0, created TEXT)",
-            "CREATE TABLE IF NOT EXISTS custom_field_values (id TEXT PRIMARY KEY, workspace_id TEXT, field_id TEXT, entity_id TEXT, value TEXT DEFAULT '', created TEXT, updated TEXT)",
-            "CREATE INDEX IF NOT EXISTS idx_cfv_entity ON custom_field_values(entity_id)",
-            "CREATE INDEX IF NOT EXISTS idx_cf_ws ON custom_fields(workspace_id)",
-            # ── SLA tracking for tickets ──
-            "ALTER TABLE tickets ADD COLUMN sla_hours INTEGER DEFAULT 24",
-            "ALTER TABLE tickets ADD COLUMN sla_breached INTEGER DEFAULT 0",
-            "ALTER TABLE tickets ADD COLUMN first_response_at TEXT DEFAULT ''",
-            "ALTER TABLE tickets ADD COLUMN resolved_at TEXT DEFAULT ''",
-            "ALTER TABLE tickets ADD COLUMN sla_due_at TEXT DEFAULT ''",
-            # ── Onboarding ──
-            "ALTER TABLE workspaces ADD COLUMN onboarding_done INTEGER DEFAULT 0",
-            "ALTER TABLE workspaces ADD COLUMN onboarding_step INTEGER DEFAULT 0",
-            # ── Enhanced audit log ──
-            "ALTER TABLE audit_log ADD COLUMN entity_type TEXT DEFAULT ''",
-            "ALTER TABLE audit_log ADD COLUMN entity_id TEXT DEFAULT ''",
-            "ALTER TABLE audit_log ADD COLUMN old_value TEXT DEFAULT ''",
-            "ALTER TABLE audit_log ADD COLUMN new_value TEXT DEFAULT ''",
-            # ── Time tracking ──
-            "CREATE TABLE IF NOT EXISTS time_entries (id TEXT PRIMARY KEY, workspace_id TEXT, task_id TEXT, user_id TEXT, description TEXT DEFAULT '', minutes INTEGER DEFAULT 0, billable INTEGER DEFAULT 1, date TEXT DEFAULT '', created TEXT, updated TEXT)",
-            "CREATE INDEX IF NOT EXISTS idx_time_ws ON time_entries(workspace_id, user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_time_task ON time_entries(task_id)",
             "ALTER TABLE audit_log ADD COLUMN ip TEXT DEFAULT ''",
             # Performance indexes missing from original schema
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
@@ -1289,16 +898,6 @@ def init_db():
             "ALTER TABLE users ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT ''",
-            # ── SSO / SAML support ──
-            "ALTER TABLE workspaces ADD COLUMN sso_enabled INTEGER DEFAULT 0",
-            "ALTER TABLE workspaces ADD COLUMN sso_type TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN sso_idp_url TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN sso_entity_id TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN sso_x509_cert TEXT DEFAULT ''",
-            "ALTER TABLE workspaces ADD COLUMN sso_attr_email TEXT DEFAULT 'email'",
-            "ALTER TABLE workspaces ADD COLUMN sso_attr_name TEXT DEFAULT 'name'",
-            "ALTER TABLE workspaces ADD COLUMN sso_allow_password_login INTEGER DEFAULT 1",
-            "ALTER TABLE workspaces ADD COLUMN workspace_slug TEXT DEFAULT ''",
         ]:
             try: db.execute(stmt)
             except: pass
@@ -1382,68 +981,10 @@ def _seed_demo(db, ws_id):
         try: db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",(n[0],ws_id,n[1],n[2],n[3],n[4],ts()))
         except: pass
 
-# Server-side session invalidation cache.
-# On logout: logged_out_at is written to DB and cached here.
-# On login_required: any session issued before logged_out_at is rejected instantly.
-# On login: cache is cleared so the new session is always accepted.
-_logout_cache: dict = {}
-_logout_cache_lock = _cthread.Lock()
-
-def _get_logged_out_at(uid):
-    """Return the user's logged_out_at value, or None if not cached.
-    None = not in cache (caller must fetch from DB).
-    ""  = cached and confirmed empty (user never logged out or just logged in).
-    "ts" = cached logout timestamp (session before this ts is invalid).
-    """
-    cache_key = f"ptcache:logout_ts:{uid}"
-    if _redis_client is not None:
-        try:
-            val = _redis_client.get(cache_key)
-            if val is None:
-                return None   # key does not exist in Redis — not cached
-            return val        # "" or a timestamp string
-        except Exception:
-            pass
-    # In-process dict
-    with _logout_cache_lock:
-        if uid not in _logout_cache:
-            return None       # not cached yet
-        return _logout_cache[uid]  # "" or timestamp
-
-def _set_logged_out_at(uid, ts_val):
-    """Store logged_out_at in cache (all workers via Redis, or local dict)."""
-    cache_key = f"ptcache:logout_ts:{uid}"
-    if _redis_client is not None:
-        try:
-            _redis_client.set(cache_key, ts_val or "", ex=86400*30)
-            return
-        except Exception:
-            pass
-    with _logout_cache_lock:
-        _logout_cache[uid] = ts_val or ""
-
 def login_required(f):
     @wraps(f)
     def d(*a,**kw):
-        if "user_id" not in session:
-            return jsonify({"error":"Unauthorized"}),401
-        uid = session["user_id"]
-        login_at = session.get("login_at", "")
-        if login_at:
-            # Check if this session has been remotely invalidated
-            cached_logout = _get_logged_out_at(uid)
-            if cached_logout is None:
-                # Not cached — fetch from DB once, then cache it
-                try:
-                    rows = _raw_pg("SELECT logged_out_at FROM users WHERE id=?", (uid,), fetch=True)
-                    cached_logout = rows[0].get("logged_out_at","") if rows else ""
-                    _set_logged_out_at(uid, cached_logout)
-                except Exception:
-                    cached_logout = ""
-            # If user logged out after this session was created → reject
-            if cached_logout and login_at < cached_logout:
-                session.clear()
-                return jsonify({"error":"Session expired. Please log in again."}),401
+        if "user_id" not in session: return jsonify({"error":"Unauthorized"}),401
         return f(*a,**kw)
     return d
 
@@ -1451,218 +992,14 @@ def wid(): return session.get("workspace_id","")
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GOOGLE OAUTH 2.0
-# Set env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, APP_BASE_URL
-# Redirect URI to register in Google Cloud Console:
-#   {APP_BASE_URL}/api/auth/google/callback
-# ══════════════════════════════════════════════════════════════════════════════
-import urllib.parse as _urlparse
-import urllib.request as _urlrequest
-import json as _json_mod
-
-_GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
-_GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-_APP_BASE_URL         = os.environ.get("APP_BASE_URL", os.environ.get("APP_URL", "")).rstrip("/")
-
-_GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
-_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
-
-def _get_base_url():
-    """Return base URL — prefer env var, fall back to detecting from request."""
-    if _APP_BASE_URL:
-        return _APP_BASE_URL
-    # Auto-detect from incoming request (handles reverse proxies via X-Forwarded headers)
-    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host", "")
-    proto = request.headers.get("X-Forwarded-Proto", "https")
-    return f"{proto}://{host}".rstrip("/")
-
-@app.route("/api/auth/google/login")
-def google_login():
-    """Step 1 — redirect browser to Google's consent screen."""
-    if not _GOOGLE_CLIENT_ID:
-        return jsonify({"error": "Google OAuth not configured (missing GOOGLE_CLIENT_ID)"}), 503
-
-    # CSRF protection: random state stored in session
-    state = secrets.token_urlsafe(24)
-    session["google_oauth_state"] = state
-
-    base_url = _get_base_url()
-    redirect_uri = f"{base_url}/api/auth/google/callback"
-    log.info("[google_oauth] redirect_uri = %s", redirect_uri)  # log so you can verify it matches Google Console
-    params = _urlparse.urlencode({
-        "client_id":     _GOOGLE_CLIENT_ID,
-        "redirect_uri":  redirect_uri,
-        "response_type": "code",
-        "scope":         "openid email profile",
-        "state":         state,
-        "access_type":   "online",
-        "prompt":        "select_account",
-    })
-    return redirect(f"{_GOOGLE_AUTH_URL}?{params}")
-
-
-@app.route("/api/auth/google/callback")
-def google_callback():
-    """Step 2 — Google redirects here with ?code=... Exchange code for tokens,
-    fetch user-info, then create or log in the matching account."""
-    error = request.args.get("error")
-    if error:
-        log.warning("[google_oauth] denied: %s", error)
-        return redirect(f"/?action=login&error={_urlparse.quote(error)}")
-
-    # CSRF check
-    state = request.args.get("state", "")
-    if state != session.pop("google_oauth_state", ""):
-        log.warning("[google_oauth] state mismatch — possible CSRF")
-        return redirect("/?action=login&error=state_mismatch")
-
-    code = request.args.get("code", "")
-    if not code:
-        return redirect("/?action=login&error=no_code")
-
-    redirect_uri = f"{_get_base_url()}/api/auth/google/callback"
-
-    # ── Exchange code for tokens ──────────────────────────────────────────────
-    try:
-        token_data = _urlparse.urlencode({
-            "code":          code,
-            "client_id":     _GOOGLE_CLIENT_ID,
-            "client_secret": _GOOGLE_CLIENT_SECRET,
-            "redirect_uri":  redirect_uri,
-            "grant_type":    "authorization_code",
-        }).encode()
-        req = _urlrequest.Request(_GOOGLE_TOKEN_URL, data=token_data,
-                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
-        with _urlrequest.urlopen(req, timeout=10) as resp:
-            tokens = _json_mod.loads(resp.read())
-    except Exception as exc:
-        log.error("[google_oauth] token exchange failed: %s", exc)
-        return redirect("/?action=login&error=token_exchange_failed")
-
-    access_token = tokens.get("access_token", "")
-    if not access_token:
-        return redirect("/?action=login&error=no_access_token")
-
-    # ── Fetch Google user info ────────────────────────────────────────────────
-    try:
-        ui_req = _urlrequest.Request(_GOOGLE_USERINFO,
-                                     headers={"Authorization": f"Bearer {access_token}"})
-        with _urlrequest.urlopen(ui_req, timeout=10) as resp:
-            guser = _json_mod.loads(resp.read())
-    except Exception as exc:
-        log.error("[google_oauth] userinfo fetch failed: %s", exc)
-        return redirect("/?action=login&error=userinfo_failed")
-
-    g_id      = guser.get("sub", "")           # stable Google user ID
-    g_email   = (guser.get("email") or "").lower().strip()
-    g_name    = guser.get("name") or g_email.split("@")[0]
-    g_picture = guser.get("picture", "")
-    g_verified = guser.get("email_verified", False)
-
-    if not g_email or not g_verified:
-        return redirect("/?action=login&error=email_not_verified")
-
-    # ── Find or create user ───────────────────────────────────────────────────
-    with get_db() as db:
-        # 1. Try match by google_id (returning user who already linked)
-        user = db.execute(
-            "SELECT * FROM users WHERE google_id=? AND deleted_at=''",
-            (g_id,)
-        ).fetchone()
-
-        # 2. Try match by email (first-time Google login for existing password user)
-        if not user:
-            user = db.execute(
-                "SELECT * FROM users WHERE email=? AND deleted_at=''",
-                (g_email,)
-            ).fetchone()
-            if user:
-                # Link google_id to this existing account
-                db.execute(
-                    "UPDATE users SET google_id=?, google_picture=?, auth_provider='google' WHERE id=?",
-                    (g_id, g_picture, user["id"])
-                )
-
-        # 3. No existing account — auto-create in a default workspace
-        #    We create a standalone workspace named after the user's domain/name.
-        if not user:
-            ws_id  = f"ws{secrets.token_hex(8)}"
-            ws_name = f"{g_name}'s Workspace"
-            uid    = f"u{secrets.token_hex(8)}"
-            color  = CLRS[hash(g_email) % len(CLRS)]
-            initials = "".join(p[0].upper() for p in g_name.split()[:2]) or "?"
-            created_ts = ts()
-
-            db.execute(
-                "INSERT INTO workspaces (id, name, created) VALUES (?, ?, ?)",
-                (ws_id, ws_name, created_ts)
-            )
-            db.execute(
-                """INSERT INTO users
-                   (id, workspace_id, name, email, password, role, avatar, color,
-                    created, google_id, google_picture, auth_provider)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (uid, ws_id, g_name, g_email, "", "Admin", initials, color,
-                 created_ts, g_id, g_picture, "google")
-            )
-            user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-
-        if not user:
-            return redirect("/?action=login&error=user_creation_failed")
-
-        # ── Set session (same shape as password login) ────────────────────────
-        login_ts = ts()
-        # Clear any stale session data first (prevents 401 loop after logout→Google login)
-        session.clear()
-        session.permanent = True
-        session["user_id"]      = user["id"]
-        session["workspace_id"] = user["workspace_id"]
-        session["role"]         = user.get("role", "")
-        session["login_at"]     = login_ts
-
-        db.execute(
-            "UPDATE users SET last_active=?, logged_out_at='' WHERE id=?",
-            (login_ts, user["id"])
-        )
-        _set_logged_out_at(user["id"], "")
-        _clear_attempts(f"login:{request.remote_addr}:{g_email}")
-        _audit("google_login", user["id"], f"{g_name} ({g_email}) signed in via Google")
-
-    # Redirect to app — JS will detect the active session on next /api/auth/me
-    return redirect("/?google_auth=1")
-
-
-@app.route("/api/auth/google/config")
-def google_auth_config():
-    """Return whether Google OAuth is configured so the frontend can show/hide button."""
-    return jsonify({"enabled": bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET)})
-
 # ── Login rate limiter (brute-force protection) ───────────────────────────────
 import time as _time_mod
-# FIX (Bug 4): Rate limiter now uses Redis atomic INCR so the 5-attempt cap
-# holds across ALL gunicorn workers, not just per-process. Falls back to an
-# in-process list when Redis is unavailable (local dev / no REDIS_URL).
-_login_attempts = {}   # fallback only: {key: [timestamp, ...]}
-_LOGIN_MAX = 5         # max attempts per window
+_login_attempts = {}   # {key: [timestamp, ...]}
+_LOGIN_MAX = 5         # max attempts
 _LOGIN_WINDOW = 60     # seconds
 
 def _check_rate_limit(key):
-    """Return (allowed, seconds_until_reset). Redis-backed when available."""
-    if _redis_client is not None:
-        try:
-            redis_key = f"rl:{key}"
-            count = _redis_client.get(redis_key)
-            count = int(count) if count else 0
-            if count >= _LOGIN_MAX:
-                ttl = _redis_client.ttl(redis_key)
-                return False, max(1, int(ttl))
-            return True, 0
-        except Exception:
-            pass  # Redis blip — fall through to in-process dict
-    # In-process fallback
+    """Return (allowed, seconds_until_reset). Cleans up old entries."""
     now = _time_mod.time()
     attempts = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
     _login_attempts[key] = attempts
@@ -1672,25 +1009,9 @@ def _check_rate_limit(key):
     return True, 0
 
 def _record_attempt(key):
-    if _redis_client is not None:
-        try:
-            redis_key = f"rl:{key}"
-            pipe = _redis_client.pipeline()
-            pipe.incr(redis_key)
-            pipe.expire(redis_key, _LOGIN_WINDOW)
-            pipe.execute()
-            return
-        except Exception:
-            pass
     _login_attempts.setdefault(key, []).append(_time_mod.time())
 
 def _clear_attempts(key):
-    if _redis_client is not None:
-        try:
-            _redis_client.delete(f"rl:{key}")
-            return
-        except Exception:
-            pass
     _login_attempts.pop(key, None)
 
 @app.route("/api/auth/login",methods=["POST"])
@@ -1723,37 +1044,18 @@ def login():
             return jsonify({"totp_required": True, "user_id": u["id"], "name": u["name"]}), 200
         # ── No 2FA configured — direct login ─────────────────────────────────
         _clear_attempts(rl_key)  # reset limiter on success
-        login_ts = ts()
         session.permanent=True
         session["user_id"]=u["id"]
         session["workspace_id"]=u["workspace_id"]
         session["role"]=u.get("role","")  # cache role in session
-        session["login_at"]=login_ts       # used to detect remote logout
         try:
-            # Clear logged_out_at so this new login is valid
-            db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
+            db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), u["id"]))
         except Exception: pass
-        # CRITICAL: clear the logout cache so login_required doesn't reject
-        # this new session using a stale cached logout timestamp
-        _set_logged_out_at(u["id"], "")
         _audit("user_login", u["id"], f"{u['name']} ({email}) logged in")
         result = dict(u)
         result.pop("totp_secret", None)
         result.pop("password", None)
         result.pop("avatar_data", None)
-        # ── Include workspace-scoped dashboard URL in response ────────────────
-        try:
-            ws_row = db.execute(
-                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
-                (u["workspace_id"],)
-            ).fetchone()
-            if ws_row:
-                import re as _re
-                slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
-                result["workspace_slug"] = slug
-        except Exception:
-            pass
         return jsonify(result)
 
 # ── Email OTP routes kept as stubs (for backward compat) but not used in login
@@ -1828,8 +1130,8 @@ def _totp_hotp(key_b32, counter):
 
 import base64 as _b64_mod, struct as _struct_mod
 
-def _totp_verify(secret, token, window=2):
-    """Verify TOTP token with ±window steps (30s each). window=2 allows ±60s clock drift."""
+def _totp_verify(secret, token, window=1):
+    """Verify TOTP token with ±window steps (30s each)."""
     import time as _t
     counter = int(_t.time()) // 30
     for delta in range(-window, window + 1):
@@ -1838,7 +1140,7 @@ def _totp_verify(secret, token, window=2):
             return True
     return False
 
-def _totp_qr_url(secret, email, issuer="Project Tracker"):
+def _totp_qr_url(secret, email, issuer="VEWIT"):
     """Generate otpauth:// URL for QR code rendering."""
     import urllib.parse
     pad = (8 - len(secret) % 8) % 8
@@ -2093,7 +1395,7 @@ def _qr_to_png_base64(mat, cell=8, border=4):
            + png_chunk(b'IEND', b''))
     return 'data:image/png;base64,' + base64.b64encode(png).decode()
 
-def _totp_qr_base64(secret, email, issuer="Project Tracker"):
+def _totp_qr_base64(secret, email, issuer="VEWIT"):
     """Generate a real scannable QR code PNG — pure Python, zero dependencies."""
     otpauth_url = _totp_qr_url(secret, email, issuer)
     try:
@@ -2181,34 +1483,17 @@ def totp_verify_login():
             return jsonify({"error": "TOTP not configured for this user"}), 400
         if not _totp_verify(u["totp_secret"], token):
             return jsonify({"error": "Invalid authenticator code. Try again."}), 401
-        login_ts = ts()
         session.permanent = True
         session["user_id"] = u["id"]
         session["workspace_id"] = u["workspace_id"]
-        session["login_at"] = login_ts   # needed for remote logout detection
         try:
-            db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
+            db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), u["id"]))
         except Exception: pass
-        # Clear logout cache so login_required accepts this new session
-        _set_logged_out_at(u["id"], "")
         _audit("user_login_totp", u["id"], f"{u['name']} logged in via Google Authenticator")
         result = dict(u)
         result.pop("password", None)
         result.pop("totp_secret", None)
         result.pop("avatar_data", None)
-        # Include workspace-scoped dashboard URL (same as regular login)
-        try:
-            import re as _re_t
-            ws_row = db.execute(
-                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
-                (u["workspace_id"],)
-            ).fetchone()
-            if ws_row:
-                slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
-                result["workspace_slug"] = slug
-        except Exception:
-            pass
         return jsonify(result)
 
 @app.route("/api/auth/totp/reset", methods=["POST"])
@@ -2228,54 +1513,14 @@ def totp_reset():
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
     uid = session.get("user_id", "")
-    ws  = session.get("workspace_id", "")
-    # Clear session cookie immediately — this device is logged out right now
+    _audit("user_logout", uid, "User signed out")
     session.clear()
-    if uid:
-        logout_ts = ts()
-        # Cache logout timestamp FIRST (instant, in-memory/Redis)
-        # so all workers reject other devices immediately on next request
-        _set_logged_out_at(uid, logout_ts)
-        # Write to DB in background so the logout() returns instantly to client
-        # (prevents 499 client-disconnect errors when DB is slow)
-        def _bg_logout():
-            try:
-                _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
-            except Exception as _e:
-                log.warning("[logout] DB write failed: %s", _e)
-            # FIX (Bug 2): Remove push subscriptions here so the frontend
-            # does not need a separate POST /api/push/unsubscribe call after
-            # logout. That call was arriving after session.clear() and getting
-            # a 401, leaving stale subscriptions in the DB.
-            try:
-                _raw_pg("DELETE FROM push_subscriptions WHERE user_id=?", (uid,))
-            except Exception as _e:
-                log.warning("[logout] push subscription cleanup failed: %s", _e)
-            try:
-                _cache_bust_ws(ws)
-            except Exception:
-                pass
-            try:
-                _audit("user_logout", uid, "User signed out — all sessions invalidated")
-            except Exception:
-                pass
-        t = _cthread.Thread(target=_bg_logout, daemon=True)
-        t.start()
-        # FIX (Bug 3): _audit() calls the DB and can block long enough on a
-        # slow connection for the gunicorn worker to be recycled (→ 499).
-        # Moved inside the background thread so the 200 response goes out first.
     return jsonify({"ok": True})
 
 @app.route("/signout")
 @app.route("/sign-out")
 def signout_redirect():
     """GET /signout — clear session and redirect to login page."""
-    uid = session.get("user_id","")
-    if uid:
-        logout_ts = ts()
-        try: _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
-        except Exception: pass
-        _set_logged_out_at(uid, logout_ts)
     session.clear()
     return '<html><head><meta http-equiv="refresh" content="0;url=/?action=login"/></head><body>Signing out...</body></html>'
 
@@ -2325,43 +1570,21 @@ def register():
 @app.route("/api/presence", methods=["POST"])
 @login_required
 def update_presence():
-    """Update user last_active timestamp. Throttled: only writes to DB once per 60s
-    per user. Uses _raw_pg (pooled, no extra SELECT 1) for the write."""
-    uid = session["user_id"]
-    ws  = wid()
-    throttle_key = f"presence_write:{uid}"
-    # Skip DB write if we wrote recently — return instantly
-    if _cache_get(throttle_key):
-        return jsonify({"ok": True, "throttled": True})
-    try:
-        _raw_pg("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
-                (ts(), uid, ws))
-    except Exception as _e:
-        log.warning("[presence] write failed: %s", _e)
-    # Mark throttle via proper cache (Redis if available, dict otherwise)
-    _cache_set(throttle_key, True)
-    # Bust presence cache so next GET sees the fresh timestamp
-    _cache_bust(ws, "presence")
-    return jsonify({"ok": True})
+    with get_db() as db:
+        db.execute("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
+                   (ts(), session["user_id"], wid()))
+        return jsonify({"ok": True})
 
 @app.route("/api/presence")
 @login_required
 def get_presence():
-    """Returns list of user IDs active in last 3 minutes. Cached 15s."""
-    ws = wid()
-    cache_key = f"presence:{ws}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
-    try:
+    """Returns list of user IDs active in last 2 minutes."""
+    with get_db() as db:
         cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
-        rows = _raw_pg(
+        rows = db.execute(
             "SELECT id FROM users WHERE workspace_id=? AND last_active>?",
-            (ws, cutoff), fetch=True)
-        result = [r["id"] for r in (rows or [])]
-    except Exception:
-        result = []
-    _cache_set(cache_key, result)
-    return jsonify(result)
+            (wid(), cutoff)).fetchall()
+        return jsonify([r["id"] for r in rows])
 
 @app.route("/api/meet/notify", methods=["POST"])
 @login_required
@@ -2391,53 +1614,14 @@ def meet_notify():
 @app.route("/api/auth/me")
 def me():
     if "user_id" not in session: return jsonify({"error":"Not logged in"}),401
-    uid = session["user_id"]
-
-    # Cache auth/me for 30s per user — it's polled constantly and almost
-    # never changes. This saves 2 DB queries (user + workspace) × 180ms RTT
-    # = ~360ms on every poll cycle.
-    me_cache_key = f"me:{uid}"
-    cached_me = _cache_get(me_cache_key)
-    if cached_me is not None:
-        return jsonify(cached_me)
-
-    try:
-        import re as _re
-        rows = _raw_pg(
-            "SELECT u.*, w.name as _ws_name, w.workspace_slug as _ws_slug "
-            "FROM users u LEFT JOIN workspaces w ON w.id=u.workspace_id "
-            "WHERE u.id=?",
-            (uid,), fetch=True
-        )
-        if not rows:
-            session.clear()
-            return jsonify({"error":"Not found"}),404
-        u = rows[0]
-        if u.get("workspace_id"):
-            session["workspace_id"] = u["workspace_id"]
+    with get_db() as db:
+        u=db.execute("SELECT * FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        if not u: session.clear(); return jsonify({"error":"Not found"}),404
+        if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
         result = dict(u)
-        for k in ("password","plain_password","totp_secret","_ws_name","_ws_slug"):
+        for k in ("password","plain_password","totp_secret"):
             result.pop(k, None)
-        ws_name = u.get("_ws_name","")
-        ws_slug = u.get("_ws_slug","")
-        if ws_name or ws_slug:
-            slug = ws_slug or _re.sub(r"[^a-z0-9]+", "-", ws_name.lower().strip()).strip("-") or "workspace"
-            result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
-            result["workspace_slug"] = slug
-            result["workspace_id_from_me"] = u["workspace_id"]
-        _cache_set(me_cache_key, result)
         return jsonify(result)
-    except Exception as _e:
-        log.error("[auth/me] %s", _e)
-        # Fallback: original two-query approach
-        with get_db() as db:
-            u=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
-            if not u: session.clear(); return jsonify({"error":"Not found"}),404
-            if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
-            result = dict(u)
-            for k in ("password","plain_password","totp_secret"):
-                result.pop(k, None)
-            return jsonify(result)
 
 # ── Vault ─────────────────────────────────────────────────────────────────────
 # All `rows` data is Fernet-encrypted (AES-128-CBC + HMAC-SHA256) before being
@@ -2603,7 +1787,7 @@ def test_email():
     if not test_to:
         return jsonify({"error":"test_email required"}),400
 
-    subject="Project Tracker Email Test"
+    subject="VEWIT Email Test"
     body="""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -2620,11 +1804,12 @@ def test_email():
                 <li>Status changes</li>
                 <li>New comments</li>
             </ul>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">VEWIT Notification System</p>
         </div>
     </body>
     </html>
     """
+
     success=send_email(test_to,subject,body,wid())
     if success:
         return jsonify({"success":True,"message":"Test email sent successfully!"})
@@ -2726,174 +1911,19 @@ def get_projects_last_messages():
             (wid(),)).fetchall()
         return jsonify({r["project"]: r["last_ts"] for r in rows})
 
-def _fetch_app_data_from_db(ws, team_id, uid):
-    """Execute all app-data queries in ONE round-trip using a single connection.
-    pg8000 is synchronous so we batch all SELECTs through the same connection
-    object — each .run() call reuses the same TCP socket, costing only the
-    server-side execution time instead of a full network round-trip per query.
-    With Postgres on Railway US-West and users in India (~180ms RTT),
-    going from 9 separate queries to 9 queries on ONE connection saves
-    ~8 × 180ms = ~1.44s per request."""
-    now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-
-    # Get a single pooled connection and run ALL queries on it
-    conn = _get_pool_conn()
-    try:
-        def _q(sql, params=()):
-            pg_sql, pdict = _sql_compat(sql, params)
-            rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
-            cols = [c["name"] for c in (conn.columns or [])]
-            return [dict(zip(cols, r)) for r in (rows or [])]
-
-        users    = _q("SELECT id,name,email,role,avatar_data,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name", (ws,))
-
-        if team_id:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC", (ws, team_id))
-            tasks    = _q("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500", (ws, team_id))
-        else:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (ws,))
-            tasks    = _q("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500", (ws,))
-
-        notifs   = _q("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY ts DESC LIMIT 50", (ws, uid))
-        dm_unread= _q("SELECT sender,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender", (ws, uid))
-        ws_rows  = _q("SELECT * FROM workspaces WHERE id=?", (ws,))
-        teams    = _q("SELECT * FROM teams WHERE workspace_id=?", (ws,))
-        tickets  = _q("SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC", (ws,))
-        reminders= _q("SELECT * FROM reminders WHERE workspace_id=? AND user_id=? AND remind_at>=? ORDER BY remind_at", (ws, uid, now_str))
-
-        return {
-            "users": users, "projects": projects, "tasks": tasks,
-            "notifications": notifs, "dm_unread": dm_unread,
-            "workspace": ws_rows[0] if ws_rows else {},
-            "teams": teams, "tickets": tickets, "reminders": reminders,
-        }
-    finally:
-        _return_pool_conn(conn)
-
-
-@app.route("/api/app-data")
-@login_required
-def get_app_data():
-    """Single endpoint that returns all dashboard data.
-
-    Caching strategy:
-    - bust=1 query param: skip all caches, hit DB directly (used post-mutation)
-    - Serve from in-memory cache instantly (0ms) when entry is fresh (<20s)
-    - Serve stale data instantly AND refresh in background when 20-120s old
-    - Only block on DB when cache is completely cold (first load after restart)
-    This means after the first load, every subsequent poll returns in <5ms.
-    Multi-worker note: bust=1 forces a fresh DB read on the receiving worker
-    and re-warms that worker's cache, solving cross-worker stale data issues.
-    """
-    ws      = wid()
-    uid     = session["user_id"]
-    team_id = request.args.get("team_id", "")
-    cache_key = f"appdata:{ws}:{uid}:{team_id}"
-    # Force-refresh: skip all caches (used right after mutations)
-    if request.args.get("bust") == "1":
-        result = _fetch_app_data_from_db(ws, team_id, uid)
-        _cache_set(cache_key, result)
-        return jsonify(result)
-
-    now = _time.time()
-
-    # --- Redis SWR path ---
-    if _redis_client is not None:
-        try:
-            raw = _redis_client.get(f"ptcache:{cache_key}")
-            if raw:
-                entry = _json.loads(raw)
-                age = now - entry["ts"]
-                if age < _CACHE_TTL:
-                    return jsonify(entry["val"])   # fresh
-                if age < _CACHE_STALE:
-                    # Try to become the one refresher using SET NX (atomic)
-                    lock_key = f"ptcache:lock:{cache_key}"
-                    acquired = _redis_client.set(lock_key, "1", nx=True, ex=30)
-                    if acquired:
-                        def _bg_refresh_redis():
-                            try:
-                                result = _fetch_app_data_from_db(ws, team_id, uid)
-                                _cache_set(cache_key, result)
-                            except Exception as _e:
-                                log.warning("[app-data bg-refresh] %s", _e)
-                            finally:
-                                try: _redis_client.delete(lock_key)
-                                except: pass
-                        _cthread.Thread(target=_bg_refresh_redis, daemon=True).start()
-                    return jsonify(entry["val"])   # stale but fast
-        except Exception:
-            pass  # Redis blip — fall through to dict
-
-    # --- In-process dict SWR path ---
-    entry = _CACHE.get(cache_key)
-
-    if entry:
-        age = now - entry["ts"]
-        if age < _CACHE_TTL:
-            return jsonify(entry["val"])
-        if age < _CACHE_STALE and not entry.get("refreshing"):
-            with _CACHE_LOCK:
-                if cache_key in _CACHE:
-                    _CACHE[cache_key]["refreshing"] = True
-            def _bg_refresh():
-                try:
-                    result = _fetch_app_data_from_db(ws, team_id, uid)
-                    _cache_set(cache_key, result)
-                except Exception as _e:
-                    log.warning("[app-data bg-refresh] %s", _e)
-                    with _CACHE_LOCK:
-                        if cache_key in _CACHE:
-                            _CACHE[cache_key]["refreshing"] = False
-            _cthread.Thread(target=_bg_refresh, daemon=True).start()
-            return jsonify(entry["val"])   # stale but fast
-
-    # Cache cold or too stale — block on DB (first load only)
-    result = _fetch_app_data_from_db(ws, team_id, uid)
-    _cache_set(cache_key, result)
-    return jsonify(result)
-
-
-
-def _appdata_cache_get(ws, uid, key):
-    """Try to read a specific key from the appdata cache (any team_id variant).
-    Returns (data, found). Used by lightweight polling endpoints to avoid
-    duplicate DB queries — if app-data is cached, sub-endpoints are free."""
-    # Try no-team variant first (most common), then any team variant
-    for suffix in ["", ":"] :
-        for ckey, entry in list(_CACHE.items()):
-            if ckey.startswith(f"appdata:{ws}:{uid}") and not entry.get("refreshing", False):
-                age = _time.time() - entry["ts"]
-                if age < _CACHE_STALE:
-                    val = entry["val"]
-                    if key in val:
-                        return val[key], True
-    return None, False
-
 @app.route("/api/projects")
 @login_required
 def get_projects():
-    ws, uid = wid(), session["user_id"]
-    team_id = request.args.get("team_id", "")
-    data, found = _appdata_cache_get(ws, uid, "projects")
-    if found:
-        if team_id:
-            return jsonify([p for p in data if p.get("team_id") == team_id])
-        return jsonify(data)
-    cache_key = f"projects:{ws}:{team_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
+    team_id = request.args.get("team_id","")
     with get_db() as db:
         if team_id:
             rows = db.execute(
                 "SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC",
-                (ws, team_id)).fetchall()
+                (wid(), team_id)).fetchall()
         else:
             rows = db.execute(
-                "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (ws,)).fetchall()
-        result = [dict(r) for r in rows]
-        _cache_set(cache_key, result)
-        return jsonify(result)
+                "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
 
 @app.route("/api/projects",methods=["POST"])
 @login_required
@@ -2919,13 +1949,6 @@ def create_project():
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
-        # Inject into appdata cache FIRST (before busting) so existing
-        # cache entries are updated in-place with the new project.
-        # This prevents multi-worker stale reads — workers that still have
-        # their old cache now have the new project injected.
-        _cache_inject_item(wid(), "projects", dict(p))
-        # Only bust the notifs sub-key (not projects — we just injected it)
-        _cache_bust(wid(), "notifs")
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
@@ -2957,27 +1980,20 @@ def update_project(pid):
             threading.Thread(target=push_notification_to_user,
                 args=(db,uid,f"📁 Project updated: {updated['name']}",
                       f"{aname} made changes to '{updated['name']}'","/"),daemon=True).start()
-        _cache_bust(wid(), "projects")
         return jsonify(dict(updated))
 
 @app.route("/api/projects/<pid>",methods=["DELETE"])
 @login_required
 def del_project(pid):
-    workspace_id = wid()
     with get_db() as db:
         cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
         cu_role=cu["role"] if cu else "Viewer"
         if cu_role not in ("Admin","Manager"):
             return jsonify({"error":"Only Admin or Manager can delete projects."}),403
-        db.execute("DELETE FROM projects WHERE id=? AND workspace_id=?",(pid,workspace_id))
-        db.execute("DELETE FROM tasks WHERE project=? AND workspace_id=?",(pid,workspace_id))
-        db.execute("DELETE FROM files WHERE project_id=? AND workspace_id=?",(pid,workspace_id))
-    # Cache bust AFTER the with-block exits (i.e. after COMMIT).
-    # Busting inside caused a race: concurrent GET /api/projects could query Postgres
-    # while DELETE was still uncommitted, re-cache the stale row, making deleted
-    # projects reappear on next reload().
-    _cache_bust_ws(workspace_id)
-    return jsonify({"ok":True})
+        db.execute("DELETE FROM projects WHERE id=? AND workspace_id=?",(pid,wid()))
+        db.execute("DELETE FROM tasks WHERE project=? AND workspace_id=?",(pid,wid()))
+        db.execute("DELETE FROM files WHERE project_id=? AND workspace_id=?",(pid,wid()))
+        return jsonify({"ok":True})
 
 @app.route("/api/projects/bulk-assign-team",methods=["POST"])
 @login_required
@@ -3000,16 +2016,6 @@ def bulk_assign_team():
 @login_required
 def get_tasks():
     team_id = request.args.get("team_id","")
-    ws, uid = wid(), session["user_id"]
-    # Check shared appdata cache first — avoids DB entirely during polling
-    data, found = _appdata_cache_get(ws, uid, "tasks")
-    if found:
-        if team_id:
-            return jsonify([t for t in data if t.get("team_id") == team_id])
-        return jsonify(data)
-    cache_key = f"tasks:{ws}:{team_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
     with get_db() as db:
         if team_id:
             team = db.execute("SELECT member_ids FROM teams WHERE id=? AND workspace_id=?",(team_id,wid())).fetchone()
@@ -3026,21 +2032,17 @@ def get_tasks():
                 {f"assignee IN ({placeholders_m})" if member_ids else "1=0"}
             ) ORDER BY created DESC LIMIT 500"""
             params = [wid(), team_id] + proj_ids + member_ids
-            result = [dict(r) for r in db.execute(sql, params).fetchall()]
-            _cache_set(f"tasks:{wid()}:{team_id}", result)
-            return jsonify(result)
+            return jsonify([dict(r) for r in db.execute(sql, params).fetchall()])
         # Limit to 500 most recent — prevents huge payloads on large workspaces
-        result = [dict(r) for r in db.execute(
-            "SELECT * FROM tasks WHERE workspace_id=? ORDER BY created DESC LIMIT 500",(wid(),)).fetchall()]
-        _cache_set(f"tasks:{wid()}:", result)
-        return jsonify(result)
+        return jsonify([dict(r) for r in db.execute(
+            "SELECT * FROM tasks WHERE workspace_id=? ORDER BY created DESC LIMIT 500",(wid(),)).fetchall()])
 
 def next_task_id(db, ws):
     import time
     base = int(time.time() * 1000)
-    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
-    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
-    return f"T-{base % 1000000:06d}"
+    row=db.execute("SELECT COUNT(*) as cnt FROM tasks WHERE workspace_id=?",(ws,)).fetchone()
+    count=row['cnt'] if row else 0
+    return f"T-{count+1:03d}-{base % 10000}"
 
 @app.route("/api/tasks",methods=["POST"])
 @login_required
@@ -3061,7 +2063,6 @@ def create_task():
             nid=f"n{base_ts}"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
-            _cache_bust(wid(), "notifs")  # new notification — bust cache
             assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_user and assignee_user["email"]:
                 threading.Thread(target=send_task_assigned_email,
@@ -3096,9 +2097,6 @@ def create_task():
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
-        # Inject into appdata cache FIRST, then only bust standalone task cache
-        _cache_inject_item(wid(), "tasks", dict(t))
-        _cache_bust(wid(), "notifs")   # new notifs may have been created
         return jsonify(dict(t))
 
 
@@ -3241,7 +2239,6 @@ def update_task(tid):
                     args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
                           f"{cname}: {latest.get('text','')[:80]}", "/"),
                     daemon=True).start()
-        _cache_bust(wid(), "tasks")
         return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
 
 
@@ -3253,7 +2250,7 @@ def search_subtasks():
         return jsonify([])
     with get_db() as db:
         rows = db.execute("""
-    SELECT s.*, t.title as task_title, t.project
+            SELECT s.*, t.title as task_title, t.project
             FROM subtasks s
             JOIN tasks t ON s.task_id = t.id
             WHERE s.workspace_id = ?
@@ -3308,7 +2305,6 @@ def del_task(tid):
         if cu_role not in ("Admin","Manager","TeamLead"):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
         db.execute("DELETE FROM tasks WHERE id=? AND workspace_id=?",(tid,wid()))
-        _cache_bust(wid(), "tasks")
         return jsonify({"ok":True})
 
 # ── Files ─────────────────────────────────────────────────────────────────────
@@ -3429,13 +2425,10 @@ def send_dm():
 @app.route("/api/dm/unread")
 @login_required
 def dm_unread():
-    ws, uid = wid(), session["user_id"]
-    data, found = _appdata_cache_get(ws, uid, "dm_unread")
-    if found: return jsonify(data)
     with get_db() as db:
-        rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
+        rows=db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
             WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
-            (ws, uid)).fetchall()
+            (wid(),session["user_id"])).fetchall()
         return jsonify([dict(r) for r in rows])
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
@@ -3581,13 +2574,8 @@ def team_dashboard(tid):
 @app.route("/api/tickets", methods=["GET"])
 @login_required
 def get_tickets():
-    ws, uid = wid(), session["user_id"]
-    status  = request.args.get("status", "")
-    team_id = request.args.get("team_id", "")
-    # Serve from shared appdata cache when no filters applied
-    if not status and not team_id:
-        data, found = _appdata_cache_get(ws, uid, "tickets")
-        if found: return jsonify(data)
+    status=request.args.get("status","")
+    team_id=request.args.get("team_id","")
     with get_db() as db:
         if team_id:
             team=db.execute("SELECT member_ids FROM teams WHERE id=? AND workspace_id=?",(team_id,wid())).fetchone()
@@ -3684,14 +2672,8 @@ def add_ticket_comment(tid):
 # ── Calls (Huddle) ────────────────────────────────────────────────────────────
 
 @app.route("/api/migrate-timelog", methods=["GET","POST"])
-@login_required
 def migrate_timelog_public():
-    """Schema migration helper — requires admin login.
-    FIX (Bug 5): Endpoint was completely unauthenticated, allowing any
-    anonymous user to trigger DDL operations on the database. Now requires
-    an active admin session."""
-    if get_user_role() != "admin":
-        return jsonify({"error": "Admin access required"}), 403
+    """Public migration — hit this URL once after deploy to fix live DB schema."""
     results = []
     steps = [
         ("CREATE time_logs base", """CREATE TABLE IF NOT EXISTS time_logs (
@@ -3730,76 +2712,35 @@ def migrate_timelog_public():
 @app.route("/api/timelogs/setup", methods=["POST"])
 @login_required
 def timelogs_setup():
-    # FIX (Bug 1): ensure_timelog_schema() runs ~12 sequential DDL statements
-    # that can take 5-6 s total. Running it on the request thread caused the
-    # client to disconnect (nginx/Railway 499) before the response arrived.
-    # Solution: mirror the pattern already used in logout() — return 200
-    # immediately and run the slow work in a daemon background thread.
-    def _bg_setup():
-        try:
-            ensure_timelog_schema()
-        except Exception as _e:
-            log.warning("[timelogs/setup] background schema migration failed: %s", _e)
-    _cthread.Thread(target=_bg_setup, daemon=True).start()
-    return jsonify({"ok": True, "message": "schema migration started in background"})
+    ensure_timelog_schema()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/timelogs", methods=["GET"])
 @login_required
 def get_timelogs():
-    """Return timelogs. Uses a single JOIN query that also fetches role,
-    eliminating the separate get_user_role() DB round-trip. Cached 20s."""
-    uid  = session["user_id"]
-    ws   = wid()
-    cache_key = f"timelogs:{ws}:{uid}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return jsonify(cached)
     try:
-        # Single query: get role + timelogs in one round-trip
-        rows = _raw_pg(
-            "SELECT tl.*, u.name as user_name, me.role as _my_role "
-            "FROM time_logs tl "
-            "LEFT JOIN users u ON tl.user_id=u.id "
-            "JOIN users me ON me.id=? AND me.workspace_id=? "
-            "WHERE tl.workspace_id=? "
-            "ORDER BY tl.date DESC, tl.created DESC LIMIT 500",
-            (uid, ws, ws), fetch=True
-        ) or []
-        # The JOIN returns rows for all timelogs — filter by role client-side
-        # (role comes from the first row)
-        role = rows[0].get("_my_role", "") if rows else ""
-        if role not in ("Admin", "Manager"):
-            rows = [r for r in rows if r.get("user_id") == uid]
-        # Strip the helper column
-        for r in rows:
-            r.pop("_my_role", None)
-        _cache_set(cache_key, rows)
-        return jsonify(rows)
+        uid   = session["user_id"]
+        role  = get_user_role()
+        wid_  = wid()
+        if role in ("Admin", "Manager"):
+            rows = _raw_pg(
+                "SELECT tl.*, u.name as user_name FROM time_logs tl "
+                "LEFT JOIN users u ON tl.user_id=u.id "
+                "WHERE tl.workspace_id=? ORDER BY tl.date DESC, tl.created DESC",
+                (wid_,), fetch=True)
+        else:
+            rows = _raw_pg(
+                "SELECT tl.*, u.name as user_name FROM time_logs tl "
+                "LEFT JOIN users u ON tl.user_id=u.id "
+                "WHERE tl.workspace_id=? AND tl.user_id=? "
+                "ORDER BY tl.date DESC, tl.created DESC",
+                (wid_, uid), fetch=True)
+        return jsonify(rows or [])
     except Exception as e:
         log.error("[get_timelogs] %s", e)
-        # Fallback to two-query approach
-        try:
-            role = get_user_role()
-            ws_ = ws
-            if role in ("Admin", "Manager"):
-                rows = _raw_pg(
-                    "SELECT tl.*, u.name as user_name FROM time_logs tl "
-                    "LEFT JOIN users u ON tl.user_id=u.id "
-                    "WHERE tl.workspace_id=? ORDER BY tl.date DESC, tl.created DESC LIMIT 500",
-                    (ws_,), fetch=True)
-            else:
-                rows = _raw_pg(
-                    "SELECT tl.*, u.name as user_name FROM time_logs tl "
-                    "LEFT JOIN users u ON tl.user_id=u.id "
-                    "WHERE tl.workspace_id=? AND tl.user_id=? "
-                    "ORDER BY tl.date DESC, tl.created DESC LIMIT 500",
-                    (ws_, uid), fetch=True)
-            return jsonify(rows or [])
-        except Exception as e2:
-            log.error("[get_timelogs fallback] %s", e2)
-            ensure_timelog_schema()
-            return jsonify([])
+        ensure_timelog_schema()
+        return jsonify([])
 
 
 @app.route("/api/timelogs", methods=["POST"])
@@ -3899,49 +2840,24 @@ def required_hours():
 @app.route("/api/reminders/due", methods=["GET"])
 @login_required
 def due_reminders():
-    """Return reminders due now. Checks appdata cache first; only hits DB to mark fired."""
-    ws, uid = wid(), session["user_id"]
-    now_str = ts()
-    # Get all reminders from cache
-    cached_reminders, found = _appdata_cache_get(ws, uid, "reminders")
-    if found:
-        due = [r for r in cached_reminders
-               if not r.get("fired") and r.get("remind_at","") <= now_str]
-        if due:
-            ids = [r["id"] for r in due]
-            try:
-                with get_db() as db:
-                    db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-                # Bust reminders cache so next poll gets updated fired status
-                _cache_bust(ws, "reminders")
-            except Exception: pass
-        return jsonify(due)
-    # Fallback: hit DB directly
+    """Return reminders that should fire now (within last 2 min, not yet fired)"""
+    now=ts()
     with get_db() as db:
-        rows = db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
-            AND fired=0 AND remind_at <= ?""", (ws, uid, now_str)).fetchall()
-        ids  = [r["id"] for r in rows]
+        rows=db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
+            AND fired=0 AND remind_at <= ?""",(wid(),session["user_id"],now)).fetchall()
+        ids=[r["id"] for r in rows]
         if ids:
-            db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
+            db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})",ids)
         return jsonify([dict(r) for r in rows])
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 @app.route("/api/notifications")
 @login_required
 def get_notifs():
-    ws, uid = wid(), session["user_id"]
-    # Serve from shared appdata cache — avoids a separate DB round-trip
-    data, found = _appdata_cache_get(ws, uid, "notifications")
-    if found: return jsonify(data)
-    cache_key = f"notifs:{ws}:{uid}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
     with get_db() as db:
-        rows = db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
-            ORDER BY ts DESC LIMIT 50""", (ws, uid)).fetchall()
-        result = [dict(r) for r in rows]
-        _cache_set(cache_key, result)
-        return jsonify(result)
+        rows=db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
+            ORDER BY ts DESC LIMIT 50""",(wid(),session["user_id"])).fetchall()
+        return jsonify([dict(r) for r in rows])
 
 @app.route("/api/notifications/read-all",methods=["PUT"])
 @login_required
@@ -4035,7 +2951,7 @@ def ai_chat():
     task_ctx="\n".join([f"- [{t['id']}] {t['title']} | stage:{t['stage']} | priority:{t['priority']} | pct:{t['pct']}%" for t in tasks])
     user_ctx="\n".join([f"- {u['name']} (id:{u['id']}, role:{u['role']})" for u in users])
 
-    system=f"""You are an AI assistant for Project Tracker — a project management tool used by the workspace "{ws['name'] if ws else 'Unknown'}".
+    system=f"""You are an AI assistant for VEWIT — a project management tool used by the workspace "{ws['name'] if ws else 'Unknown'}".
 Current user: {cu['name']} (role: {cu['role']})
 Today: {datetime.now().strftime('%Y-%m-%d')}
 
@@ -4055,6 +2971,7 @@ You can answer questions, analyze status, and PERFORM ACTIONS by including JSON 
 <action>{{"type":"eod_report"}}</action>
 
 IMPORTANT: Always be helpful and concise. When performing actions, explain what you did. For EOD reports, summarize all task statuses by project."""
+
     msgs=[{"role":"user" if m["role"]=="user" else "assistant","content":m["content"]} for m in history[-10:]]
     msgs.append({"role":"user","content":user_msg})
 
@@ -4189,6 +3106,7 @@ TASKS BY STAGE:
 OPEN TICKETS (sample):
 {ticket_ctx}
 """
+
     user_desc_block = f"""
 USER DESCRIPTION:
 {user_description if user_description else '(Not provided — use workspace data above)'}
@@ -4196,6 +3114,7 @@ USER DESCRIPTION:
 TECH STACK: {tech_stack if tech_stack else 'Not specified'}
 TARGET AUDIENCE: {audience}
 """
+
     audience_note = {
         "technical": "Write for software engineers and architects. Include technical details, code examples, data models, and API references where appropriate.",
         "business": "Write for business stakeholders. Avoid jargon. Focus on value, goals, timelines, risks, and business outcomes. Use plain language.",
@@ -4233,6 +3152,7 @@ List all technologies with their role in the system.
 Describe how the system is deployed (cloud, containers, etc.).
 
 Be specific based on the description provided. If tech stack is mentioned, use it in the diagrams."""
+
     elif doc_type == "technical":
         prompt = f"""You are a senior technical writer. Generate a detailed technical specification document.
 {user_desc_block}
@@ -4261,6 +3181,7 @@ List key API endpoints with method, path, purpose, request/response schema.
 ## 11. Deployment & DevOps
 
 Be comprehensive and specific. Use tables, code blocks, and diagrams where appropriate."""
+
     elif doc_type == "api":
         prompt = f"""You are an API documentation expert. Generate complete API reference documentation.
 {user_desc_block}
@@ -4296,6 +3217,7 @@ For each major resource area (based on the project description), document:
 Show code examples in Python and JavaScript.
 
 Base the endpoints on the actual project description and workspace task data."""
+
     else:  # documentation
         prompt = f"""You are a professional technical writer. Generate comprehensive project documentation.
 {user_desc_block}
@@ -4344,7 +3266,8 @@ Brief description of the tech stack and architecture.
 Prioritized list of immediate actions.
 
 ---
-*Generated by Project Tracker AI · {datetime.now().strftime('%B %d, %Y')}*"""
+*Generated by VEWIT AI · {datetime.now().strftime('%B %d, %Y')}*"""
+
     try:
         req_data = json.dumps({
             "model": "claude-sonnet-4-5",
@@ -4380,13 +3303,12 @@ Prioritized list of immediate actions.
 @login_required
 def export_csv():
     with get_db() as db:
-        tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchall()
-    lines = ["id,title,project,assignee,priority,stage,due,pct"]
+        tasks=db.execute("SELECT * FROM tasks WHERE workspace_id=?",(wid(),)).fetchall()
+    lines=["id,title,project,assignee,priority,stage,due,pct"]
     for t in tasks:
-        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}",'
-                     f'"{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
-    return Response("\n".join(lines), mimetype="text/csv",
-                    headers={"Content-Disposition": "attachment;filename=tasks.csv"})
+        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}","{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
+    return Response("\n".join(lines),mimetype="text/csv",
+                    headers={"Content-Disposition":"attachment;filename=tasks.csv"})
 
 @app.route("/api/import/csv", methods=["POST"])
 @login_required
@@ -4535,7 +3457,7 @@ def serve_static(fn):
         # instead of an HTML 404 (which causes the MIME-type rejection)
         if fn == "frontend.js":
             err_js = (
-                "console.error('[Project Tracker] frontend.js not found on server. "
+                "console.error('[VEWIT] frontend.js not found on server. "
                 "Make sure frontend.js is deployed in the same directory as app.py.');"
                 "document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;"
                 "padding:40px;background:#0a0618;min-height:100vh\">"
@@ -4554,7 +3476,7 @@ def serve_static(fn):
     with open(path, "rb") as fh:
         data = fh.read()
     resp = Response(data, mimetype=mime)
-    resp.headers["Cache-Control"] = "public, max-age=604800, immutable" if fn.endswith(".js") else "no-cache"
+    resp.headers["Cache-Control"] = "public, max-age=3600" if fn.endswith(".js") else "no-cache"
     return resp
 
 @app.route("/js/<path:fn>")
@@ -4568,7 +3490,7 @@ def serve_js(fn):
         "react.min.js":     "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
         "react-dom.min.js": "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
         "prop-types.min.js":"https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js",
-        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js",
+        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js",
         "htm.min.js":       "https://unpkg.com/htm@3.1.1/dist/htm.js",
     }
     if fn in CDN:
@@ -4580,8 +3502,8 @@ def serve_js(fn):
 def serve_sw():
     """Service Worker for background push notifications and offline caching."""
     sw_code = r"""
-// Project Tracker Service Worker v3
-const CACHE = 'pf-v3';
+// VEWIT Service Worker v2
+const CACHE = 'pf-v2';
 const ICON = '/favicon.ico';
 
 // Install & cache shell assets
@@ -4590,19 +3512,14 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
-  // Delete ALL old caches so stale requests (e.g. /${imgSrc}) are never replayed
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => clients.claim())
-  );
+  e.waitUntil(clients.claim());
 });
 
 // ── Push notification handler ────────────────────────────────────────────────
 self.addEventListener('push', e => {
   let data = {};
   try { data = e.data ? e.data.json() : {}; } catch(err) {}
-  const title  = data.title  || 'Project Tracker';
+  const title  = data.title  || 'VEWIT';
   const body   = data.body   || '';
   const tag    = data.tag    || 'pf-notif';
   const url    = data.url    || '/';
@@ -4672,7 +3589,7 @@ async function pollNotifications() {
 def serve_manifest():
     """PWA manifest — full desktop installability."""
     manifest = {
-        "name": "Project Tracker",
+        "name": "VEWIT",
         "short_name": "PFPro",
         "description": "AI-powered team project management — tasks, huddles, timeline, tickets & more.",
         "start_url": "/dashboard",
@@ -4697,7 +3614,7 @@ def serve_manifest():
             {"name": "Projects", "short_name": "Projects", "url": "/projects", "description": "View all projects"}
         ],
         "screenshots": [
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "wide", "label": "Project Tracker Dashboard"}
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "wide", "label": "VEWIT Dashboard"}
         ]
     }
     return jsonify(manifest)
@@ -4705,10 +3622,10 @@ def serve_manifest():
 @app.route("/favicon.ico")
 @app.route("/favicon.png")
 def favicon():
-    """Serve the Project Tracker blue favicon — same as icon-192 PNG."""
+    """Serve the VEWIT blue favicon — same as icon-192 PNG."""
     import base64
     from flask import Response
-    # Exact same blue Project Tracker icon as icon-192
+    # Exact same blue VEWIT icon as icon-192
     png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAEuklEQVR4nO3UQQ5TSRAEUS7ClTj/3IZZITWDRgJsV2b/eiHF3r8rw1++AAAAAAAAAAAAAAAAAAAAAAAAhPj67Z/vnDV9cxykx7DR9M1xkB7DRtM3x0F6DL/r75D+jQK4kPQYXh39jTGkb46D9BjePfwbQkjfHAfpMXxy/K0RpG+Og/QYPj3+xgjSN8dBegwT42+LIH1zHKTHMDX+pgjSN8dBegwCQJT0GBKkvzl9cxykxyAARNk2/oYI0jfHgQAEsBoBCGA1G8f/AwFAAALYjQAEsBoBCGA1AhDAagQggNWkRpCOIPnd6ZvjQAACWI0ABLCa5BBSEaS/OX1zHKTHIABESY9hOoL0twqgjPQYBIAo6TFMRpD+RgEUkh7DVATpbxNAKekxTESQ/iYBFJMew6cjSH+LAMpJj0EAS0kfodmnB9CiAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKPOTpL+tUQEUOUH6G9sUQJECmFcAJU6S/tYmBVBggvQ3tyiAAgWQUwBhk6S/vUEBhBWAAFYrAAGstYH0G6QVgABWK4Clw/8v6TcRwBKbSb+NAB7sTaTfSgAP8mbSbyeAy30C6TcUwIU+kfSbCuACN5B+YwGUuon0WwugyM2k314Ahl9B+hYCMPwK0rcRgPHHSd9IAIZfQfpmAjD8CtI3FIDxx0nfUgCGX0H6tgIw/ArStxbARcP/k997+7cJYGDMtwxkS+Sv3E8AFxz4b/jEP93TEICjerPvr7/ZlQE8jYnhe8OHBPAkEsP3nhcH8CTSw/euAoiQHrv3vTSA20mP21tfHMDtpActAgFESI94cwgCCJIerRAeFMBNpEcqhJ8RwCDpYYrgVwQwQHqMQvh/BPBB0uNrshUBfIj04BptRABvJj2yG2xCAG8iPaobbUAAQ4/Ie28ngDc8Iu+9nQDe8Ii893YCePEBeff96gNIPmJ6PE+w/XYCePEBeff9rggg8Yjp0TzJ5tsJ4MUH5N33uyaAqUdMD+XJNt7vqgAmHjE9kifbeLvrAvjUQ6bHscmm+10ZwLsfMT2IjbbcLxpAC+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNAQAAAAAAAAAAAAAAAAAAAGAx/wJoKCsUOqYWXQAAAABJRU5ErkJggg=="
     png_data = base64.b64decode(png_b64)
     return Response(png_data, mimetype='image/png',
@@ -4733,76 +3650,29 @@ def icon_512():
         headers={'Cache-Control':'public,max-age=86400'})
 
 # ── Main Application Routes ────────────────────────────────────────────────────
-@app.route("/", methods=["GET", "HEAD"])
+@app.route("/")
 def index():
     """Serve the landing page for non-authenticated users."""
-    # Health-check / uptime probes use HEAD — respond instantly, no DB needed
-    if request.method == "HEAD":
-        return "", 200
-
-    if "user_id" in session and session.get("workspace_id"):
-        ws_id = session["workspace_id"]
-        # Use slug cached in session — avoids a DB query on every / visit
-        cached_slug = session.get("_ws_slug")
-        if cached_slug:
-            return redirect(f"/{cached_slug}/{ws_id}/dashboard", code=302)
-        try:
-            import re as _re2
-            rows = _raw_pg(
-                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
-                (ws_id,), fetch=True
-            )
-            ws_row = rows[0] if rows else None
-            if ws_row:
-                slug = ws_row.get("workspace_slug") or \
-                       _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or \
-                       "workspace"
-                session["_ws_slug"] = slug   # cache in session for future visits
-                return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
-        except Exception:
-            pass
-        return _serve_html()
+    if "user_id" in session:
+        return serve_app()
     action = request.args.get("action", "")
     if action in ("login", "register"):
-        return _serve_html()
-    return _serve_landing()
+        return HTML
+    return LANDING_HTML
 
 @app.route("/app")
 @app.route("/dashboard")
 @app.route("/projects")
 @app.route("/tasks")
 @app.route("/messages")
-@app.route("/channels")
-@app.route("/dm")
 @app.route("/settings")
 @app.route("/profile")
 @app.route("/analytics")
 @app.route("/tickets")
 @app.route("/timeline")
-@app.route("/reminders")
-@app.route("/team")
-@app.route("/productivity")
-@app.route("/ai-docs")
-@app.route("/timesheet")
-@app.route("/vault")
 def serve_app():
-    """Serve the main application template, redirecting to ws-scoped URL if logged in."""
-    if "user_id" in session and session.get("workspace_id"):
-        ws_id = session["workspace_id"]
-        # Determine the page being requested
-        path_segment = request.path.strip("/") or "dashboard"
-        try:
-            import re as _re
-            with get_db() as db:
-                ws_row = db.execute(
-                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
-                ).fetchone()
-            if ws_row:
-                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                return redirect(f"/{slug}/{ws_id}/{path_segment}", code=302)
-        except Exception:
-            pass
-    return _serve_html()
+    """Serve the main application template for all app routes."""
+    return HTML
 
 @app.route("/password-generator")
 def password_generator_page():
@@ -4812,333 +3682,19 @@ def password_generator_page():
 @app.route("/privacy")
 def privacy_page():
     """Serve the Privacy Policy page."""
-    return _inject_nonce(_load_template('privacy.html'))
+    return _load_template('privacy.html')
 
 @app.route("/terms")
 def terms_page():
     """Serve the Terms of Service page."""
-    return _inject_nonce(_load_template('terms.html'))
+    return _load_template('terms.html')
 
 @app.route("/security")
 def security_info_page():
     """Serve the Security page."""
-    return _inject_nonce(_load_template('security.html'))
+    return _load_template('security.html')
 
-@app.route("/about")
-def about_page():
-    """Serve the About page — always public, no login required."""
-    return _inject_nonce(_load_template('about.html'))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── Workspace-scoped URL routing  /<ws_name>/<ws_id>/dashboard  ──────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-_WS_APP_PATHS = {
-    "dashboard", "projects", "tasks", "messages", "settings",
-    "profile", "analytics", "tickets", "timeline", "app",
-}
-
-def _slugify(name):
-    """Turn a workspace name into a URL-safe slug."""
-    import re
-    s = name.lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = s.strip("-")
-    return s or "workspace"
-
-@app.route("/<ws_name>/<ws_id>/sso/login")
-def ws_sso_login(ws_name, ws_id):
-    """SSO entry-point for a specific workspace.  Redirects to IdP if SAML is
-    configured, otherwise falls through to the normal login page with the
-    workspace pre-selected."""
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT id, name, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
-            "FROM workspaces WHERE id=?", (ws_id,)
-        ).fetchone()
-
-    if not ws:
-        return redirect("/"), 302
-
-    if ws["sso_enabled"] and ws["sso_type"] == "saml" and ws["sso_idp_url"]:
-        # Build a minimal SAML AuthnRequest redirect
-        return _saml_redirect(ws)
-
-    # Fallback — send to normal login with workspace context embedded
-    return redirect(f"/?action=login&ws={ws_id}&ws_name={ws['name']}")
-
-
-@app.route("/<ws_name>/<ws_id>/sso/callback", methods=["GET", "POST"])
-def ws_sso_callback(ws_name, ws_id):
-    """Receive the SAML assertion from the IdP and log the user in."""
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT * FROM workspaces WHERE id=?", (ws_id,)
-        ).fetchone()
-
-    if not ws:
-        return redirect("/"), 302
-
-    result = _saml_process_response(request, ws)
-    if "error" in result:
-        return redirect(f"/?action=login&error={result['error']}&ws={ws_id}")
-
-    email = result.get("email", "").lower().strip()
-    name  = result.get("name", email)
-
-    with get_db() as db:
-        u = db.execute(
-            "SELECT * FROM users WHERE email=? AND workspace_id=?",
-            (email, ws_id)
-        ).fetchone()
-
-        if not u:
-            # Auto-provision the user (JIT provisioning)
-            uid = f"u{int(datetime.now().timestamp()*1000)}"
-            av  = "".join(w[0] for w in name.split())[:2].upper()
-            c   = random.choice(CLRS)
-            db.execute(
-                "INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (uid, ws_id, name, email, hash_pw(secrets.token_hex(16)),
-                 "Developer", av, c, ts(), None)
-            )
-            _audit("sso_jit_provision", uid, f"JIT provisioned {name} ({email}) via SSO")
-            u = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        else:
-            uid = u["id"]
-
-        db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), uid))
-
-    session.permanent = True
-    session["user_id"]      = uid
-    session["workspace_id"] = ws_id
-    session["role"]         = u["role"] if u else "Developer"
-    _audit("sso_login", uid, f"{name} ({email}) logged in via SSO/SAML")
-
-    # Redirect to workspace-scoped dashboard URL
-    slug = _slugify(ws["name"])
-    return redirect(f"/{slug}/{ws_id}/dashboard")
-
-
-# ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
-
-@app.route("/<ws_name>/<ws_id>/dashboard")
-@app.route("/<ws_name>/<ws_id>/projects")
-@app.route("/<ws_name>/<ws_id>/projects/<proj_id>")
-@app.route("/<ws_name>/<ws_id>/tasks")
-@app.route("/<ws_name>/<ws_id>/kanban")
-@app.route("/<ws_name>/<ws_id>/messages")
-@app.route("/<ws_name>/<ws_id>/channels")
-@app.route("/<ws_name>/<ws_id>/dm")
-@app.route("/<ws_name>/<ws_id>/dm/<other_user>")
-@app.route("/<ws_name>/<ws_id>/settings")
-@app.route("/<ws_name>/<ws_id>/profile")
-@app.route("/<ws_name>/<ws_id>/analytics")
-@app.route("/<ws_name>/<ws_id>/tickets")
-@app.route("/<ws_name>/<ws_id>/timeline")
-@app.route("/<ws_name>/<ws_id>/reminders")
-@app.route("/<ws_name>/<ws_id>/team")
-@app.route("/<ws_name>/<ws_id>/productivity")
-@app.route("/<ws_name>/<ws_id>/ai-docs")
-@app.route("/<ws_name>/<ws_id>/timesheet")
-@app.route("/<ws_name>/<ws_id>/vault")
-@app.route("/<ws_name>/<ws_id>/password-generator")
-@app.route("/<ws_name>/<ws_id>/app")
-def ws_app_page(ws_name, ws_id, **kwargs):
-    """Serve the main SPA for workspace-scoped URLs.
-    If not authenticated, redirect to the workspace SSO/login flow."""
-    if "user_id" not in session:
-        # Check if this workspace has SSO enabled
-        with get_db() as db:
-            ws = db.execute(
-                "SELECT id, name, sso_enabled, sso_type "
-                "FROM workspaces WHERE id=?", (ws_id,)
-            ).fetchone()
-        if ws and ws["sso_enabled"]:
-            return redirect(f"/{ws_name}/{ws_id}/sso/login")
-        return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
-
-    # Ensure the logged-in user actually belongs to this workspace
-    if session.get("workspace_id") != ws_id:
-        return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
-
-    return _serve_html()
-
-
-# ── SSO configuration API  ────────────────────────────────────────────────────
-
-@app.route("/api/sso/config", methods=["GET"])
-@login_required
-def get_sso_config():
-    """Return SSO configuration for the current workspace (admin only)."""
-    if session.get("role") not in ("Admin", "Owner"):
-        return jsonify({"error": "Admin access required"}), 403
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT sso_enabled, sso_type, sso_idp_url, sso_entity_id, "
-            "sso_attr_email, sso_attr_name, sso_allow_password_login, workspace_slug "
-            "FROM workspaces WHERE id=?", (wid(),)
-        ).fetchone()
-    if not ws:
-        return jsonify({"error": "Workspace not found"}), 404
-    # Never expose the raw x509 cert — just a presence flag
-    return jsonify(dict(ws))
-
-
-@app.route("/api/sso/config", methods=["PUT"])
-@login_required
-def update_sso_config():
-    """Save SAML/SSO settings for the current workspace."""
-    if session.get("role") not in ("Admin", "Owner"):
-        return jsonify({"error": "Admin access required"}), 403
-    d = request.json or {}
-    allowed = {
-        "sso_enabled", "sso_type", "sso_idp_url", "sso_entity_id",
-        "sso_x509_cert", "sso_attr_email", "sso_attr_name",
-        "sso_allow_password_login", "workspace_slug",
-    }
-    updates = {k: v for k, v in d.items() if k in allowed}
-    if not updates:
-        return jsonify({"error": "Nothing to update"}), 400
-    set_clause = ", ".join(f"{k}=?" for k in updates)
-    params = list(updates.values()) + [wid()]
-    with get_db() as db:
-        db.execute(f"UPDATE workspaces SET {set_clause} WHERE id=?", params)
-    _audit("sso_config_update", session["user_id"],
-           f"SSO config updated: {list(updates.keys())}")
-    return jsonify({"ok": True})
-
-
-@app.route("/api/sso/test-metadata", methods=["POST"])
-@login_required
-def test_sso_metadata():
-    """Validate that an IdP metadata URL is reachable and parse the SSO URL."""
-    if session.get("role") not in ("Admin", "Owner"):
-        return jsonify({"error": "Admin access required"}), 403
-    d = request.json or {}
-    metadata_url = d.get("metadata_url", "").strip()
-    if not metadata_url:
-        return jsonify({"error": "metadata_url required"}), 400
-    try:
-        import urllib.request
-        with urllib.request.urlopen(metadata_url, timeout=8) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        # Very lightweight extraction — production code should use xmlschema/lxml
-        import re
-        idp_sso = ""
-        entity_id = ""
-        m = re.search(r'entityID=["\']([^"\']+)["\']', body)
-        if m:
-            entity_id = m.group(1)
-        m = re.search(
-            r'<(?:\w+:)?SingleSignOnService[^>]+Binding[^=]*=[^"]*"[^"]*POST"[^>]+Location=["\']([^"\']+)',
-            body
-        )
-        if not m:
-            m = re.search(
-                r'<(?:\w+:)?SingleSignOnService[^>]+Location=["\']([^"\']+)',
-                body
-            )
-        if m:
-            idp_sso = m.group(1)
-        return jsonify({
-            "ok": True,
-            "entity_id": entity_id,
-            "idp_sso_url": idp_sso,
-            "metadata_snippet": body[:400],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/api/sso/workspace-url")
-@login_required
-def get_workspace_url():
-    """Return the full workspace-scoped dashboard URL for the current workspace."""
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT id, name, workspace_slug FROM workspaces WHERE id=?",
-            (wid(),)
-        ).fetchone()
-    if not ws:
-        return jsonify({"error": "Workspace not found"}), 404
-    slug = ws["workspace_slug"] or _slugify(ws["name"])
-    base = request.host_url.rstrip("/")
-    return jsonify({
-        "workspace_id":   ws["id"],
-        "workspace_name": ws["name"],
-        "slug":           slug,
-        "dashboard_url":  f"{base}/{slug}/{ws['id']}/dashboard",
-        "sso_login_url":  f"{base}/{slug}/{ws['id']}/sso/login",
-        "sso_callback_url": f"{base}/{slug}/{ws['id']}/sso/callback",
-    })
-
-
-# ── Internal SAML helpers  ────────────────────────────────────────────────────
-
-def _saml_redirect(ws):
-    """Build a minimal SAML AuthnRequest and redirect to the IdP.
-    For production deployments replace this with python3-saml or pysaml2."""
-    import base64, zlib, urllib.parse
-    from datetime import datetime as _dt
-    request_id  = f"id-{secrets.token_hex(10)}"
-    issue_instant = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    acs_url = f"{request.host_url.rstrip('/')}/{_slugify(ws['name'])}/{ws['id']}/sso/callback"
-    entity  = ws["sso_entity_id"] or request.host_url.rstrip("/")
-    authn = (
-        f'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
-        f'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" '
-        f'ID="{request_id}" Version="2.0" IssueInstant="{issue_instant}" '
-        f'AssertionConsumerServiceURL="{acs_url}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">'
-        f'<saml:Issuer>{entity}</saml:Issuer>'
-        f'</samlp:AuthnRequest>'
-    )
-    deflated  = zlib.compress(authn.encode("utf-8"))[2:-4]
-    encoded   = base64.b64encode(deflated).decode("utf-8")
-    params    = urllib.parse.urlencode({"SAMLRequest": encoded, "RelayState": acs_url})
-    idp_url   = ws["sso_idp_url"]
-    sep       = "&" if "?" in idp_url else "?"
-    return redirect(f"{idp_url}{sep}{params}", 302)
-
-
-def _saml_process_response(req, ws):
-    """Decode a SAML Response POST and extract email + name.
-    For production use python3-saml which validates signatures & conditions."""
-    import base64
-    try:
-        raw_response = req.form.get("SAMLResponse", "")
-        if not raw_response:
-            return {"error": "missing_saml_response"}
-        decoded = base64.b64decode(raw_response).decode("utf-8", errors="replace")
-
-        import re
-        email_attr = ws["sso_attr_email"] or "email"
-        name_attr  = ws["sso_attr_name"]  or "name"
-
-        def _extract_attr(xml, attr_name):
-            patterns = [
-                rf'Name=["\'](?:.*?:)?{re.escape(attr_name)}["\'][^>]*>.*?<.*?AttributeValue[^>]*>([^<]+)',
-                rf'<(?:\w+:)?Attribute\s+Name=["\'](?:.*?:)?{re.escape(attr_name)}["\'][^>]*>\s*<(?:\w+:)?AttributeValue[^>]*>([^<]+)',
-            ]
-            for p in patterns:
-                m = re.search(p, xml, re.DOTALL | re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
-            return ""
-
-        def _extract_nameid(xml):
-            m = re.search(r'<(?:\w+:)?NameID[^>]*>([^<]+)', xml)
-            return m.group(1).strip() if m else ""
-
-        email = _extract_attr(decoded, email_attr) or _extract_nameid(decoded)
-        name  = _extract_attr(decoded, name_attr)  or email.split("@")[0]
-
-        if not email:
-            return {"error": "saml_no_email"}
-        return {"email": email, "name": name}
-    except Exception as e:
-        return {"error": str(e)}
+# ── Admin Token Store & Guard (must be defined before any route that calls it) ──
 _ADMIN_TOKENS = {}       # token -> expiry (datetime)
 _ADMIN_FAIL_LOG = {}     # ip -> [fail_timestamp, ...] — brute-force lockout
 
@@ -5167,7 +3723,7 @@ def _require_admin():
 def _audit(action, target="", detail=""):
     """Write an entry to audit_log. Fire-and-forget — never raises."""
     try:
-        admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in")
+        admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in")
         entry_id    = secrets.token_hex(8)
         with get_db() as db:
             db.execute(
@@ -5195,7 +3751,7 @@ def admin_api_security_stats():
                     "SELECT COUNT(*) FROM users WHERE totp_verified IS NULL OR totp_verified = 0"
                 ).fetchone()[0]
                 no_totp  = db.execute("""
-    SELECT u.id, u.name, u.email, u.role, w.name AS workspace_name
+                    SELECT u.id, u.name, u.email, u.role, w.name AS workspace_name
                     FROM users u
                     LEFT JOIN workspaces w ON w.id = u.workspace_id
                     WHERE u.totp_verified IS NULL OR u.totp_verified = 0
@@ -5218,7 +3774,7 @@ def admin_api_plans_stats():
     try:
         with get_db() as db:
             rows = db.execute("""
-    SELECT w.id, w.name, w.plan, COUNT(u.id) AS member_count
+                SELECT w.id, w.name, w.plan, COUNT(u.id) AS member_count
                 FROM workspaces w
                 LEFT JOIN users u ON u.workspace_id = w.id
                 GROUP BY w.id, w.name, w.plan
@@ -5293,7 +3849,7 @@ def admin_api_user_change_role(uid):
 @app.route("/adminpanel/<path:workspace>")
 def admin_panel_page(workspace=None):
     """Serve the admin panel HTML."""
-    return _inject_nonce(ADMIN_HTML)
+    return ADMIN_HTML
 
 @app.route("/api/admin/login", methods=["POST"])
 def admin_api_login():
@@ -5302,7 +3858,7 @@ def admin_api_login():
     email    = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "")
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in").strip().lower()
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in").strip().lower()
     admin_pass  = os.environ.get("ADMIN_PASSWORD", "")
 
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")[:60]
@@ -5329,7 +3885,7 @@ def admin_api_session():
     """Validate an existing admin token — called on page load to restore session."""
     if not _require_admin():
         return jsonify({"error": "Unauthorized"}), 401
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in")
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@vewit.in")
     return jsonify({"ok": True, "email": admin_email})
 
 @app.route("/api/admin/logout", methods=["POST"])
@@ -5375,7 +3931,7 @@ def admin_api_workspaces():
     try:
         with get_db() as db:
             rows = db.execute("""
-    SELECT w.id, w.name, w.invite_code, w.plan, w.created,
+                SELECT w.id, w.name, w.invite_code, w.plan, w.created,
                        COUNT(u.id) AS member_count
                 FROM workspaces w
                 LEFT JOIN users u ON u.workspace_id = w.id
@@ -5410,7 +3966,7 @@ def admin_api_users():
     try:
         with get_db() as db:
             rows = db.execute("""
-    SELECT u.id, u.name, u.email, u.role, u.created,
+                SELECT u.id, u.name, u.email, u.role, u.created,
                        w.name AS workspace_name
                 FROM users u
                 LEFT JOIN workspaces w ON w.id = u.workspace_id
@@ -5586,38 +4142,11 @@ def admin_api_add_user():
 @app.route("/<path:path>")
 def catch_all(path):
     """Catch-all route for SPA client-side routing."""
-
-    # Block sensitive paths — never serve .git, .env, config files, etc.
-    _lower = path.lower()
-    _BLOCKED_PREFIXES = (".git", ".env", ".htaccess", ".DS_Store", "wp-admin", "wp-login")
-    _BLOCKED_EXTENSIONS = (".env", ".config", ".cfg", ".bak", ".sql", ".log", ".key", ".pem")
-    if any(_lower == p or _lower.startswith(p + "/") for p in _BLOCKED_PREFIXES):
+    # If it looks like a file request, return 404
+    if "." in path.split("/")[-1]:
         return "", 404
-    _last = path.split("/")[-1]
-    if any(_last.endswith(ext) for ext in _BLOCKED_EXTENSIONS):
-        return "", 404
-    # Also block bare dotfiles
-    if _last.startswith("."):
-        return "", 404
-
-    # Reject file requests (have an extension) that weren't caught above
-    if "." in _last:
-        return "", 404
-
-    # Reject unresolved JS template literals like ${imgSrc}, ${variable}
-    # These happen when a variable is used as a URL before it has a value
-    if path.startswith("${") or "${" in path:
-        return "", 400
-
-    # Let explicitly registered routes handle /<ws_name>/<ws_id>/... paths
-    parts = path.strip("/").split("/")
-    if len(parts) >= 2:
-        potential_ws_id = parts[1] if len(parts) >= 2 else ""
-        if potential_ws_id.startswith("ws"):
-            return _serve_html()
-
     # Otherwise serve the app (for client-side routing)
-    return _serve_html()
+    return HTML
 
 import os as _os
 
@@ -5635,39 +4164,6 @@ def _load_template(filename, fallback=''):
         return fallback
 
 HTML                    = _load_template('template.html')
-
-_RE_SCRIPT_TAG = __import__('re').compile(r'<script([^>]*)>', __import__('re').IGNORECASE)
-
-def _inject_nonce(html_content):
-    """Inject CSP nonce into every <script> tag in an HTML string.
-    Skips tags that already have a nonce or type=application/ld+json (structured data)."""
-    nonce = getattr(_g, "csp_nonce", "")
-    if not nonce:
-        return html_content
-    def _stamp(m):
-        attrs = m.group(1)
-        if 'nonce=' in attrs:
-            return m.group(0)
-        # Don't stamp JSON-LD or other non-JS script types
-        if 'application/ld+json' in attrs or 'application/json' in attrs:
-            return m.group(0)
-        return f'<script nonce="{nonce}"{attrs}>'
-    return _RE_SCRIPT_TAG.sub(_stamp, html_content)
-
-def _serve_html():
-    """Return template.html with CSP nonce stamped onto every <script> tag."""
-    nonce = getattr(_g, "csp_nonce", "")
-    if not nonce:
-        return HTML
-    return _inject_nonce(HTML)
-
-def _serve_landing():
-    """Return landing.html with CSP nonce stamped onto every <script> tag."""
-    nonce = getattr(_g, "csp_nonce", "")
-    if not nonce:
-        return LANDING_HTML
-    return _inject_nonce(LANDING_HTML)
-
 LANDING_HTML            = _load_template('landing.html')
 PASSWORD_GENERATOR_HTML = _load_template('password-generator.html')
 ADMIN_HTML              = _load_template('adminpanel.html')
@@ -5681,9 +4177,6 @@ try:
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
     ensure_timelog_schema()   # always run — adds any missing time_log columns
-    _ensure_logout_column()    # add logged_out_at if upgrading from older deploy
-    _close_ddl_conn()         # release shared DDL connection after all migrations
-    _prewarm_pool(8)          # pre-open 8 pool connections so first requests are fast
 except Exception as _ie:
     import traceback
     print(f"  ⚠ Init error: {_ie}")
@@ -5717,1406 +4210,8 @@ def open_browser(port):
     time.sleep(1.4)
     webbrowser.open(f"http://localhost:{port}")
 
-# ═══════════════════════════════════════════════════════════════
-#  STRIPE BILLING
-# ═══════════════════════════════════════════════════════════════
-import hmac as _hmac, hashlib as _hashlib
-
-STRIPE_SECRET = os.environ.get("STRIPE_SECRET_KEY","")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET","")
-STRIPE_PRICES = {
-    "team":       os.environ.get("STRIPE_PRICE_TEAM","price_team"),
-    "enterprise": os.environ.get("STRIPE_PRICE_ENTERPRISE","price_enterprise"),
-}
-
-def _stripe_headers():
-    return {"Authorization":f"Bearer {STRIPE_SECRET}","Content-Type":"application/x-www-form-urlencoded"}
-
-def _stripe_post(path, data):
-    import urllib.parse as _up
-    body = _up.urlencode(data).encode()
-    req  = urllib.request.Request(f"https://api.stripe.com/v1{path}", data=body, headers=_stripe_headers(), method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        return {"error":{"message":str(e)}}
-
-def _stripe_get(path):
-    req = urllib.request.Request(f"https://api.stripe.com/v1{path}", headers=_stripe_headers())
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        return {"error":{"message":str(e)}}
-
-@app.route("/api/billing/create-checkout", methods=["POST"])
-@login_required
-def billing_create_checkout():
-    d    = request.get_json(force=True)
-    plan = d.get("plan","team")
-    if plan not in STRIPE_PRICES:
-        return jsonify(error="Invalid plan"), 400
-    if not STRIPE_SECRET:
-        return jsonify(error="Stripe not configured. Set STRIPE_SECRET_KEY env var."), 503
-    db = get_db()
-    ws = db.execute("SELECT * FROM workspaces WHERE id=?", (wid(),)).fetchone()
-    user = db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
-    cust_id = ws["stripe_customer_id"] if ws and ws["stripe_customer_id"] else ""
-    if not cust_id:
-        c = _stripe_post("/customers", {"email": user["email"], "name": ws["name"] if ws else "", "metadata[workspace_id]": wid()})
-        if "error" in c:
-            return jsonify(error=c["error"]["message"]), 502
-        cust_id = c["id"]
-        db.execute("UPDATE workspaces SET stripe_customer_id=? WHERE id=?", (cust_id, wid()))
-        db.commit()
-    base = request.host_url.rstrip("/")
-    sess = _stripe_post("/checkout/sessions", {
-        "customer": cust_id,
-        "mode": "subscription",
-        "line_items[0][price]": STRIPE_PRICES[plan],
-        "line_items[0][quantity]": "1",
-        "success_url": f"{base}/settings?billing=success",
-        "cancel_url":  f"{base}/settings?billing=cancel",
-        "metadata[workspace_id]": wid(),
-        "metadata[plan]": plan,
-    })
-    if "error" in sess:
-        return jsonify(error=sess["error"]["message"]), 502
-    return jsonify(url=sess["checkout_session"]["url"] if "checkout_session" in sess else sess.get("url",""))
-
-@app.route("/api/billing/portal", methods=["POST"])
-@login_required
-def billing_portal():
-    if not STRIPE_SECRET:
-        return jsonify(error="Stripe not configured"), 503
-    db = get_db()
-    ws = db.execute("SELECT stripe_customer_id FROM workspaces WHERE id=?", (wid(),)).fetchone()
-    if not ws or not ws["stripe_customer_id"]:
-        return jsonify(error="No billing account found"), 400
-    base = request.host_url.rstrip("/")
-    portal = _stripe_post("/billing_portal/sessions", {
-        "customer": ws["stripe_customer_id"],
-        "return_url": f"{base}/settings",
-    })
-    if "error" in portal:
-        return jsonify(error=portal["error"]["message"]), 502
-    return jsonify(url=portal.get("url",""))
-
-@app.route("/api/billing/status")
-@login_required
-def billing_status():
-    db = get_db()
-    ws = db.execute("SELECT plan, stripe_subscription_id, plan_expires, trial_ends, seat_count, stripe_customer_id FROM workspaces WHERE id=?", (wid(),)).fetchone()
-    if not ws:
-        return jsonify(plan="starter", active=True, trial=False)
-    members = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
-    usage   = _get_month_usage(wid())
-    return jsonify(
-        plan=ws["plan"] or "starter",
-        stripe_customer=bool(ws["stripe_customer_id"]),
-        subscription_id=ws["stripe_subscription_id"] or "",
-        plan_expires=ws["plan_expires"] or "",
-        trial_ends=ws["trial_ends"] or "",
-        seat_count=ws["seat_count"] or 5,
-        member_count=members["c"] if members else 0,
-        usage=usage,
-    )
-
-@app.route("/api/billing/webhook", methods=["POST"])
-def stripe_webhook():
-    payload = request.get_data()
-    sig     = request.headers.get("Stripe-Signature","")
-    if STRIPE_WEBHOOK_SECRET:
-        parts = {p.split("=")[0]: p.split("=")[1] for p in sig.split(",") if "=" in p}
-        signed_payload = f"{parts.get('t','')}".encode() + b"." + payload
-        expected = _hmac.new(STRIPE_WEBHOOK_SECRET.encode(), signed_payload, _hashlib.sha256).hexdigest()
-        if not _hmac.compare_digest(expected, parts.get("v1","")):
-            return "Bad signature", 400
-    event = request.get_json(force=True)
-    etype = event.get("type","")
-    obj   = event.get("data",{}).get("object",{})
-    db    = get_db(autocommit=True)
-    ws_id = obj.get("metadata",{}).get("workspace_id","")
-    if etype == "checkout.session.completed":
-        plan = obj.get("metadata",{}).get("plan","team")
-        sub  = obj.get("subscription","")
-        if ws_id:
-            db.execute("UPDATE workspaces SET plan=?, stripe_subscription_id=? WHERE id=?", (plan, sub, ws_id))
-    elif etype in ("customer.subscription.updated","customer.subscription.deleted"):
-        status = obj.get("status","")
-        sub_id = obj.get("id","")
-        ws_row = db.execute("SELECT id FROM workspaces WHERE stripe_subscription_id=?", (sub_id,)).fetchone()
-        if ws_row:
-            new_plan = "starter" if status in ("canceled","unpaid","past_due") else (obj.get("metadata",{}).get("plan","team"))
-            exp      = datetime.fromtimestamp(obj.get("current_period_end", 0)).isoformat() if obj.get("current_period_end") else ""
-            db.execute("UPDATE workspaces SET plan=?, plan_expires=? WHERE id=?", (new_plan, exp, ws_row["id"]))
-    return "ok", 200
-
-# ═══════════════════════════════════════════════════════════════
-#  USAGE METERING
-# ═══════════════════════════════════════════════════════════════
-PLAN_LIMITS = {
-    "starter":    {"members": 5,   "projects": 3,  "ai_calls_month": 50,  "storage_mb": 500},
-    "team":       {"members": 50,  "projects": 50, "ai_calls_month": 500, "storage_mb": 10000},
-    "enterprise": {"members": 999, "projects": 999,"ai_calls_month": 9999,"storage_mb": 100000},
-}
-
-def _get_month_usage(workspace_id):
-    month_start = datetime.now().replace(day=1,hour=0,minute=0,second=0).isoformat()
-    db = get_db()
-    rows = db.execute(
-        "SELECT event_type, SUM(quantity) as total FROM usage_events WHERE workspace_id=? AND created>=? GROUP BY event_type",
-        (workspace_id, month_start)
-    ).fetchall()
-    return {r["event_type"]: r["total"] for r in rows}
-
-def _record_usage(workspace_id, event_type, quantity=1, meta=None):
-    _raw_pg("INSERT INTO usage_events VALUES (?,?,?,?,?,?)",
-            (secrets.token_hex(8), workspace_id, event_type, quantity,
-             json.dumps(meta or {}), ts()))
-
-@app.route("/api/usage")
-@login_required
-def get_usage():
-    db  = get_db()
-    ws  = db.execute("SELECT plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
-    plan = (ws["plan"] or "starter") if ws else "starter"
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
-    usage  = _get_month_usage(wid())
-    members = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
-    projects = db.execute("SELECT COUNT(*) as c FROM projects WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
-    return jsonify(
-        plan=plan, limits=limits,
-        usage={
-            "members":       members["c"] if members else 0,
-            "projects":      projects["c"] if projects else 0,
-            "ai_calls_month": usage.get("ai_call", 0),
-            "storage_mb":    usage.get("storage_mb", 0),
-        }
-    )
-
-# ═══════════════════════════════════════════════════════════════
-#  PUBLIC API KEYS
-# ═══════════════════════════════════════════════════════════════
-VALID_SCOPES = ["tasks:read","tasks:write","projects:read","projects:write",
-                "tickets:read","tickets:write","users:read","webhooks:manage"]
-
-def _api_key_auth():
-    """Returns (workspace_id, user_id) if valid API key in header, else (None,None)"""
-    auth = request.headers.get("Authorization","")
-    if not auth.startswith("Bearer pt_"):
-        return None, None
-    raw_key = auth[7:]
-    prefix  = raw_key[:12]
-    key_hash = _hashlib.sha256(raw_key.encode()).hexdigest()
-    db   = get_db()
-    row  = db.execute("SELECT * FROM api_keys WHERE key_hash=? AND key_prefix=?", (key_hash, prefix)).fetchone()
-    if not row:
-        return None, None
-    if row["expires"] and row["expires"] < ts():
-        return None, None
-    db.execute("UPDATE api_keys SET last_used=? WHERE id=?", (ts(), row["id"]))
-    return row["workspace_id"], row["user_id"]
-
-@app.route("/api/keys", methods=["GET"])
-@login_required
-def list_api_keys():
-    db   = get_db()
-    rows = db.execute("SELECT id, name, key_prefix, scopes, last_used, created, expires FROM api_keys WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/keys", methods=["POST"])
-@login_required
-def create_api_key():
-    d      = request.get_json(force=True)
-    name   = (d.get("name","") or "").strip()[:80]
-    scopes = [s for s in d.get("scopes",[]) if s in VALID_SCOPES]
-    expires = d.get("expires","")
-    if not name:
-        return jsonify(error="Name required"), 400
-    if not scopes:
-        scopes = ["tasks:read","projects:read"]
-    raw_key  = "pt_" + secrets.token_hex(28)
-    prefix   = raw_key[:12]
-    key_hash = _hashlib.sha256(raw_key.encode()).hexdigest()
-    kid      = secrets.token_hex(8)
-    _raw_pg("INSERT INTO api_keys VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (kid, wid(), session["user_id"], name, key_hash, prefix, json.dumps(scopes), "", ts(), expires))
-    _log_audit("api_key_created", session["user_id"], kid)
-    return jsonify(id=kid, key=raw_key, prefix=prefix, name=name, scopes=scopes, created=ts())
-
-@app.route("/api/keys/<kid>", methods=["DELETE"])
-@login_required
-def delete_api_key(kid):
-    db = get_db()
-    row = db.execute("SELECT id FROM api_keys WHERE id=? AND workspace_id=?", (kid, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    _raw_pg("DELETE FROM api_keys WHERE id=?", (kid,))
-    _log_audit("api_key_deleted", session["user_id"], kid)
-    return jsonify(ok=True)
-
-# ── Public API v1 endpoints (bearer token auth) ──
-@app.route("/api/v1/tasks", methods=["GET"])
-def public_list_tasks():
-    ws_id, uid = _api_key_auth()
-    if not ws_id:
-        return jsonify(error="Invalid or missing API key"), 401
-    db    = get_db()
-    tasks = db.execute("SELECT id,title,stage,priority,assignee,due_date,created FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 200", (ws_id,)).fetchall()
-    return jsonify(data=[dict(t) for t in tasks])
-
-@app.route("/api/v1/tasks", methods=["POST"])
-def public_create_task():
-    ws_id, uid = _api_key_auth()
-    if not ws_id:
-        return jsonify(error="Unauthorized"), 401
-    d = request.get_json(force=True)
-    tid = secrets.token_hex(6)
-    _raw_pg("INSERT INTO tasks(id,workspace_id,project_id,title,stage,priority,assignee,due_date,created,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,'')",
-            (tid, ws_id, d.get("project_id",""), d.get("title","Untitled"), d.get("stage","planning"),
-             d.get("priority","medium"), d.get("assignee",""), d.get("due_date",""), ts()))
-    _fire_webhooks(ws_id, "task.created", {"id":tid,"title":d.get("title","")})
-    return jsonify(id=tid, created=True), 201
-
-@app.route("/api/v1/projects", methods=["GET"])
-def public_list_projects():
-    ws_id, _ = _api_key_auth()
-    if not ws_id:
-        return jsonify(error="Unauthorized"), 401
-    db   = get_db()
-    rows = db.execute("SELECT id,name,description,start_date,target_date,progress,color FROM projects WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 100", (ws_id,)).fetchall()
-    return jsonify(data=[dict(r) for r in rows])
-
-@app.route("/api/v1/tickets", methods=["GET"])
-def public_list_tickets():
-    ws_id, _ = _api_key_auth()
-    if not ws_id:
-        return jsonify(error="Unauthorized"), 401
-    db   = get_db()
-    rows = db.execute("SELECT id,title,status,priority,assignee,created FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 200", (ws_id,)).fetchall()
-    return jsonify(data=[dict(r) for r in rows])
-
-# ═══════════════════════════════════════════════════════════════
-#  WEBHOOKS
-# ═══════════════════════════════════════════════════════════════
-def _fire_webhooks(workspace_id, event, payload):
-    try:
-        db   = get_db()
-        hooks = db.execute("SELECT * FROM webhooks WHERE workspace_id=? AND enabled=1", (workspace_id,)).fetchall()
-        for hook in hooks:
-            events = json.loads(hook["events"] or "[]")
-            if event not in events and "*" not in events:
-                continue
-            body = json.dumps({"event": event, "workspace_id": workspace_id, "data": payload, "timestamp": ts()}).encode()
-            headers = {"Content-Type":"application/json","X-PT-Event":event,"X-PT-Delivery":secrets.token_hex(8)}
-            if hook["secret"]:
-                sig = _hmac.new(hook["secret"].encode(), body, _hashlib.sha256).hexdigest()
-                headers["X-PT-Signature"] = f"sha256={sig}"
-            req = urllib.request.Request(hook["url"], data=body, headers=headers, method="POST")
-            status_code, resp_text = 0, ""
-            try:
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    status_code = r.status
-                    resp_text   = r.read(500).decode(errors="replace")
-            except Exception as e:
-                resp_text = str(e)
-            log_id = secrets.token_hex(8)
-            _raw_pg("INSERT INTO webhook_logs VALUES (?,?,?,?,?,?)",
-                    (log_id, hook["id"], event, status_code, resp_text[:500], ts()))
-            fail_inc = "" if 200 <= status_code < 300 else ", fail_count=fail_count+1"
-            _raw_pg(f"UPDATE webhooks SET last_triggered=? {fail_inc} WHERE id=?", (ts(), hook["id"]))
-    except Exception as e:
-        print(f"Webhook fire error: {e}")
-
-@app.route("/api/webhooks", methods=["GET"])
-@login_required
-def list_webhooks():
-    db   = get_db()
-    rows = db.execute("SELECT id,name,url,events,enabled,last_triggered,fail_count,created FROM webhooks WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/webhooks", methods=["POST"])
-@login_required
-def create_webhook():
-    d      = request.get_json(force=True)
-    url    = (d.get("url","") or "").strip()
-    name   = (d.get("name","") or "Webhook").strip()[:80]
-    events = d.get("events", ["*"])
-    secret = secrets.token_hex(16)
-    if not url.startswith("http"):
-        return jsonify(error="Valid URL required"), 400
-    wh_id = secrets.token_hex(8)
-    _raw_pg("INSERT INTO webhooks VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (wh_id, wid(), name, url, json.dumps(events), secret, 1, "", 0, ts()))
-    _log_audit("webhook_created", session["user_id"], wh_id)
-    return jsonify(id=wh_id, secret=secret, name=name, url=url, events=events, created=ts())
-
-@app.route("/api/webhooks/<wh_id>", methods=["PUT"])
-@login_required
-def update_webhook(wh_id):
-    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    d = request.get_json(force=True)
-    _raw_pg("UPDATE webhooks SET name=?,url=?,events=?,enabled=? WHERE id=?",
-            (d.get("name","Webhook"), d.get("url",""), json.dumps(d.get("events",["*"])), int(d.get("enabled",1)), wh_id))
-    return jsonify(ok=True)
-
-@app.route("/api/webhooks/<wh_id>", methods=["DELETE"])
-@login_required
-def delete_webhook(wh_id):
-    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    _raw_pg("DELETE FROM webhooks WHERE id=?", (wh_id,))
-    _raw_pg("DELETE FROM webhook_logs WHERE webhook_id=?", (wh_id,))
-    return jsonify(ok=True)
-
-@app.route("/api/webhooks/<wh_id>/logs", methods=["GET"])
-@login_required
-def webhook_logs(wh_id):
-    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    rows = get_db().execute("SELECT * FROM webhook_logs WHERE webhook_id=? ORDER BY created DESC LIMIT 50", (wh_id,)).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/webhooks/<wh_id>/test", methods=["POST"])
-@login_required
-def test_webhook(wh_id):
-    row = get_db().execute("SELECT id FROM webhooks WHERE id=? AND workspace_id=?", (wh_id, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    _fire_webhooks(wid(), "ping", {"message":"Test delivery from Project Tracker"})
-    return jsonify(ok=True)
-
-# ═══════════════════════════════════════════════════════════════
-#  CUSTOM FIELDS
-# ═══════════════════════════════════════════════════════════════
-@app.route("/api/custom-fields", methods=["GET"])
-@login_required
-def list_custom_fields():
-    entity = request.args.get("entity","task")
-    db  = get_db()
-    rows = db.execute("SELECT * FROM custom_fields WHERE workspace_id=? AND entity_type=? ORDER BY created", (wid(), entity)).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/custom-fields", methods=["POST"])
-@login_required
-def create_custom_field():
-    d = request.get_json(force=True)
-    name = (d.get("name","") or "").strip()[:60]
-    ftype = d.get("field_type","text")
-    if ftype not in ("text","number","date","checkbox","dropdown","url"):
-        return jsonify(error="Invalid field type"), 400
-    if not name:
-        return jsonify(error="Name required"), 400
-    fid = secrets.token_hex(6)
-    _raw_pg("INSERT INTO custom_fields VALUES (?,?,?,?,?,?,?,?)",
-            (fid, wid(), d.get("entity_type","task"), name, ftype,
-             json.dumps(d.get("options",[])), int(d.get("required",0)), ts()))
-    return jsonify(id=fid, name=name, field_type=ftype)
-
-@app.route("/api/custom-fields/<fid>", methods=["DELETE"])
-@login_required
-def delete_custom_field(fid):
-    _raw_pg("DELETE FROM custom_fields WHERE id=? AND workspace_id=?", (fid, wid()))
-    _raw_pg("DELETE FROM custom_field_values WHERE field_id=? AND workspace_id=?", (fid, wid()))
-    return jsonify(ok=True)
-
-@app.route("/api/custom-field-values/<entity_id>", methods=["GET"])
-@login_required
-def get_field_values(entity_id):
-    db   = get_db()
-    rows = db.execute("SELECT field_id, value FROM custom_field_values WHERE entity_id=? AND workspace_id=?", (entity_id, wid())).fetchall()
-    return jsonify({r["field_id"]: r["value"] for r in rows})
-
-@app.route("/api/custom-field-values/<entity_id>", methods=["POST"])
-@login_required
-def set_field_values(entity_id):
-    d   = request.get_json(force=True)
-    now = ts()
-    for fid, val in d.items():
-        existing = get_db().execute("SELECT id FROM custom_field_values WHERE field_id=? AND entity_id=? AND workspace_id=?", (fid, entity_id, wid())).fetchone()
-        if existing:
-            _raw_pg("UPDATE custom_field_values SET value=?,updated=? WHERE id=?", (str(val), now, existing["id"]))
-        else:
-            _raw_pg("INSERT INTO custom_field_values VALUES (?,?,?,?,?,?,?)",
-                    (secrets.token_hex(6), wid(), fid, entity_id, str(val), now, now))
-    return jsonify(ok=True)
-
-# ═══════════════════════════════════════════════════════════════
-#  TIME TRACKING
-# ═══════════════════════════════════════════════════════════════
-@app.route("/api/time-entries", methods=["GET"])
-@login_required
-def list_time_entries():
-    task_id = request.args.get("task_id","")
-    user_filter = request.args.get("user_id","")
-    since = request.args.get("since","")
-    db   = get_db()
-    sql  = "SELECT te.*, u.name as user_name FROM time_entries te LEFT JOIN users u ON te.user_id=u.id WHERE te.workspace_id=?"
-    params = [wid()]
-    if task_id:
-        sql += " AND te.task_id=?"; params.append(task_id)
-    if user_filter:
-        sql += " AND te.user_id=?"; params.append(user_filter)
-    if since:
-        sql += " AND te.date>=?"; params.append(since)
-    sql += " ORDER BY te.date DESC, te.created DESC LIMIT 500"
-    rows = db.execute(sql, params).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/time-entries", methods=["POST"])
-@login_required
-def create_time_entry():
-    d   = request.get_json(force=True)
-    tid = secrets.token_hex(6)
-    minutes = max(1, int(d.get("minutes", 0) or 0))
-    task_id = d.get("task_id","")
-    _raw_pg("INSERT INTO time_entries VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (tid, wid(), task_id, session["user_id"],
-             d.get("description","")[:200], minutes, int(d.get("billable",1)),
-             d.get("date", now_ist().strftime("%Y-%m-%d")), ts(), ts()))
-    if task_id:
-        _fire_webhooks(wid(), "time.logged", {"task_id":task_id,"minutes":minutes})
-    return jsonify(id=tid, minutes=minutes, created=True), 201
-
-@app.route("/api/time-entries/<eid>", methods=["PUT"])
-@login_required
-def update_time_entry(eid):
-    row = get_db().execute("SELECT id FROM time_entries WHERE id=? AND workspace_id=?", (eid, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    d = request.get_json(force=True)
-    _raw_pg("UPDATE time_entries SET description=?,minutes=?,billable=?,date=?,updated=? WHERE id=?",
-            (d.get("description",""), max(1,int(d.get("minutes",1))), int(d.get("billable",1)), d.get("date",""), ts(), eid))
-    return jsonify(ok=True)
-
-@app.route("/api/time-entries/<eid>", methods=["DELETE"])
-@login_required
-def delete_time_entry(eid):
-    row = get_db().execute("SELECT id FROM time_entries WHERE id=? AND workspace_id=?", (eid, wid())).fetchone()
-    if not row:
-        return jsonify(error="Not found"), 404
-    _raw_pg("DELETE FROM time_entries WHERE id=?", (eid,))
-    return jsonify(ok=True)
-
-@app.route("/api/time-entries/summary", methods=["GET"])
-@login_required
-def time_summary():
-    since = request.args.get("since", now_ist().replace(day=1).strftime("%Y-%m-%d"))
-    db    = get_db()
-    rows  = db.execute(
-        "SELECT te.user_id, u.name, SUM(te.minutes) as total_min, SUM(CASE WHEN te.billable=1 THEN te.minutes ELSE 0 END) as billable_min, COUNT(*) as entries FROM time_entries te LEFT JOIN users u ON te.user_id=u.id WHERE te.workspace_id=? AND te.date>=? GROUP BY te.user_id, u.name ORDER BY total_min DESC",
-        (wid(), since)).fetchall()
-    return jsonify([dict(r) for r in rows])
-
-# ═══════════════════════════════════════════════════════════════
-#  SLA TRACKING FOR TICKETS
-# ═══════════════════════════════════════════════════════════════
-SLA_HOURS = {"critical":4,"high":8,"medium":24,"low":72}
-
-def _set_sla_due(ticket_id, priority, created):
-    hours = SLA_HOURS.get(priority, 24)
-    try:
-        created_dt = datetime.fromisoformat(created)
-    except Exception:
-        created_dt = datetime.now()
-    due = (created_dt + timedelta(hours=hours)).isoformat()
-    _raw_pg("UPDATE tickets SET sla_hours=?, sla_due_at=? WHERE id=?", (hours, due, ticket_id))
-
-@app.route("/api/tickets/sla-report", methods=["GET"])
-@login_required
-def sla_report():
-    db  = get_db()
-    now = ts()
-    rows = db.execute(
-        "SELECT t.*, u.name as assignee_name FROM tickets t LEFT JOIN users u ON t.assignee=u.id WHERE t.workspace_id=? ORDER BY t.created DESC LIMIT 200",
-        (wid(),)).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        sla_due = r["sla_due_at"] or ""
-        if sla_due and r["status"] not in ("resolved","closed"):
-            d["sla_breached"]   = sla_due < now
-            d["sla_remaining_min"] = max(0, int((datetime.fromisoformat(sla_due) - datetime.now()).total_seconds() / 60)) if sla_due > now else 0
-        else:
-            d["sla_breached"]    = False
-            d["sla_remaining_min"] = None
-        result.append(d)
-    return jsonify(result)
-
-@app.route("/api/tickets/sla-stats", methods=["GET"])
-@login_required
-def sla_stats():
-    db  = get_db()
-    now = ts()
-    total   = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=?", (wid(),)).fetchone()["c"]
-    breached = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=? AND sla_due_at!='' AND sla_due_at<? AND status NOT IN ('resolved','closed')", (wid(), now)).fetchone()["c"]
-    resolved = db.execute("SELECT COUNT(*) as c FROM tickets WHERE workspace_id=? AND status IN ('resolved','closed')", (wid(),)).fetchone()["c"]
-    avg_row = db.execute("SELECT AVG(CAST((JULIANDAY(resolved_at) - JULIANDAY(created)) * 24 * 60 AS INTEGER)) as avg_min FROM tickets WHERE workspace_id=? AND resolved_at!=''", (wid(),)).fetchone()
-    return jsonify(total=total, breached=breached, resolved=resolved, breach_rate=round(breached/max(total,1)*100,1), avg_resolve_minutes=int(avg_row["avg_min"] or 0))
-
-# ═══════════════════════════════════════════════════════════════
-#  ONBOARDING
-# ═══════════════════════════════════════════════════════════════
-@app.route("/api/onboarding/status", methods=["GET"])
-@login_required
-def onboarding_status():
-    db  = get_db()
-    ws  = db.execute("SELECT onboarding_done, onboarding_step FROM workspaces WHERE id=?", (wid(),)).fetchone()
-    user = db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
-    members  = db.execute("SELECT COUNT(*) as c FROM users WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
-    projects = db.execute("SELECT COUNT(*) as c FROM projects WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchone()
-    has_ai   = bool(db.execute("SELECT ai_key FROM workspaces WHERE id=?", (wid(),)).fetchone() or {})
-    steps = [
-        {"id":"workspace",   "label":"Create your workspace",    "done": True},
-        {"id":"profile",     "label":"Set up your profile",      "done": bool(user and user["name"])},
-        {"id":"invite",      "label":"Invite a team member",     "done": (members["c"] if members else 0) > 1},
-        {"id":"project",     "label":"Create your first project","done": (projects["c"] if projects else 0) > 0},
-        {"id":"ai_key",      "label":"Connect AI assistant",     "done": False},
-    ]
-    done_count = sum(1 for s in steps if s["done"])
-    return jsonify(
-        onboarding_done=bool(ws and ws["onboarding_done"]),
-        step=ws["onboarding_step"] if ws else 0,
-        steps=steps,
-        progress=round(done_count/len(steps)*100),
-        complete=done_count==len(steps),
-    )
-
-@app.route("/api/onboarding/complete", methods=["POST"])
-@login_required
-def complete_onboarding():
-    _raw_pg("UPDATE workspaces SET onboarding_done=1 WHERE id=?", (wid(),))
-    return jsonify(ok=True)
-
-@app.route("/api/onboarding/step", methods=["POST"])
-@login_required
-def update_onboarding_step():
-    d = request.get_json(force=True)
-    _raw_pg("UPDATE workspaces SET onboarding_step=? WHERE id=?", (d.get("step",0), wid()))
-    return jsonify(ok=True)
-
-# ═══════════════════════════════════════════════════════════════
-#  ENHANCED AUDIT LOG
-# ═══════════════════════════════════════════════════════════════
-def _log_audit(action, user_id, target="", old_val="", new_val="", entity_type="", entity_id=""):
-    try:
-        _raw_pg("INSERT INTO audit_log(id,workspace_id,user_id,action,target,created,ip,entity_type,entity_id,old_value,new_value) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (secrets.token_hex(8), wid(), user_id, action, target, ts(),
-                 request.remote_addr or "", entity_type, entity_id, str(old_val)[:500], str(new_val)[:500]))
-    except Exception:
-        pass
-
-@app.route("/api/audit", methods=["GET"])
-@login_required
-def full_audit_log():
-    role = get_user_role()
-    if role not in ("Admin","Owner"):
-        return jsonify(error="Admins only"), 403
-    db     = get_db()
-    page   = max(1, int(request.args.get("page",1)))
-    limit  = 50
-    offset = (page-1)*limit
-    action_filter = request.args.get("action","")
-    user_filter   = request.args.get("user_id","")
-    entity_filter = request.args.get("entity_type","")
-    since  = request.args.get("since","")
-    sql    = "SELECT a.*, u.name as user_name FROM audit_log a LEFT JOIN users u ON a.user_id=u.id WHERE a.workspace_id=?"
-    params = [wid()]
-    if action_filter:
-        sql += " AND a.action LIKE ?"; params.append(f"%{action_filter}%")
-    if user_filter:
-        sql += " AND a.user_id=?"; params.append(user_filter)
-    if entity_filter:
-        sql += " AND a.entity_type=?"; params.append(entity_filter)
-    if since:
-        sql += " AND a.created>=?"; params.append(since)
-    sql += f" ORDER BY a.created DESC LIMIT {limit} OFFSET {offset}"
-    rows = db.execute(sql, params).fetchall()
-    total = db.execute("SELECT COUNT(*) as c FROM audit_log WHERE workspace_id=?", (wid(),)).fetchone()["c"]
-    return jsonify(rows=[dict(r) for r in rows], total=total, page=page, pages=max(1, -(-total//limit)))
-
-# ═══════════════════════════════════════════════════════════════
-#  REAL-TIME SERVER-SENT EVENTS
-# ═══════════════════════════════════════════════════════════════
-import queue as _queue
-_sse_clients: dict[str, list] = {}
-_sse_lock = threading.Lock()
-
-def _sse_publish(workspace_id, event_type, data):
-    with _sse_lock:
-        queues = _sse_clients.get(workspace_id, [])
-        dead   = []
-        for q in queues:
-            try:
-                q.put_nowait({"type": event_type, "data": data})
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            queues.remove(q)
-
-@app.route("/api/stream")
-@login_required
-def sse_stream():
-    """Server-Sent Events endpoint.
-    Uses a short 15s heartbeat timeout so gthread workers are not held
-    indefinitely — clients reconnect automatically via EventSource.
-    With gevent workers (recommended) this is fully non-blocking.
-    """
-    ws_id = wid()
-    uid   = session.get("user_id", "")
-    q = _queue.Queue(maxsize=50)
-    with _sse_lock:
-        _sse_clients.setdefault(ws_id, []).append(q)
-
-    def generate():
-        yield "data: {\"type\":\"connected\"}\n\n"
-        try:
-            while True:
-                try:
-                    msg = q.get(timeout=15)  # 15s timeout: release thread, client reconnects
-                    yield f"data: {json.dumps(msg)}\n\n"
-                except _queue.Empty:
-                    # Heartbeat keeps connection alive through proxies
-                    yield ": heartbeat\n\n"
-        except (GeneratorExit, Exception):
-            pass
-        finally:
-            with _sse_lock:
-                clients = _sse_clients.get(ws_id, [])
-                if q in clients:
-                    clients.remove(q)
-
-    resp = app.response_class(
-        generate(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control":    "no-cache",
-            "X-Accel-Buffering":"no",
-            "Connection":       "keep-alive",
-        }
-    )
-    return resp
-
-# ═══════════════════════════════════════════════════════════════
-#  ONBOARDING PAGE ROUTE
-# ═══════════════════════════════════════════════════════════════
-@app.route("/onboarding")
-def onboarding_page():
-    if "user_id" not in session:
-        return redirect("/?action=login")
-    return send_from_directory(".", "onboarding.html")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SLACK INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════
-def send_slack_notification(workspace_id, message, channel="#general"):
-    try:
-        rows = _raw_pg("SELECT slack_webhook_url FROM workspaces WHERE id=?", (workspace_id,), fetch=True)
-        if not rows or not rows[0].get("slack_webhook_url"):
-            return False
-        payload = json.dumps({"text": message, "channel": channel}).encode()
-        req = urllib.request.Request(rows[0]["slack_webhook_url"], data=payload,
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=8):
-            return True
-    except Exception as e:
-        log.error("[Slack] %s", e)
-        return False
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SMART SEARCH
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/search")
-@login_required
-def smart_search():
-    q = request.args.get("q", "").strip()
-    entity_type = request.args.get("type", "all")
-    if not q or len(q) < 2:
-        return jsonify({"results": [], "total": 0})
-    like = f"%{q.lower()}%"
-    results = []
-    with get_db() as db:
-        if entity_type in ("all", "tasks"):
-            rows = db.execute(
-                "SELECT id,title,stage,priority,assignee,project,'task' as type FROM tasks "
-                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
-                (wid(), like, like)).fetchall()
-            results.extend([{"type": "task", **dict(r)} for r in rows])
-        if entity_type in ("all", "projects"):
-            rows = db.execute(
-                "SELECT id,name as title,description,color,'project' as type FROM projects "
-                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(name) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
-                (wid(), like, like)).fetchall()
-            results.extend([{"type": "project", **dict(r)} for r in rows])
-        if entity_type in ("all", "tickets"):
-            rows = db.execute(
-                "SELECT id,title,status,priority,'ticket' as type FROM tickets "
-                "WHERE workspace_id=? AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
-                (wid(), like, like)).fetchall()
-            results.extend([{"type": "ticket", **dict(r)} for r in rows])
-        if entity_type in ("all", "users"):
-            rows = db.execute(
-                "SELECT id,name as title,email,role,'user' as type FROM users "
-                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(name) LIKE ? OR LOWER(email) LIKE ?) LIMIT 5",
-                (wid(), like, like)).fetchall()
-            results.extend([{"type": "user", **dict(r)} for r in rows])
-    return jsonify({"results": results[:30], "total": len(results), "query": q})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# INCIDENT MANAGEMENT
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/incidents", methods=["GET"])
-@login_required
-def get_incidents():
-    status = request.args.get("status", "")
-    with get_db() as db:
-        sql = "SELECT i.*,u.name as assignee_name FROM incidents i LEFT JOIN users u ON i.assignee=u.id WHERE i.workspace_id=?"
-        params = [wid()]
-        if status:
-            sql += " AND i.status=?"; params.append(status)
-        sql += " ORDER BY i.created DESC"
-        rows = db.execute(sql, params).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-@app.route("/api/incidents", methods=["POST"])
-@login_required
-def create_incident():
-    d = request.json or {}
-    if not d.get("title"):
-        return jsonify({"error": "title required"}), 400
-    iid = f"inc{int(datetime.now().timestamp()*1000)}"
-    now = ts()
-    severity = d.get("severity", "medium")
-    timeline = json.dumps([{"ts": now, "message": "Incident created", "user": session["user_id"]}])
-    _raw_pg(
-        "INSERT INTO incidents(id,workspace_id,title,severity,status,description,"
-        "affected_systems,timeline,assignee,reporter,created,updated,resolved_at,rca,postmortem) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (iid, wid(), d["title"], severity, "open", d.get("description", ""),
-         json.dumps(d.get("affected_systems", [])), timeline,
-         d.get("assignee", ""), session["user_id"], now, now, "", "", "")
-    )
-    if severity in ("critical", "high"):
-        send_slack_notification(wid(), f"{'🔴' if severity=='critical' else '🟠'} *INCIDENT [{severity.upper()}]* — {d['title']}\n> {d.get('description','')}")
-    _audit("incident_created", iid, f"{d['title']} [{severity}]")
-    with get_db() as db:
-        return jsonify(dict(db.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()))
-
-@app.route("/api/incidents/<iid>", methods=["PUT"])
-@login_required
-def update_incident(iid):
-    d = request.json or {}
-    with get_db() as db:
-        inc = db.execute("SELECT * FROM incidents WHERE id=? AND workspace_id=?", (iid, wid())).fetchone()
-        if not inc: return jsonify({"error": "Not found"}), 404
-        now = ts()
-        resolved_at = now if d.get("status") == "resolved" and inc["status"] != "resolved" else (inc["resolved_at"] or "")
-        timeline = json.loads(inc["timeline"] or "[]")
-        if d.get("status") and d["status"] != inc["status"]:
-            timeline.append({"ts": now, "message": f"Status → {d['status']}", "user": session["user_id"]})
-        if d.get("update_message"):
-            timeline.append({"ts": now, "message": d["update_message"], "user": session["user_id"]})
-        db.execute(
-            "UPDATE incidents SET title=?,severity=?,status=?,description=?,affected_systems=?,"
-            "timeline=?,assignee=?,updated=?,resolved_at=?,rca=?,postmortem=? WHERE id=? AND workspace_id=?",
-            (d.get("title", inc["title"]), d.get("severity", inc["severity"]),
-             d.get("status", inc["status"]), d.get("description", inc["description"]),
-             json.dumps(d.get("affected_systems", json.loads(inc["affected_systems"] or "[]"))),
-             json.dumps(timeline), d.get("assignee", inc["assignee"]),
-             now, resolved_at, d.get("rca", inc.get("rca", "") or ""),
-             d.get("postmortem", inc.get("postmortem", "") or ""), iid, wid()))
-        return jsonify(dict(db.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()))
-
-@app.route("/api/incidents/<iid>", methods=["DELETE"])
-@login_required
-def delete_incident(iid):
-    if get_user_role() not in ("Admin", "Manager"):
-        return jsonify({"error": "Admin only"}), 403
-    _raw_pg("DELETE FROM incidents WHERE id=? AND workspace_id=?", (iid, wid()))
-    return jsonify({"ok": True})
-
-@app.route("/api/incidents/stats")
-@login_required
-def incident_stats():
-    with get_db() as db:
-        total = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=?", (wid(),)).fetchone()["c"]
-        open_cnt = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=? AND status='open'", (wid(),)).fetchone()["c"]
-        critical = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=? AND severity='critical' AND status!='resolved'", (wid(),)).fetchone()["c"]
-        return jsonify(total=total, open=open_cnt, critical=critical)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# APPROVAL WORKFLOWS
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/approvals", methods=["GET"])
-@login_required
-def get_approvals():
-    status = request.args.get("status", "")
-    with get_db() as db:
-        sql = "SELECT a.*,u.name as requester_name FROM approvals a LEFT JOIN users u ON a.requested_by=u.id WHERE a.workspace_id=?"
-        params = [wid()]
-        if status: sql += " AND a.status=?"; params.append(status)
-        sql += " ORDER BY a.created DESC"
-        return jsonify([dict(r) for r in db.execute(sql, params).fetchall()])
-
-@app.route("/api/approvals", methods=["POST"])
-@login_required
-def create_approval():
-    d = request.json or {}
-    if not d.get("title"): return jsonify({"error": "title required"}), 400
-    aid = f"apv{int(datetime.now().timestamp()*1000)}"
-    now = ts()
-    approvers = d.get("approvers", [])
-    _raw_pg(
-        "INSERT INTO approvals(id,workspace_id,entity_type,entity_id,title,description,"
-        "status,requested_by,approvers,approved_by,rejected_by,rejection_reason,created,updated,expires_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (aid, wid(), d.get("entity_type", "task"), d.get("entity_id", ""),
-         d["title"], d.get("description", ""), "pending", session["user_id"],
-         json.dumps(approvers), json.dumps([]), "", "", now, now, d.get("expires_at", ""))
-    )
-    with get_db() as db:
-        for approver_id in approvers:
-            nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid, wid(), "approval_requested", f"Your approval needed: {d['title']}", approver_id, 0, now))
-        return jsonify(dict(db.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()))
-
-@app.route("/api/approvals/<aid>/approve", methods=["POST"])
-@login_required
-def approve_request(aid):
-    with get_db() as db:
-        apv = db.execute("SELECT * FROM approvals WHERE id=? AND workspace_id=?", (aid, wid())).fetchone()
-        if not apv: return jsonify({"error": "Not found"}), 404
-        approvers = json.loads(apv["approvers"] or "[]")
-        if session["user_id"] not in approvers: return jsonify({"error": "Not an approver"}), 403
-        approved_by = json.loads(apv["approved_by"] or "[]")
-        if session["user_id"] not in approved_by: approved_by.append(session["user_id"])
-        status = "approved" if set(approved_by) >= set(approvers) else "pending"
-        now = ts()
-        db.execute("UPDATE approvals SET approved_by=?,status=?,updated=? WHERE id=?",
-                   (json.dumps(approved_by), status, now, aid))
-        if status == "approved":
-            nid = f"n{int(datetime.now().timestamp()*1000)}"
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid, wid(), "approval_approved", f"✅ Approved: {apv['title']}", apv["requested_by"], 0, now))
-        _audit("approval_action", aid, f"Approved by {session['user_id']}, status={status}")
-        return jsonify({"ok": True, "status": status})
-
-@app.route("/api/approvals/<aid>/reject", methods=["POST"])
-@login_required
-def reject_request(aid):
-    d = request.json or {}
-    with get_db() as db:
-        apv = db.execute("SELECT * FROM approvals WHERE id=? AND workspace_id=?", (aid, wid())).fetchone()
-        if not apv: return jsonify({"error": "Not found"}), 404
-        approvers = json.loads(apv["approvers"] or "[]")
-        if session["user_id"] not in approvers: return jsonify({"error": "Not an approver"}), 403
-        now = ts()
-        db.execute("UPDATE approvals SET rejected_by=?,rejection_reason=?,status=?,updated=? WHERE id=?",
-                   (session["user_id"], d.get("reason", ""), "rejected", now, aid))
-        nid = f"n{int(datetime.now().timestamp()*1000)}"
-        db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                   (nid, wid(), "approval_rejected", f"❌ Rejected: {apv['title']}", apv["requested_by"], 0, now))
-        return jsonify({"ok": True, "status": "rejected"})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# RECURRING TASKS
-# ═══════════════════════════════════════════════════════════════════════════════
-def _calc_next_run(frequency, day_of_week=1, day_of_month=1):
-    now = datetime.now()
-    if frequency == "daily":
-        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    elif frequency == "weekly":
-        days_ahead = (int(day_of_week) - now.weekday()) % 7 or 7
-        return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    elif frequency == "monthly":
-        dom = int(day_of_month)
-        if now.day < dom:
-            return now.replace(day=dom).strftime("%Y-%m-%d")
-        if now.month == 12:
-            return now.replace(year=now.year+1, month=1, day=dom).strftime("%Y-%m-%d")
-        return now.replace(month=now.month+1, day=dom).strftime("%Y-%m-%d")
-    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
-
-@app.route("/api/recurring-tasks", methods=["GET"])
-@login_required
-def get_recurring_tasks():
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM recurring_tasks WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-@app.route("/api/recurring-tasks", methods=["POST"])
-@login_required
-def create_recurring_task():
-    d = request.json or {}
-    if not d.get("title"): return jsonify({"error": "title required"}), 400
-    rid = f"rt{int(datetime.now().timestamp()*1000)}"
-    freq = d.get("frequency", "weekly")
-    next_run = _calc_next_run(freq, d.get("day_of_week", 1), d.get("day_of_month", 1))
-    _raw_pg(
-        "INSERT INTO recurring_tasks(id,workspace_id,title,description,project,assignee,priority,stage,"
-        "frequency,day_of_week,day_of_month,next_run,last_run,enabled,created_by,created) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (rid, wid(), d["title"], d.get("description", ""), d.get("project", ""),
-         d.get("assignee", ""), d.get("priority", "medium"), d.get("stage", "backlog"),
-         freq, d.get("day_of_week", 1), d.get("day_of_month", 1), next_run, "", 1, session["user_id"], ts())
-    )
-    with get_db() as db:
-        return jsonify(dict(db.execute("SELECT * FROM recurring_tasks WHERE id=?", (rid,)).fetchone()))
-
-@app.route("/api/recurring-tasks/<rid>", methods=["PUT"])
-@login_required
-def update_recurring_task(rid):
-    d = request.json or {}
-    with get_db() as db:
-        rt = db.execute("SELECT * FROM recurring_tasks WHERE id=? AND workspace_id=?", (rid, wid())).fetchone()
-        if not rt: return jsonify({"error": "Not found"}), 404
-        freq = d.get("frequency", rt["frequency"])
-        next_run = _calc_next_run(freq, d.get("day_of_week", rt["day_of_week"]), d.get("day_of_month", rt["day_of_month"]))
-        db.execute(
-            "UPDATE recurring_tasks SET title=?,description=?,project=?,assignee=?,priority=?,"
-            "frequency=?,day_of_week=?,day_of_month=?,next_run=?,enabled=? WHERE id=? AND workspace_id=?",
-            (d.get("title", rt["title"]), d.get("description", rt["description"]),
-             d.get("project", rt["project"]), d.get("assignee", rt["assignee"]),
-             d.get("priority", rt["priority"]), freq, d.get("day_of_week", rt["day_of_week"]),
-             d.get("day_of_month", rt["day_of_month"]), next_run,
-             int(d.get("enabled", rt["enabled"])), rid, wid()))
-        return jsonify(dict(db.execute("SELECT * FROM recurring_tasks WHERE id=?", (rid,)).fetchone()))
-
-@app.route("/api/recurring-tasks/<rid>", methods=["DELETE"])
-@login_required
-def delete_recurring_task(rid):
-    _raw_pg("DELETE FROM recurring_tasks WHERE id=? AND workspace_id=?", (rid, wid()))
-    return jsonify({"ok": True})
-
-def _recurring_task_runner():
-    while True:
-        try:
-            time.sleep(3600)
-            today = datetime.now().strftime("%Y-%m-%d")
-            due = _raw_pg("SELECT * FROM recurring_tasks WHERE enabled=1 AND next_run<=?", (today,), fetch=True)
-            for rt in (due or []):
-                tid = f"T-r{secrets.token_hex(4)}"
-                _raw_pg(
-                    "INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,"
-                    "created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (tid, rt["workspace_id"], rt["title"], rt["description"], rt["project"],
-                     rt["assignee"], rt["priority"], rt["stage"], ts(), "", 0, "[]", "", ""))
-                next_run = _calc_next_run(rt["frequency"], rt["day_of_week"], rt["day_of_month"])
-                _raw_pg("UPDATE recurring_tasks SET last_run=?,next_run=? WHERE id=?", (today, next_run, rt["id"]))
-        except Exception as e:
-            log.error("[recurring] %s", e)
-
-threading.Thread(target=_recurring_task_runner, daemon=True).start()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GITHUB INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/github/repos", methods=["GET"])
-@login_required
-def list_github_repos():
-    with get_db() as db:
-        rows = db.execute("SELECT id,workspace_id,repo_full_name,repo_url,connected_by,created FROM github_repos WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-@app.route("/api/github/repos", methods=["POST"])
-@login_required
-def link_github_repo():
-    d = request.json or {}
-    repo_full_name = d.get("repo_full_name", "").strip()
-    if not repo_full_name: return jsonify({"error": "repo_full_name required"}), 400
-    rid = f"ghrepo{int(datetime.now().timestamp()*1000)}"
-    token = d.get("github_token", "")
-    _raw_pg(
-        "INSERT INTO github_repos(id,workspace_id,repo_full_name,repo_url,github_token,connected_by,created) VALUES (?,?,?,?,?,?,?)",
-        (rid, wid(), repo_full_name, f"https://github.com/{repo_full_name}", token, session["user_id"], ts()))
-    _audit("github_repo_linked", rid, f"Linked: {repo_full_name}")
-    return jsonify({"ok": True, "id": rid, "repo_full_name": repo_full_name})
-
-@app.route("/api/github/repos/<repo_id>", methods=["DELETE"])
-@login_required
-def unlink_github_repo(repo_id):
-    if get_user_role() not in ("Admin", "Manager"): return jsonify({"error": "Admin only"}), 403
-    _raw_pg("DELETE FROM github_repos WHERE id=? AND workspace_id=?", (repo_id, wid()))
-    return jsonify({"ok": True})
-
-@app.route("/api/github/webhook", methods=["POST"])
-def github_webhook():
-    event_type = request.headers.get("X-GitHub-Event", "")
-    payload = request.get_data()
-    try: data = json.loads(payload)
-    except Exception: return "Bad JSON", 400
-    ws_id = request.args.get("ws", "")
-    repo_id = request.args.get("repo", "")
-    text_to_search = ""
-    if event_type == "push":
-        text_to_search = " ".join(c.get("message","") for c in data.get("commits", []))
-    elif event_type in ("pull_request", "issues"):
-        obj = data.get("pull_request") or data.get("issue") or {}
-        text_to_search = f"{obj.get('title','')} {obj.get('body','')}"
-    task_id = ""
-    m = re.search(r'T-\d{3,}(?:-\d+)?', text_to_search)
-    if m: task_id = m.group(0)
-    if ws_id:
-        eid = f"ghe{int(datetime.now().timestamp()*1000)}"
-        _raw_pg("INSERT INTO github_events(id,workspace_id,repo_id,event_type,payload,task_id,created) VALUES (?,?,?,?,?,?,?)",
-                (eid, ws_id, repo_id, event_type, json.dumps(data)[:4000], task_id, ts()))
-    return "ok", 200
-
-@app.route("/api/github/events")
-@login_required
-def get_github_events():
-    task_id = request.args.get("task_id", "")
-    with get_db() as db:
-        if task_id:
-            rows = db.execute("SELECT * FROM github_events WHERE workspace_id=? AND task_id=? ORDER BY created DESC LIMIT 50", (wid(), task_id)).fetchall()
-        else:
-            rows = db.execute("SELECT * FROM github_events WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GDPR — DATA EXPORT & DELETION
-# ═══════════════════════════════════════════════════════════════════════════════
-import zipfile, io
-
-@app.route("/api/gdpr/export")
-@login_required
-def gdpr_export():
-    uid = session["user_id"]
-    ws = wid()
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        with get_db() as db:
-            u = db.execute("SELECT id,name,email,role,avatar,color,created,last_active FROM users WHERE id=?", (uid,)).fetchone()
-            zf.writestr("profile.json", json.dumps(dict(u) if u else {}, indent=2))
-            tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND assignee=? AND deleted_at=''", (ws, uid)).fetchall()
-            zf.writestr("tasks.json", json.dumps([dict(t) for t in tasks], indent=2))
-            messages = db.execute("SELECT * FROM messages WHERE workspace_id=? AND sender=?", (ws, uid)).fetchall()
-            zf.writestr("messages.json", json.dumps([dict(m) for m in messages], indent=2))
-            dms = db.execute("SELECT * FROM direct_messages WHERE workspace_id=? AND (sender=? OR recipient=?)", (ws, uid, uid)).fetchall()
-            zf.writestr("direct_messages.json", json.dumps([dict(d) for d in dms], indent=2))
-            timelogs = db.execute("SELECT * FROM time_logs WHERE workspace_id=? AND user_id=?", (ws, uid)).fetchall()
-            zf.writestr("time_logs.json", json.dumps([dict(t) for t in timelogs], indent=2))
-        zf.writestr("README.txt", f"GDPR Export for {uid}\nGenerated: {datetime.now().isoformat()}\n")
-    buf.seek(0)
-    _log_audit("gdpr_export", uid, "GDPR data export")
-    return send_file(buf, download_name=f"my_data_{uid}.zip", as_attachment=True, mimetype="application/zip")
-
-@app.route("/api/gdpr/delete", methods=["POST"])
-@login_required
-def gdpr_delete():
-    d = request.json or {}
-    if d.get("confirm") != "DELETE MY DATA":
-        return jsonify({"error": "Confirm with 'DELETE MY DATA'"}), 400
-    uid = session["user_id"]
-    ws = wid()
-    with get_db() as db:
-        anon_name = f"Deleted User {secrets.token_hex(4)}"
-        anon_email = f"deleted_{secrets.token_hex(6)}@deleted.invalid"
-        db.execute("UPDATE users SET name=?,email=?,password=?,avatar='?',color='#999',deleted_at=? WHERE id=?",
-                   (anon_name, anon_email, hash_pw(secrets.token_hex(32)), ts(), uid))
-        db.execute("DELETE FROM direct_messages WHERE workspace_id=? AND sender=?", (ws, uid))
-        db.execute("DELETE FROM push_subscriptions WHERE user_id=?", (uid,))
-        db.execute("DELETE FROM vault_cards WHERE user_id=?", (uid,))
-    session.clear()
-    _log_audit("gdpr_delete", uid, "User data deleted (GDPR)")
-    return jsonify({"ok": True, "message": "Your data has been anonymized."})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# FEATURE FLAGS
-# ═══════════════════════════════════════════════════════════════════════════════
-DEFAULT_FLAGS = {
-    "github_integration": True, "slack_integration": True,
-    "incident_management": True, "approval_workflows": True,
-    "recurring_tasks": True, "smart_search": True, "time_tracking": True,
-    "public_api": True, "ai_assistant": True, "billing": False, "public_roadmap": False,
-}
-
-@app.route("/api/feature-flags", methods=["GET"])
-@login_required
-def get_feature_flags():
-    flags = dict(DEFAULT_FLAGS)
-    try:
-        with get_db() as db:
-            rows = db.execute("SELECT flag_name,enabled FROM feature_flags WHERE workspace_id=?", (wid(),)).fetchall()
-            for r in rows:
-                flags[r["flag_name"]] = bool(r["enabled"])
-    except Exception: pass
-    return jsonify(flags)
-
-@app.route("/api/feature-flags", methods=["PUT"])
-@login_required
-def update_feature_flags():
-    if get_user_role() not in ("Admin", "Owner"): return jsonify({"error": "Admin only"}), 403
-    d = request.json or {}
-    with get_db() as db:
-        for flag_name, enabled in d.items():
-            if flag_name not in DEFAULT_FLAGS: continue
-            existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (wid(), flag_name)).fetchone()
-            if existing:
-                db.execute("UPDATE feature_flags SET enabled=?,updated=? WHERE id=?", (1 if enabled else 0, ts(), existing["id"]))
-            else:
-                _raw_pg("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
-                        (secrets.token_hex(6), wid(), flag_name, 1 if enabled else 0, "{}", ts()))
-    return jsonify({"ok": True})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# RELEASE CALENDAR
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/releases", methods=["GET"])
-@login_required
-def get_releases():
-    with get_db() as db:
-        rows = db.execute("SELECT r.*,u.name as created_by_name FROM release_calendar r LEFT JOIN users u ON r.created_by=u.id WHERE r.workspace_id=? ORDER BY r.release_date ASC", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-@app.route("/api/releases", methods=["POST"])
-@login_required
-def create_release():
-    d = request.json or {}
-    if not d.get("title") or not d.get("release_date"): return jsonify({"error": "title and release_date required"}), 400
-    rid = f"rel{int(datetime.now().timestamp()*1000)}"
-    _raw_pg("INSERT INTO release_calendar(id,workspace_id,title,release_date,project,status,environment,notes,created_by,created) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (rid, wid(), d["title"], d["release_date"], d.get("project", ""),
-             d.get("status", "planned"), d.get("environment", "production"),
-             d.get("notes", ""), session["user_id"], ts()))
-    with get_db() as db:
-        return jsonify(dict(db.execute("SELECT * FROM release_calendar WHERE id=?", (rid,)).fetchone()))
-
-@app.route("/api/releases/<rid>", methods=["PUT"])
-@login_required
-def update_release(rid):
-    d = request.json or {}
-    with get_db() as db:
-        r = db.execute("SELECT * FROM release_calendar WHERE id=? AND workspace_id=?", (rid, wid())).fetchone()
-        if not r: return jsonify({"error": "Not found"}), 404
-        db.execute("UPDATE release_calendar SET title=?,release_date=?,project=?,status=?,environment=?,notes=? WHERE id=?",
-                   (d.get("title", r["title"]), d.get("release_date", r["release_date"]),
-                    d.get("project", r["project"]), d.get("status", r["status"]),
-                    d.get("environment", r["environment"]), d.get("notes", r["notes"]), rid))
-        return jsonify(dict(db.execute("SELECT * FROM release_calendar WHERE id=?", (rid,)).fetchone()))
-
-@app.route("/api/releases/<rid>", methods=["DELETE"])
-@login_required
-def delete_release(rid):
-    _raw_pg("DELETE FROM release_calendar WHERE id=? AND workspace_id=?", (rid, wid()))
-    return jsonify({"ok": True})
-
-@app.route("/api/roadmap/public/<ws_id>")
-def public_roadmap(ws_id):
-    rows = _raw_pg("SELECT id,title,release_date,status,environment,notes FROM release_calendar WHERE workspace_id=? AND status IN ('planned','in_progress','released') ORDER BY release_date ASC LIMIT 50", (ws_id,), fetch=True)
-    ws_rows = _raw_pg("SELECT name FROM workspaces WHERE id=?", (ws_id,), fetch=True)
-    return jsonify({"workspace": ws_rows[0]["name"] if ws_rows else "Unknown", "releases": rows or []})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ON-CALL SCHEDULE
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/oncall", methods=["GET"])
-@login_required
-def get_oncall():
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM on_call_schedules WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
-
-@app.route("/api/oncall", methods=["POST"])
-@login_required
-def create_oncall():
-    d = request.json or {}
-    if not d.get("name") or not d.get("members"): return jsonify({"error": "name and members required"}), 400
-    oid = f"oc{int(datetime.now().timestamp()*1000)}"
-    members = d.get("members", [])
-    _raw_pg("INSERT INTO on_call_schedules(id,workspace_id,name,members,current_oncall,rotation_days,started_at,created) VALUES (?,?,?,?,?,?,?,?)",
-            (oid, wid(), d["name"], json.dumps(members), members[0] if members else "", d.get("rotation_days", 7), ts(), ts()))
-    with get_db() as db:
-        return jsonify(dict(db.execute("SELECT * FROM on_call_schedules WHERE id=?", (oid,)).fetchone()))
-
-@app.route("/api/oncall/<oid>/rotate", methods=["POST"])
-@login_required
-def rotate_oncall(oid):
-    with get_db() as db:
-        s = db.execute("SELECT * FROM on_call_schedules WHERE id=? AND workspace_id=?", (oid, wid())).fetchone()
-        if not s: return jsonify({"error": "Not found"}), 404
-        members = json.loads(s["members"] or "[]")
-        if not members: return jsonify({"error": "No members"}), 400
-        idx = members.index(s["current_oncall"]) if s["current_oncall"] in members else -1
-        new_oncall = members[(idx + 1) % len(members)]
-        db.execute("UPDATE on_call_schedules SET current_oncall=? WHERE id=?", (new_oncall, oid))
-        return jsonify({"ok": True, "current_oncall": new_oncall})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# RISK DASHBOARD & PROJECT HEALTH
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/projects/<pid>/health")
-@login_required
-def project_health(pid):
-    with get_db() as db:
-        p = db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?", (pid, wid())).fetchone()
-        if not p: return jsonify({"error": "Not found"}), 404
-        tasks = db.execute("SELECT * FROM tasks WHERE project=? AND workspace_id=? AND deleted_at=''", (pid, wid())).fetchall()
-        today = datetime.now().strftime("%Y-%m-%d")
-        total = len(tasks)
-        completed = len([t for t in tasks if t["stage"] == "completed"])
-        blocked = len([t for t in tasks if t["stage"] == "blocked"])
-        overdue = len([t for t in tasks if t["due"] and t["due"][:10] < today and t["stage"] != "completed"])
-        completion_rate = (completed / total * 100) if total > 0 else 0
-        score = max(0, min(100, int(100 - (blocked/max(total,1))*30 - (overdue/max(total,1))*25 - max(0, 100-completion_rate)*0.3)))
-        status = "healthy" if score >= 80 else ("at_risk" if score >= 60 else ("warning" if score >= 40 else "critical"))
-        return jsonify({"project_id": pid, "score": score, "status": status, "total_tasks": total,
-                        "completed": completed, "blocked": blocked, "overdue": overdue,
-                        "completion_rate": round(completion_rate, 1)})
-
-@app.route("/api/risk-dashboard")
-@login_required
-def risk_dashboard():
-    with get_db() as db:
-        today = datetime.now().strftime("%Y-%m-%d")
-        risky = db.execute(
-            "SELECT t.*,u.name as assignee_name,p.name as project_name FROM tasks t "
-            "LEFT JOIN users u ON t.assignee=u.id LEFT JOIN projects p ON t.project=p.id "
-            "WHERE t.workspace_id=? AND t.deleted_at='' AND ("
-            "(t.due!='' AND t.due<? AND t.stage!='completed') OR t.stage='blocked' OR t.priority='critical'"
-            ") ORDER BY t.priority DESC, t.due ASC LIMIT 20",
-            (wid(), today)).fetchall()
-        blocked_by = db.execute(
-            "SELECT project,COUNT(*) as cnt FROM tasks WHERE workspace_id=? AND stage='blocked' AND deleted_at='' GROUP BY project",
-            (wid(),)).fetchall()
-        return jsonify({
-            "risky_tasks": [dict(t) for t in risky],
-            "blocked_by_project": [dict(r) for r in blocked_by],
-            "summary": {"total_risky": len(risky),
-                        "overdue": len([t for t in risky if t["due"] and t["due"][:10] < today]),
-                        "blocked": len([t for t in risky if t["stage"] == "blocked"]),
-                        "critical": len([t for t in risky if t["priority"] == "critical"])}
-        })
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# EMAIL-TO-TASK & CSV IMPORT/EXPORT
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/email-to-task", methods=["POST"])
-def email_to_task():
-    d = request.json or {}
-    token = request.headers.get("X-Email-Token", "") or d.get("token", "")
-    if not token: return jsonify({"error": "Token required"}), 401
-    rows = _raw_pg("SELECT id FROM workspaces WHERE invite_code=?", (token.upper(),), fetch=True)
-    if not rows: return jsonify({"error": "Invalid token"}), 401
-    ws_id = rows[0]["id"]
-    subject = d.get("subject", "Task from email")[:200]
-    body = d.get("body", "")[:2000]
-    from_email = d.get("from", "")
-    user_rows = _raw_pg("SELECT id FROM users WHERE workspace_id=? AND email=? LIMIT 1", (ws_id, from_email), fetch=True)
-    reporter_id = user_rows[0]["id"] if user_rows else ""
-    tid = f"T-email-{secrets.token_hex(4)}"
-    _raw_pg("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (tid, ws_id, subject, body, "", reporter_id, "medium", "backlog", ts(), "", 0, "[]", "", ""))
-    return jsonify({"ok": True, "task_id": tid})
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPENAPI DOCS
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.route("/api/docs")
-def openapi_docs():
-    spec = {
-        "openapi": "3.0.0",
-        "info": {"title": "Project Tracker API", "version": "5.0.0",
-                 "description": "Enterprise project management API — projectflow.app"},
-        "servers": [{"url": APP_URL or "/", "description": "Production"}],
-        "security": [{"bearerAuth": []}],
-        "components": {"securitySchemes": {
-            "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "pt_..."},
-            "sessionAuth": {"type": "apiKey", "in": "cookie", "name": "pf_session"}
-        }},
-        "paths": {
-            "/api/v1/tasks": {"get": {"summary": "List tasks", "tags": ["Tasks"]},
-                              "post": {"summary": "Create task", "tags": ["Tasks"]}},
-            "/api/v1/projects": {"get": {"summary": "List projects", "tags": ["Projects"]}},
-            "/api/incidents": {"get": {"summary": "List incidents", "tags": ["Incidents"]},
-                               "post": {"summary": "Create incident", "tags": ["Incidents"]}},
-            "/api/approvals": {"get": {"summary": "List approvals", "tags": ["Approvals"]},
-                               "post": {"summary": "Create approval", "tags": ["Approvals"]}},
-            "/api/releases": {"get": {"summary": "Release calendar", "tags": ["Releases"]}},
-            "/api/search": {"get": {"summary": "Full-text search", "tags": ["Search"],
-                                    "parameters": [{"name": "q", "in": "query", "required": True,
-                                                    "schema": {"type": "string"}}]}},
-            "/api/gdpr/export": {"get": {"summary": "Export personal data (GDPR)", "tags": ["GDPR"]}},
-            "/api/gdpr/delete": {"post": {"summary": "Delete personal data (GDPR)", "tags": ["GDPR"]}},
-        }
-    }
-    return jsonify(spec)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DB MIGRATIONS FOR NEW TABLES
-# ═══════════════════════════════════════════════════════════════════════════════
-def _run_v5_migrations():
-    new_ddls = [
-        "ALTER TABLE workspaces ADD COLUMN slack_webhook_url TEXT DEFAULT ''",
-        "ALTER TABLE workspaces ADD COLUMN github_client_id TEXT DEFAULT ''",
-        "ALTER TABLE workspaces ADD COLUMN github_client_secret TEXT DEFAULT ''",
-        "ALTER TABLE workspaces ADD COLUMN github_org TEXT DEFAULT ''",
-        """CREATE TABLE IF NOT EXISTS incidents (
-            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
-            severity TEXT DEFAULT 'medium', status TEXT DEFAULT 'open',
-            description TEXT DEFAULT '', affected_systems TEXT DEFAULT '[]',
-            timeline TEXT DEFAULT '[]', assignee TEXT DEFAULT '',
-            reporter TEXT, created TEXT, updated TEXT,
-            resolved_at TEXT DEFAULT '', rca TEXT DEFAULT '', postmortem TEXT DEFAULT '')""",
-        """CREATE TABLE IF NOT EXISTS approvals (
-            id TEXT PRIMARY KEY, workspace_id TEXT, entity_type TEXT,
-            entity_id TEXT, title TEXT, description TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending', requested_by TEXT,
-            approvers TEXT DEFAULT '[]', approved_by TEXT DEFAULT '[]',
-            rejected_by TEXT DEFAULT '', rejection_reason TEXT DEFAULT '',
-            created TEXT, updated TEXT, expires_at TEXT DEFAULT '')""",
-        """CREATE TABLE IF NOT EXISTS recurring_tasks (
-            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
-            description TEXT DEFAULT '', project TEXT DEFAULT '',
-            assignee TEXT DEFAULT '', priority TEXT DEFAULT 'medium',
-            stage TEXT DEFAULT 'backlog', frequency TEXT DEFAULT 'weekly',
-            day_of_week INTEGER DEFAULT 1, day_of_month INTEGER DEFAULT 1,
-            next_run TEXT, last_run TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
-            created_by TEXT, created TEXT)""",
-        """CREATE TABLE IF NOT EXISTS github_repos (
-            id TEXT PRIMARY KEY, workspace_id TEXT, repo_full_name TEXT,
-            repo_url TEXT, github_token TEXT DEFAULT '',
-            connected_by TEXT, created TEXT)""",
-        """CREATE TABLE IF NOT EXISTS github_events (
-            id TEXT PRIMARY KEY, workspace_id TEXT, repo_id TEXT,
-            event_type TEXT, payload TEXT DEFAULT '{}',
-            task_id TEXT DEFAULT '', created TEXT)""",
-        """CREATE TABLE IF NOT EXISTS feature_flags (
-            id TEXT PRIMARY KEY, workspace_id TEXT, flag_name TEXT,
-            enabled INTEGER DEFAULT 0, config TEXT DEFAULT '{}', updated TEXT)""",
-        """CREATE TABLE IF NOT EXISTS release_calendar (
-            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
-            release_date TEXT, project TEXT DEFAULT '',
-            status TEXT DEFAULT 'planned', environment TEXT DEFAULT 'production',
-            notes TEXT DEFAULT '', created_by TEXT, created TEXT)""",
-        """CREATE TABLE IF NOT EXISTS on_call_schedules (
-            id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT,
-            members TEXT DEFAULT '[]', current_oncall TEXT DEFAULT '',
-            rotation_days INTEGER DEFAULT 7, started_at TEXT, created TEXT)""",
-        "CREATE INDEX IF NOT EXISTS idx_incidents_ws ON incidents(workspace_id,status)",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_ws ON approvals(workspace_id,status)",
-        "CREATE INDEX IF NOT EXISTS idx_recurring_ws ON recurring_tasks(workspace_id,next_run)",
-        "CREATE INDEX IF NOT EXISTS idx_github_repos ON github_repos(workspace_id)",
-    ]
-    for ddl in new_ddls:
-        _run_ddl(ddl)
-
-try:
-    _run_v5_migrations()
-    _close_ddl_conn()   # release shared DDL conn after v5 migrations
-except Exception as _v5e:
-    log.warning("[v5_migrations] %s", _v5e)
-
-
 if __name__=="__main__":
-    print("\n⚡ Project Tracker v5.0 — Enterprise Edition — Multi-Tenant | AI | Workspaces")
+    print("\n⚡ VEWIT v4.0 — Multi-Tenant | AI | Workspaces")
     print("="*54)
     print("  Initializing database...")
     init_db()

@@ -1,17 +1,17 @@
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Project Tracker — Sign In</title>
+<title>VEWIT — Sign In</title>
 <link rel="icon" type="image/png" href="/icon-192.png"/>
 <link rel="shortcut icon" href="/favicon.ico"/>
-<meta name="description" content="Sign in to Project Tracker — AI-powered team collaboration platform."/>
+<meta name="description" content="Sign in to VEWIT — AI-powered team collaboration platform."/>
 <meta name="robots" content="noindex"/>
-<link rel="canonical" href="https://www.project-tracker.in/"/>
+<link rel="canonical" href="https://www.vewit.in/"/>
 <link rel="manifest" href="/manifest.json"/>
 <meta name="theme-color" content="#1d4ed8"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<meta name="apple-mobile-web-app-title" content="Project Tracker"/>
+<meta name="apple-mobile-web-app-title" content="VEWIT"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png"/>
 <link rel="shortcut icon" type="image/png" href="/favicon.ico"/>
@@ -106,15 +106,15 @@ async function _pfSetupPush(reg){
 }
 
 function _pfSendSubToServer(sub){
-  // Guard: only send push subscription if React has confirmed an active session.
-  // window._pfCurrentUser is set by the App useEffect after /api/auth/me succeeds,
-  // preventing a redundant 401 call before auth state is resolved.
-  if(!window._pfCurrentUser) return;
-  var subJson = sub.toJSON();
-  fetch('/api/push/subscribe',{
-    method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-      endpoint: subJson.endpoint, keys: subJson.keys
-    })
+  // Guard: only call push/subscribe if the user session is active (avoid 401 in console)
+  fetch('/api/auth/me',{credentials:'include'}).then(function(r){
+    if(!r.ok) return; // not authenticated — skip silently
+    var subJson = sub.toJSON();
+    return fetch('/api/push/subscribe',{
+      method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+        endpoint: subJson.endpoint, keys: subJson.keys
+      })
+    });
   }).catch(function(){});
 }
 
@@ -140,40 +140,23 @@ window._pfPushUnsubscribe = async function(){
 })();
 </script>
 
-<link rel="dns-prefetch" href="https://fonts.googleapis.com"/>
-<link rel="dns-prefetch" href="https://fonts.gstatic.com"/>
-<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com"/>
-<link rel="dns-prefetch" href="https://unpkg.com"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script>
 (function(){
-  // Load libs in correct dependency order.
-  // React must load first, then ReactDOM, then Recharts (needs React.forwardRef).
-  // Prop-types and htm can load in parallel since they are standalone.
-  var _scripts=document.querySelectorAll('script[nonce]');
-  var _nonce=_scripts.length?_scripts[_scripts.length-1].nonce:'';
-
-  function addScript(src,cb){
+  var libs=[
+    'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js', 'https://unpkg.com/htm@3.1.1/dist/htm.js', 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js', ];
+  function loadNext(i){
+    if(i>=libs.length)return;
     var s=document.createElement('script');
-    s.src=src;s.crossOrigin='anonymous';
-    if(_nonce){s.nonce=_nonce;}
-    if(cb){s.onload=cb;s.onerror=function(){cb&&cb();};}
+    s.src=libs[i];
+    s.crossOrigin='anonymous';
+    s.onload=function(){loadNext(i+1);};
+    s.onerror=function(){loadNext(i+1);};
     document.head.appendChild(s);
   }
-
-  // Load standalone libs immediately (no React dependency)
-  addScript('https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js');
-  addScript('https://unpkg.com/htm@3.1.1/dist/htm.js');
-  addScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js');
-
-  // React → ReactDOM → Recharts (strict sequential — Recharts needs React.forwardRef)
-  addScript('https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',function(){
-    addScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',function(){
-      addScript('https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js');
-    });
-  });
+  loadNext(0);
 })();
 </script>
 <style>
@@ -187,7 +170,7 @@ body{font-family:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;backgrou
 .dm body,.dm{background-image:none!important}
 
 /* ═══════════════════════════════════════════════
-   Project Tracker WORKSPACE — Apple iPhone 17 Pro Inspired
+   VEWIT WORKSPACE — Apple iPhone 17 Pro Inspired
    Light: Luminous white + blue/purple/pink accents
    Dark: Deep space black + titanium purple/blue
    ═══════════════════════════════════════════════ */
@@ -301,16 +284,10 @@ body{font-family:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;backgrou
   --grad-subtle:linear-gradient(135deg,rgba(10,132,255,0.12),rgba(191,90,242,0.08));
 }
 
-::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:8px}
 ::-webkit-scrollbar-thumb:hover{background:var(--tx3)}
-/* Kanban board horizontal scrollbar */
-.kanban-scroll::-webkit-scrollbar{height:10px !important}
-.kanban-scroll::-webkit-scrollbar-track{background:rgba(90,94,247,0.07);border-radius:10px;margin:0 8px}
-.kanban-scroll::-webkit-scrollbar-thumb{background:linear-gradient(90deg,#5a5ef7,#a855f7);border-radius:10px;border:2px solid rgba(90,94,247,0.12)}
-.kanban-scroll::-webkit-scrollbar-thumb:hover{background:linear-gradient(90deg,#6366f1,#c026d3)}
-.kanban-scroll{scrollbar-width:thin;scrollbar-color:#5a5ef7 rgba(90,94,247,0.07)}
 .vault-scroll::-webkit-scrollbar{width:8px}
 .vault-scroll::-webkit-scrollbar-track{background:rgba(90,94,247,0.06);border-radius:0;margin:0}
 .vault-scroll::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#5a5ef7,#a855f7);border-radius:4px}
@@ -780,7 +757,7 @@ textarea.inp{resize:vertical;min-height:66px;line-height:1.5}
           <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
         </svg>
       </div>
-      <div style="font-size:28px;font-weight:800;color:#f5f5f7;letter-spacing:-1.5px;margin-bottom:6px">Project Tracker</div>
+      <div style="font-size:28px;font-weight:800;color:#f5f5f7;letter-spacing:-1.5px;margin-bottom:6px">VEWIT</div>
       <div style="font-size:13px;color:rgba(174,174,178,0.6);letter-spacing:0.05em;font-family:'Inter',system-ui;margin-bottom:36px">AI-Powered Workspace</div>
       <!-- Thin shimmer progress bar -->
       <div style="width:180px;height:2px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin:0 auto">
@@ -818,7 +795,7 @@ function waitForLibs(cb){
     if(ready){
       clearInterval(interval);
       try{ cb(); }
-      catch(e){ console.error('[Project Tracker] App init error:',e); }
+      catch(e){ console.error('[VEWIT] App init error:',e); }
     }
   },30);
 }
@@ -854,7 +831,7 @@ function AppLoader(){
           <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" strokeWidth="3.5" strokeLinecap="round"/>
         </svg>
       </div>
-      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>Project Tracker</div>
+      <div style=${{fontSize:28,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:6}}>VEWIT</div>
       <div style=${{fontSize:13,color:'rgba(174,174,178,0.6)',letterSpacing:'0.05em',marginBottom:36}}>AI-Powered Workspace</div>
       <div style=${{width:180,height:2,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',margin:'0 auto'}}>
         <div style=${{height:'100%',borderRadius:2,background:'linear-gradient(90deg,#5a8cff,#a855f7,#ec4899)',animation:'vwBoot-bar 1.8s cubic-bezier(0.4,0,0.2,1) infinite'}}></div>
@@ -863,13 +840,10 @@ function AppLoader(){
   </div>`;
 }
 
-// Global abort controller — cancelled on logout to kill all in-flight requests
-let _apiAbortCtrl = new AbortController();
 const api={
-  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get: async (u) => {
     try {
-      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal});
+      const r = await fetch(u, {credentials: 'include'});
       if (!r.ok) {
         if (r.status === 401) {
           console.warn('[API] 401 Unauthorized:', u);
@@ -880,7 +854,6 @@ const api={
       }
       return await r.json();
     } catch (e) {
-      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -894,22 +867,12 @@ const api={
         body: JSON.stringify(b)
       });
       if (!r.ok) {
-        if (r.status === 401) {
-          // Auth endpoints (/api/auth/*) return 401 with a real error body (e.g. wrong password).
-          // All other endpoints return 401 because the session expired — treat as null.
-          if (u.startsWith('/api/auth/')) {
-            const errData = await r.json().catch(() => ({}));
-            return { error: errData.error || 'Unauthorized', status: 401 };
-          }
-          console.warn('[API] 401 Unauthorized:', u);
-          return null;
-        }
+        if (r.status === 401) return null;
         const errData = await r.json().catch(() => ({}));
         return { error: errData.error || `HTTP ${r.status}`, status: r.status };
       }
       return await r.json();
     } catch (e) {
-      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -1044,49 +1007,11 @@ function AuthScreen({onLogin}){
   const [totpToken,setTotpToken]=useState('');
   const canvasRef=useRef(null);
   const formRef=useRef(null);
-  const [googleEnabled,setGoogleEnabled]=useState(false);
-
-  // Check if Google OAuth is configured on the server
-  useEffect(()=>{
-    fetch('/api/auth/google/config')
-      .then(r=>r.ok?r.json():null)
-      .then(d=>{if(d&&d.enabled)setGoogleEnabled(true);})
-      .catch(()=>{});
-    // Handle post-OAuth redirect: google_auth=1 in URL means just logged in via Google
-    try{
-      const p=new URLSearchParams(window.location.search);
-      if(p.get('google_auth')==='1'){
-        fetch('/api/auth/me').then(r=>r.ok?r.json():null).then(u=>{
-          if(u&&u.id){history.replaceState(null,'','/');onLogin(u);}
-        }).catch(()=>{});
-      }
-    }catch(e){}
-  },[]);
 
   const setTab=(t)=>{
     setTabRaw(t);setEmail('');setPw('');setErr('');setName('');setWsName('');setInviteCode('');setPhase('idle');
     try{history.replaceState(null,'','/?action='+t);}catch{}
   };
-
-  // Show server-side OAuth errors (e.g. ?error=email_not_verified)
-  useEffect(()=>{
-    try{
-      const p=new URLSearchParams(window.location.search);
-      const oauthErr=p.get('error');
-      if(oauthErr){
-        const msgs={
-          email_not_verified:'Google account email is not verified. Please verify your Google email first.',
-          state_mismatch:'Sign-in was interrupted. Please try again.',
-          token_exchange_failed:'Could not connect to Google. Please try again.',
-          userinfo_failed:'Could not retrieve your Google profile. Please try again.',
-          user_creation_failed:'Account creation failed. Please contact support.',
-          access_denied:'Google sign-in was cancelled.',
-        };
-        setErr(msgs[oauthErr]||('Google sign-in error: '+oauthErr));
-        history.replaceState(null,'','/'+window.location.hash);
-      }
-    }catch(e){}
-  },[]);
 
   /* ── Inject CSS ── */
   useEffect(()=>{
@@ -1095,7 +1020,7 @@ function AuthScreen({onLogin}){
     const s=document.createElement('style');
     s.id=id;
     s.textContent=`
-      /* fonts loaded in <head> */
+      @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,300;400;700;800&family=Inter:wght@300;400;500;600&display=swap');
 
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
@@ -1340,7 +1265,6 @@ function AuthScreen({onLogin}){
     setErr('');setPhase('loading');
     if(tab==='login'){
       const r=await api.post('/api/auth/login',{email,password:pw});
-      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
       else if(r.totp_required){setTotpUserId(r.user_id);setTotpUserName(r.name);setTotpStep(true);setPhase('idle');}
       else{setSuccessMsg('Welcome back, '+r.name);setPhase('success');setTimeout(()=>onLogin(r),1900);}
@@ -1349,9 +1273,8 @@ function AuthScreen({onLogin}){
       if(regMode==='create'&&!wsName){setErr('Workspace name is required.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(regMode==='join'&&!inviteCode){setErr('Enter the invite code.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       const r=await api.post('/api/auth/register',{mode:regMode,workspace_name:wsName,invite_code:inviteCode,name,email,password:pw,role});
-      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
-      else{setSuccessMsg('Welcome to Project Tracker, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
+      else{setSuccessMsg('Welcome to VEWIT, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
     }
   };
 
@@ -1360,7 +1283,6 @@ function AuthScreen({onLogin}){
     if(tok.length!==6){setErr('Enter the 6-digit code.');return;}
     setErr('');setPhase('loading');
     const r=await api.post('/api/auth/totp/verify',{user_id:totpUserId,token:tok});
-    if(!r){setErr('Server error. Please try again.');setPhase('idle');return;}
     if(r.error){setErr(r.error);setTotpToken('');setPhase('idle');}
     else{setSuccessMsg('Verified! Welcome back, '+totpUserName);setPhase('success');setTimeout(()=>onLogin(r),1800);}
   };
@@ -1388,7 +1310,7 @@ function AuthScreen({onLogin}){
             <line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
           </svg>
         </div>
-        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>Project Tracker</span>
+        <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:17,color:'#f5f5f7',letterSpacing:'-0.6px'}}>VEWIT</span>
       </div>
 
       <!-- Center hero -->
@@ -1527,7 +1449,7 @@ function AuthScreen({onLogin}){
           <div style=${{width:30,height:30,borderRadius:9,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 3px 14px rgba(90,140,255,0.45)'}}>
             <svg width="17" height="17" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="8.5" fill="white"/><circle cx="32" cy="11" r="5.5" fill="white" opacity=".9"/><circle cx="51" cy="43" r="5.5" fill="white" opacity=".9"/><circle cx="13" cy="43" r="5.5" fill="white" opacity=".9"/><line x1="32" y1="16.5" x2="32" y2="23.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="46" y1="40" x2="40.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/><line x1="18" y1="40" x2="23.5" y2="36.5" stroke="white" stroke-width="3.5" stroke-linecap="round"/></svg>
           </div>
-          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>Project Tracker</span>
+          <span style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontWeight:800,fontSize:16,color:'#f5f5f7',letterSpacing:'-0.5px'}}>VEWIT</span>
         </div>
 
         <!-- Headline -->
@@ -1535,7 +1457,7 @@ function AuthScreen({onLogin}){
           ${tab==='login'?'Sign in.':'Get started.'}
         </h1>
         <p style=${{fontSize:14,color:'rgba(175,170,210,0.5)',marginBottom:28,lineHeight:1.6}}>
-          ${tab==='login'?'Access your Project Tracker workspace.':'Create your team workspace.'}
+          ${tab==='login'?'Access your VEWIT workspace.':'Create your team workspace.'}
         </p>
 
         <!-- Tab switcher — Apple segmented control -->
@@ -1616,67 +1538,24 @@ function AuthScreen({onLogin}){
               </span>`
               :html`<span>${tab==='login'?'Sign In':regMode==='create'?'Create Workspace':'Join Workspace'} →</span>`}
           </button>
-
-          <!-- Google Sign-In -->
-          ${googleEnabled?html`
-            <div style=${{display:'flex',alignItems:'center',gap:12,margin:'6px 0 2px'}}>
-              <div style=${{flex:1,height:'1px',background:'rgba(255,255,255,0.08)'}}></div>
-              <span style=${{fontSize:11,color:'rgba(175,170,210,0.35)',fontWeight:700,letterSpacing:'.08em',textTransform:'uppercase'}}>or</span>
-              <div style=${{flex:1,height:'1px',background:'rgba(255,255,255,0.08)'}}></div>
-            </div>
-            <a href="/api/auth/google/login"
-              style=${{
-                display:'flex',alignItems:'center',justifyContent:'center',gap:11,
-                height:50,borderRadius:14,
-                border:'1px solid rgba(255,255,255,0.13)',
-                background:'rgba(255,255,255,0.05)',
-                cursor:'pointer',textDecoration:'none',
-                color:'#f5f5f7',fontSize:15,fontWeight:600,
-                fontFamily:"'Inter',system-ui",
-                transition:'all 0.22s cubic-bezier(0.4,0,0.2,1)',
-                backdropFilter:'blur(20px)',
-                WebkitBackdropFilter:'blur(20px)',
-                boxShadow:'0 2px 12px rgba(0,0,0,0.18)',
-                userSelect:'none'
-              }}
-              onMouseEnter=${e=>{
-                e.currentTarget.style.background='rgba(255,255,255,0.11)';
-                e.currentTarget.style.borderColor='rgba(255,255,255,0.26)';
-                e.currentTarget.style.transform='translateY(-2px)';
-                e.currentTarget.style.boxShadow='0 8px 24px rgba(0,0,0,0.28)';
-              }}
-              onMouseLeave=${e=>{
-                e.currentTarget.style.background='rgba(255,255,255,0.05)';
-                e.currentTarget.style.borderColor='rgba(255,255,255,0.13)';
-                e.currentTarget.style.transform='translateY(0)';
-                e.currentTarget.style.boxShadow='0 2px 12px rgba(0,0,0,0.18)';
-              }}>
-              <svg width="20" height="20" viewBox="0 0 48 48" style=${{flexShrink:0}}>
-                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-              </svg>
-              Continue with Google
-            </a>`:null}
         </div>
 
         <!-- Switch tab -->
         <p style=${{fontSize:13.5,color:'rgba(175,170,210,0.4)',textAlign:'center',marginTop:22,lineHeight:1.7}}>
           ${tab==='login'
-            ?html`New to Project Tracker? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
+            ?html`New to VEWIT? <button class="ap-link" onClick=${()=>setTab('register')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Create account</button>`
             :html`Already have an account? <button class="ap-link" onClick=${()=>setTab('login')} style=${{color:'#7e9fff',fontSize:13.5,fontWeight:600}}>Sign in</button>`}
         </p>
 
         <!-- Help / legal -->
         <div style=${{marginTop:28,paddingTop:20,borderTop:'1px solid rgba(255,255,255,0.05)',display:'flex',justifyContent:'center',gap:20,flexWrap:'wrap'}}>
-          <a href="mailto:support@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:support@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(90,140,255,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🛟 support@project-tracker.in
+            🛟 support@vewit.in
           </a>
-          <a href="mailto:ceo@project-tracker.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
+          <a href="mailto:ceo@vewit.in" style=${{fontSize:11.5,color:'rgba(160,150,200,0.45)',textDecoration:'none',transition:'color 0.2s',display:'flex',alignItems:'center',gap:5}}
             onMouseEnter=${e=>e.target.style.color='rgba(168,85,247,0.9)'} onMouseLeave=${e=>e.target.style.color='rgba(160,150,200,0.45)'}>
-            🤝 ceo@project-tracker.in
+            🤝 ceo@vewit.in
           </a>
         </div>
 
@@ -2088,7 +1967,7 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
           <svg width="14" height="14" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="9" fill="white"/><circle cx="32" cy="11" r="6" fill="white" opacity=".9"/><circle cx="51" cy="43" r="6" fill="white" opacity=".9"/><circle cx="13" cy="43" r="6" fill="white" opacity=".9"/><line x1="32" y1="17" x2="32" y2="23" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="46" y1="40" x2="40" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/><line x1="18" y1="40" x2="24" y2="36" stroke="white" strokeWidth="3.5" strokeLinecap="round"/></svg>
         </div>
         ${!col?html`<div style=${{flex:1,minWidth:0}}>
-          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'Project Tracker'}</div>
+          <div style=${{fontSize:12,fontWeight:700,color:'#ffffff',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${wsName||'VEWIT'}</div>
           ${activeTeam?html`<div style=${{fontSize:10,color:'var(--ac)',fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:4}}>
             ${!isAdminManager?html`<span style=${{color:'rgba(255,255,255,.3)',fontWeight:400}}>My Team</span>`:null}
             ${activeTeam.name}
@@ -2790,7 +2669,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
 }
 
 /* ─── ProjectDetail ───────────────────────────────────────────────────────── */
-function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,onSetReminder,teams,activeTeam}){
+function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,onSetReminder,teams,activeTeam}){
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
@@ -2822,36 +2701,15 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
     await onReload();setSaving(false);setEdit(false);
   };
-  const delProject=async()=>{
-    if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
-    onClose();
-    setData&&setData(prev=>({...prev,
-      projects:prev.projects.filter(p=>p.id!==project.id),
-      tasks:prev.tasks.filter(t=>t.project!==project.id)
-    }));
-    api.del('/api/projects/'+project.id).then(()=>onReload()).catch(()=>onReload());
-  };
+  const delProject=async()=>{if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;await api.del('/api/projects/'+project.id);await onReload();onClose();};
   const saveTask=async p=>{
     let r;
-    if(p.id&&allTasks.find(t=>t.id===p.id)){
-      // UPDATE: optimistic patch
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-      r=await api.put('/api/tasks/'+p.id,p);
-    } else {
-      // CREATE: post then show immediately
-      r=await api.post('/api/tasks',{...p,project:project.id});
-      if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
-      }
-    }
-    // Background bust-reload: fresh DB read bypasses stale worker cache
-    setTimeout(()=>onReload(undefined,true),1500);
+    if(p.id&&allTasks.find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
+    else r=await api.post('/api/tasks',{...p,project:project.id});
+    await onReload();
     return r;
   };
-  const delTask=async id=>{
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
-    api.del('/api/tasks/'+id).then(()=>setTimeout(()=>onReload(),800)).catch(()=>onReload());
-  };
+  const delTask=async id=>{await api.del('/api/tasks/'+id);await onReload();};
 
   return html`
     <div class="ov" onClick=${e=>e.target===e.currentTarget&&onClose()}>
@@ -2998,7 +2856,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
+function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -3032,14 +2890,14 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     try{
       const slug=detail.id;
       history.pushState(null,'','/projects/'+slug);
-      document.title='Project Tracker — '+detail.name+' | Projects';
+      document.title='VEWIT — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
       if(window.location.pathname.startsWith('/projects/')){
         history.pushState(null,'','/projects');
-        document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
+        document.title='VEWIT — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
   }},[detail]);
@@ -3075,12 +2933,10 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       const newProj=await api.post('/api/projects',{name:name.trim(),description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
-      // ✅ Optimistic update: show project instantly with _localTs for grace period guard
-      const optProj={...newProj,_localTs:Date.now()};
-      setData&&setData(prev=>({...prev,projects:[optProj,...(prev.projects||[])]}));
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Background bust-reload: forces fresh DB read on server (non-blocking, 1.5s delay)
-      setTimeout(()=>reload(undefined,true),1500);
+      await new Promise(r=>setTimeout(r,300));
+      await reload();
+      setTimeout(()=>reload(),1000);
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
 
@@ -3298,7 +3154,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
         </div>`:null}
 
       ${detail?html`<${ProjectDetail} project=${detail} allTasks=${tasks} allUsers=${users} cu=${cu}
-        onClose=${()=>setDetail(null)} onReload=${reload} setData=${setData} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
+        onClose=${()=>setDetail(null)} onReload=${reload} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
     </div>`;
 }
 
@@ -3307,7 +3163,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -3411,30 +3267,16 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   };
   const saveT=async p=>{
     let r;
-    if(p.id&&safe(tasks).find(t=>t.id===p.id)){
-      // UPDATE: optimistic patch immediately
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-      r=await api.put('/api/tasks/'+p.id,p);
-    } else {
-      // CREATE: post then prepend to state instantly with _localTs grace marker
-      r=await api.post('/api/tasks',p);
-      if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
-      }
-    }
+    if(p.id&&safe(tasks).find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
+    else r=await api.post('/api/tasks',p);
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background bust-reload: fresh DB read bypasses stale worker cache
-    setTimeout(()=>reload(undefined,true),1500);
-    return r;
+    reload();return r;
   };
-  const delT=async id=>{
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
-    api.del('/api/tasks/'+id).then(()=>reload()).catch(()=>reload());
-  };
+  const delT=async id=>{await api.del('/api/tasks/'+id);reload();};
   const quickStage=async(tid,stage)=>{
     const autoPct=STAGE_PCT[stage];
     const payload={stage};
@@ -3444,8 +3286,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tk=safe(tasks).find(t=>t.id===tid);
       if(tk)triggerTaskCelebration(tk.title,tk.project);
     }
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tid?{...t,...payload}:t)}));
-    api.put('/api/tasks/'+tid,payload).then(()=>reload()).catch(()=>reload());
+    await api.put('/api/tasks/'+tid,payload);reload();
   };
 
   // Export filtered tasks as CSV
@@ -3469,7 +3310,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     const csv='data:text/csv;charset=utf-8,'+[headers,...rows].map(r=>r.join(',')).join('\n');
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
-    a.setAttribute('download','project-tracker_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
+    a.setAttribute('download','vewit_tasks_'+new Date().toISOString().slice(0,10)+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -3611,7 +3452,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       </div>
 
       ${mode==='kanban'?html`
-        <div class="kanban-scroll" style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px 20px'}}>
+        <div style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px'}}>
           <div style=${{display:'flex',gap:11,height:'100%',minWidth:'fit-content'}}>
             ${KCOLS.map(st=>{
               const col=filtered.filter(t=>t.stage===st);const si=STAGES[st];
@@ -4514,7 +4355,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },15000); // reduced 2s->15s: channel message poll
+    },2000);
     return()=>clearInterval(id);
   },[pid]);
 
@@ -4802,7 +4643,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },15000); // reduced 3s->15s: DM message poll
+    },3000);
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -6113,7 +5954,7 @@ Your workspace has **${safe(projects).length} projects**, **${safe(tasks).length
     const taskCtx=safe(tasks).filter(t=>t.stage!=='completed').slice(0,20).map(t=>`- [${t.id}] ${t.title} | ${t.stage} | ${t.priority}`).join('\n');
     const teamCtx=safe(users).map(u=>`- ${u.name} (${u.role})`).join('\n');
 
-    const systemPrompt=`You are an expert technical documentation assistant for Project Tracker, an AI-powered project management platform.
+    const systemPrompt=`You are an expert technical documentation assistant for VEWIT, an AI-powered project management platform.
 
 WORKSPACE CONTEXT:
 Projects (${safe(projects).length} total):
@@ -6701,7 +6542,7 @@ function updateBadge(count){
       }
       const links=document.querySelectorAll("link[rel*='icon']");
       links.forEach(l=>{l.href=canvas.toDataURL();});
-      document.title=count>0?'('+count+') Project Tracker':'Project Tracker';
+      document.title=count>0?'('+count+') VEWIT':'VEWIT';
     };
     img.src=NOTIF_ICON;
   }catch(e){}
@@ -6713,7 +6554,7 @@ async function requestNotifPermission(){
       const {isPermissionGranted,requestPermission,sendNotification}=window.__TAURI__.notification;
       let ok=await isPermissionGranted();
       if(!ok){const p=await requestPermission();ok=(p==='granted');}
-      if(ok)await sendNotification({title:'Project Tracker',body:'Notifications enabled.'});
+      if(ok)await sendNotification({title:'VEWIT',body:'Notifications enabled.'});
       return;
     }catch(e){}
   }
@@ -6737,7 +6578,7 @@ async function requestNotifPermission(){
           }
         }catch(e){}
       }
-      new Notification('Project Tracker',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
+      new Notification('VEWIT',{body:'Desktop notifications enabled! You\'ll be notified for tasks, projects & reminders.',icon:NOTIF_ICON,silent:true});
     }
   }
 }
@@ -7364,7 +7205,7 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     const a=document.createElement('a');
     a.setAttribute('href',encodeURI(csv));
     const lbl=filterMode==='today'?localToday():filterMode==='yesterday'?'yesterday':filterMode==='week'?'thisweek':filterMode==='month'?filterMonth:'custom';
-    a.setAttribute('download','project-tracker_timelogs_'+lbl+'.csv');
+    a.setAttribute('download','vewit_timelogs_'+lbl+'.csv');
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   };
 
@@ -7822,17 +7663,17 @@ function PasswordGeneratorView(){
 // ── Storage helpers ───────────────────────────────────────────────────────────
 function vaultStorageKey(cu){
   if(cu && cu.id && cu.id !== 'offline'){
-    try{ localStorage.setItem('project-tracker_last_uid', cu.id); }catch(_){}
-    return 'project-tracker_vault_v2_'+cu.id;
+    try{ localStorage.setItem('vewit_last_uid', cu.id); }catch(_){}
+    return 'vewit_vault_v2_'+cu.id;
   }
-  try{ const lastUid = localStorage.getItem('project-tracker_last_uid'); if(lastUid) return 'project-tracker_vault_v2_'+lastUid; }catch(_){}
-  return 'project-tracker_vault_v2_guest';
+  try{ const lastUid = localStorage.getItem('vewit_last_uid'); if(lastUid) return 'vewit_vault_v2_'+lastUid; }catch(_){}
+  return 'vewit_vault_v2_guest';
 }
 function vaultLoad(key){ try{ return JSON.parse(localStorage.getItem(key)||'[]'); }catch(_){ return []; } }
 function vaultPersist(key,cards){ try{ localStorage.setItem(key,JSON.stringify(cards)); }catch(_){} }
 function vaultNewId(){ return 'c'+Date.now()+Math.random().toString(36).slice(2,6); }
 async function vaultHashPw(pw){
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('project-tracker::'+pw));
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vewit::'+pw));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
@@ -8573,10 +8414,7 @@ function VaultView({cu}){
 
 
 function App(){
-  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
-  // Skip loading screen if we know user has no active session — show login instantly
-  const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
-  const [loading,setLoading]=useState(_hadSession);
+  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);const [loading,setLoading]=useState(true);
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
@@ -8595,8 +8433,8 @@ function App(){
     try{
       const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
-      if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
-      else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
+      if(p&&VIEW_T[p]) document.title='VEWIT — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
+      else document.title='VEWIT — AI-Powered Team Collaboration Platform';
     }catch(e){}
   },[]);
   const [view,setView]=useState(()=>{
@@ -8622,7 +8460,7 @@ function App(){
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
         history.pushState(null,'','/'+base);
-        document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
+        document.title='VEWIT — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
   },[]);
@@ -8679,12 +8517,13 @@ function App(){
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    beat();
-    const beatId=setInterval(beat,30000);
-    const onFocus=()=>{beat();};
-    window.addEventListener('focus',onFocus);
-    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
-    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
+    // Fire immediately on mount
+    fetchPresence(); // fetch current online users right away (don't wait for beat)
+    beat();          // then beat + fetch again
+    const beatId=setInterval(beat,15000);
+    window.addEventListener('focus',()=>{beat();});
+    const presId=setInterval(fetchPresence,20000); // reduced 8s→20s
+    return()=>{clearInterval(beatId);clearInterval(presId);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -8729,30 +8568,30 @@ function App(){
 
   const [teamLoading,setTeamLoading]=useState(false);
 
-  const load=useCallback(async(overrideTeamCtx, bust=false)=>{
+  const load=useCallback(async(overrideTeamCtx)=>{
     if(!cu)return;
     const tCtx=overrideTeamCtx!==undefined?overrideTeamCtx:teamCtx;
     try{
-      // Single combined request instead of 9 parallel calls.
-      // bust=true forces a fresh DB read on the server, bypassing stale worker caches.
-      const bustParam=bust?'bust=1':'';
-      const teamParam=tCtx?'team_id='+tCtx:'';
-      const qs=[teamParam,bustParam].filter(Boolean).join('&');
-      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
-      const d=await api.get(appDataUrl);
-      if(!d||d.error){
-        console.warn('[Load] Authentication failed or server error, clearing session');
+      const projUrl=tCtx?'/api/projects?team_id='+tCtx:'/api/projects';
+      const taskUrl=tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks';
+      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw]=await Promise.all([
+        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'), ]);
+      
+      // Handle 401 errors - API returns null for auth failures
+      if (users === null || projects === null || tasks === null) {
+        console.warn('[Load] Authentication failed, clearing session');
         setCu(null);
         setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
         return;
       }
-      const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
+      
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
       setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
+      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
   },[cu,teamCtx]);
@@ -8761,10 +8600,9 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
+      if(u&&!u.error){ setCu(u); setLoading(false); }
       else {
-        // Got a response but errored (e.g. 401 not logged in) — show login instantly
-        try{localStorage.removeItem('pf_had_session');}catch{}
+        // Got a response but errored (e.g. 401 not logged in) — show login
         setLoading(false);
       }
     }).catch(()=>{
@@ -8837,18 +8675,7 @@ function App(){
         const taskUrl=teamCtx?'/api/tasks?team_id='+teamCtx:'/api/tasks';
         const [projects,tasks]=await Promise.all([api.get(projUrl),api.get(taskUrl)]);
         if(Array.isArray(projects)&&Array.isArray(tasks)){
-          setData(prev=>{
-            // Grace period guard: never remove items created locally in the last 45s
-            // This prevents multi-Gunicorn-worker stale cache from vanishing optimistic items
-            const GRACE=45000;const now=Date.now();
-            const serverProjIds=new Set(projects.map(p=>p.id));
-            const serverTaskIds=new Set(tasks.map(t=>t.id));
-            const localProjs=(prev.projects||[]).filter(p=>p._localTs&&(now-p._localTs)<GRACE&&!serverProjIds.has(p.id));
-            const localTasks=(prev.tasks||[]).filter(t=>t._localTs&&(now-t._localTs)<GRACE&&!serverTaskIds.has(t.id));
-            return {...prev,
-              projects:[...projects,...localProjs],
-              tasks:[...tasks,...localTasks]};
-          });
+          setData(prev=>({...prev,projects,tasks}));
         }
       }catch(e){}
     },30000);
@@ -8891,7 +8718,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },30000); // reduced 5s->30s: DM unread poll
+    },5000);
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -8914,7 +8741,7 @@ function App(){
         brandNew.forEach(n=>{
           if(n.type==='dm')return; // DMs handled by separate poll
           if(n.type==='call') return;
-          const title=NTITLES[n.type]||'Project Tracker';
+          const title=NTITLES[n.type]||'VEWIT';
           const nav=NNAV[n.type]||'notifs';
           addToast(n.type,title,n.content||'');
           showBrowserNotif(title,n.content||'',()=>{
@@ -8985,27 +8812,10 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
-    api._abort();
-    // 2. Unsubscribe from push notifications
-    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (best-effort, don't await — we're leaving anyway)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear ALL localStorage keys so next user (or same user) starts fresh
-    // This prevents stale workspace data from persisting between sessions
-    try{
-      const keysToRemove=['pf_had_session','pf_dark','pf_col','pf_perms','pf_accent','pfLastSeen'];
-      keysToRemove.forEach(k=>{try{localStorage.removeItem(k);}catch{}});
-      // Also remove any user-keyed keys (recents, etc.)
-      Object.keys(localStorage).forEach(k=>{
-        if(k.startsWith('vw_ai_recents_')||k.startsWith('pf_')){
-          try{localStorage.removeItem(k);}catch{}
-        }
-      });
-    }catch{}
-    window._pfCurrentUser=null;
+    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
+    try{ await api.post('/api/auth/logout',{}); }catch(e){}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect to clean login URL (no workspace ID in URL)
+    // Redirect to login immediately — clears all state and shows auth page
     window.location.href='/?action=login';
   };
 
@@ -9030,7 +8840,6 @@ function App(){
     if(!cu)return;
     const checkDue=async()=>{
       const due=await api.get('/api/reminders/due');
-      const rems=upcomingReminders;
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
           addToast('reminder','⏰ Reminder: '+r.task_title,'Click to view');
@@ -9041,6 +8850,7 @@ function App(){
           playSound('reminder');
         });
       }
+      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){
         const now=new Date();
         rems.forEach(r=>{
@@ -9184,8 +8994,8 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
-            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
+            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
