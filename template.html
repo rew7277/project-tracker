@@ -888,7 +888,16 @@ const api={
         body: JSON.stringify(b)
       });
       if (!r.ok) {
-        if (r.status === 401) return null;
+        if (r.status === 401) {
+          // Auth endpoints (/api/auth/*) return 401 with a real error body (e.g. wrong password).
+          // All other endpoints return 401 because the session expired — treat as null.
+          if (u.startsWith('/api/auth/')) {
+            const errData = await r.json().catch(() => ({}));
+            return { error: errData.error || 'Unauthorized', status: 401 };
+          }
+          console.warn('[API] 401 Unauthorized:', u);
+          return null;
+        }
         const errData = await r.json().catch(() => ({}));
         return { error: errData.error || `HTTP ${r.status}`, status: r.status };
       }
@@ -1325,6 +1334,7 @@ function AuthScreen({onLogin}){
     setErr('');setPhase('loading');
     if(tab==='login'){
       const r=await api.post('/api/auth/login',{email,password:pw});
+      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
       else if(r.totp_required){setTotpUserId(r.user_id);setTotpUserName(r.name);setTotpStep(true);setPhase('idle');}
       else{setSuccessMsg('Welcome back, '+r.name);setPhase('success');setTimeout(()=>onLogin(r),1900);}
@@ -1333,6 +1343,7 @@ function AuthScreen({onLogin}){
       if(regMode==='create'&&!wsName){setErr('Workspace name is required.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(regMode==='join'&&!inviteCode){setErr('Enter the invite code.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       const r=await api.post('/api/auth/register',{mode:regMode,workspace_name:wsName,invite_code:inviteCode,name,email,password:pw,role});
+      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
       else{setSuccessMsg('Welcome to Project Tracker, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
     }
