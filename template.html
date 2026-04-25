@@ -2841,11 +2841,11 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
       // CREATE: post then show immediately
       r=await api.post('/api/tasks',{...p,project:project.id});
       if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[r,...(prev.tasks||[])]}));
+        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
       }
     }
-    // Background sync — non-blocking
-    setTimeout(()=>onReload(),1000);
+    // Background bust-reload: fresh DB read bypasses stale worker cache
+    setTimeout(()=>onReload(undefined,true),1500);
     return r;
   };
   const delTask=async id=>{
@@ -3075,11 +3075,12 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       const newProj=await api.post('/api/projects',{name:name.trim(),description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
-      // ✅ Optimistic update: show project instantly, no waiting for full app-data reload
-      setData&&setData(prev=>({...prev,projects:[newProj,...(prev.projects||[])]}));
+      // ✅ Optimistic update: show project instantly with _localTs for grace period guard
+      const optProj={...newProj,_localTs:Date.now()};
+      setData&&setData(prev=>({...prev,projects:[optProj,...(prev.projects||[])]}));
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Background refresh to sync any server-side computed fields (non-blocking)
-      setTimeout(()=>reload(),1000);
+      // Background bust-reload: forces fresh DB read on server (non-blocking, 1.5s delay)
+      setTimeout(()=>reload(undefined,true),1500);
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
 
@@ -3415,10 +3416,10 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
       r=await api.put('/api/tasks/'+p.id,p);
     } else {
-      // CREATE: post then prepend to state instantly
+      // CREATE: post then prepend to state instantly with _localTs grace marker
       r=await api.post('/api/tasks',p);
       if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[r,...(prev.tasks||[])]}));
+        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
       }
     }
     // Trigger celebration if task just completed
@@ -3426,8 +3427,8 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background sync — non-blocking, keeps UI instant
-    setTimeout(()=>reload(),1000);
+    // Background bust-reload: fresh DB read bypasses stale worker cache
+    setTimeout(()=>reload(undefined,true),1500);
     return r;
   };
   const delT=async id=>{
@@ -8728,13 +8729,16 @@ function App(){
 
   const [teamLoading,setTeamLoading]=useState(false);
 
-  const load=useCallback(async(overrideTeamCtx)=>{
+  const load=useCallback(async(overrideTeamCtx, bust=false)=>{
     if(!cu)return;
     const tCtx=overrideTeamCtx!==undefined?overrideTeamCtx:teamCtx;
     try{
       // Single combined request instead of 9 parallel calls.
-      // Eliminates the Promise.all waterfall that serialised across Gunicorn workers.
-      const appDataUrl='/api/app-data'+(tCtx?'?team_id='+tCtx:'');
+      // bust=true forces a fresh DB read on the server, bypassing stale worker caches.
+      const bustParam=bust?'bust=1':'';
+      const teamParam=tCtx?'team_id='+tCtx:'';
+      const qs=[teamParam,bustParam].filter(Boolean).join('&');
+      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
         console.warn('[Load] Authentication failed or server error, clearing session');
@@ -8833,7 +8837,18 @@ function App(){
         const taskUrl=teamCtx?'/api/tasks?team_id='+teamCtx:'/api/tasks';
         const [projects,tasks]=await Promise.all([api.get(projUrl),api.get(taskUrl)]);
         if(Array.isArray(projects)&&Array.isArray(tasks)){
-          setData(prev=>({...prev,projects,tasks}));
+          setData(prev=>{
+            // Grace period guard: never remove items created locally in the last 45s
+            // This prevents multi-Gunicorn-worker stale cache from vanishing optimistic items
+            const GRACE=45000;const now=Date.now();
+            const serverProjIds=new Set(projects.map(p=>p.id));
+            const serverTaskIds=new Set(tasks.map(t=>t.id));
+            const localProjs=(prev.projects||[]).filter(p=>p._localTs&&(now-p._localTs)<GRACE&&!serverProjIds.has(p.id));
+            const localTasks=(prev.tasks||[]).filter(t=>t._localTs&&(now-t._localTs)<GRACE&&!serverTaskIds.has(t.id));
+            return {...prev,
+              projects:[...projects,...localProjs],
+              tasks:[...tasks,...localTasks]};
+          });
         }
       }catch(e){}
     },30000);

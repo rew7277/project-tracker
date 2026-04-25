@@ -243,6 +243,16 @@ class _PooledDB(_DB):
 def get_secret_key():
     env_key = os.environ.get("SECRET_KEY","")
     if len(env_key) >= 32: return env_key
+    # On Railway: derive a STABLE key from the service/project ID so that
+    # sessions survive dyno restarts (Railway filesystem is ephemeral).
+    # Without this, every restart regenerates the key → all sessions become 401.
+    for railway_var in ("RAILWAY_SERVICE_ID","RAILWAY_PROJECT_ID","RAILWAY_ENVIRONMENT"):
+        rid = os.environ.get(railway_var,"")
+        if rid:
+            import hashlib as _hl
+            stable = _hl.sha256(f"pt-stable-key::{rid}".encode()).hexdigest()
+            log.warning("[SECRET_KEY] Using Railway-derived key from %s. Set SECRET_KEY env var for best security.", railway_var)
+            return stable
     if os.path.exists(KEY_FILE):
         try:
             with open(KEY_FILE,"r") as f:
@@ -250,6 +260,7 @@ def get_secret_key():
                 if len(k)==64: return k
         except: pass
     k=secrets.token_hex(32)
+    log.warning("[SECRET_KEY] Generated ephemeral secret key — sessions will NOT survive restarts! Set SECRET_KEY env var.")
     try:
         with open(KEY_FILE,"w") as f: f.write(k)
     except: pass
@@ -1817,8 +1828,8 @@ def _totp_hotp(key_b32, counter):
 
 import base64 as _b64_mod, struct as _struct_mod
 
-def _totp_verify(secret, token, window=1):
-    """Verify TOTP token with ±window steps (30s each)."""
+def _totp_verify(secret, token, window=2):
+    """Verify TOTP token with ±window steps (30s each). window=2 allows ±60s clock drift."""
     import time as _t
     counter = int(_t.time()) // 30
     for delta in range(-window, window + 1):
@@ -2766,15 +2777,23 @@ def get_app_data():
     """Single endpoint that returns all dashboard data.
 
     Caching strategy:
+    - bust=1 query param: skip all caches, hit DB directly (used post-mutation)
     - Serve from in-memory cache instantly (0ms) when entry is fresh (<20s)
     - Serve stale data instantly AND refresh in background when 20-120s old
     - Only block on DB when cache is completely cold (first load after restart)
     This means after the first load, every subsequent poll returns in <5ms.
+    Multi-worker note: bust=1 forces a fresh DB read on the receiving worker
+    and re-warms that worker's cache, solving cross-worker stale data issues.
     """
     ws      = wid()
     uid     = session["user_id"]
     team_id = request.args.get("team_id", "")
     cache_key = f"appdata:{ws}:{uid}:{team_id}"
+    # Force-refresh: skip all caches (used right after mutations)
+    if request.args.get("bust") == "1":
+        result = _fetch_app_data_from_db(ws, team_id, uid)
+        _cache_set(cache_key, result)
+        return jsonify(result)
 
     now = _time.time()
 
@@ -2900,8 +2919,13 @@ def create_project():
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
-        _cache_bust(wid(), "projects", "notifs")  # targeted bust — faster than _cache_bust_ws
-        _cache_inject_item(wid(), "projects", dict(p))  # warm cache immediately
+        # Inject into appdata cache FIRST (before busting) so existing
+        # cache entries are updated in-place with the new project.
+        # This prevents multi-worker stale reads — workers that still have
+        # their old cache now have the new project injected.
+        _cache_inject_item(wid(), "projects", dict(p))
+        # Only bust the notifs sub-key (not projects — we just injected it)
+        _cache_bust(wid(), "notifs")
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
@@ -3072,8 +3096,9 @@ def create_task():
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
-        _cache_bust(wid(), "tasks")
-        _cache_inject_item(wid(), "tasks", dict(t))  # warm cache immediately
+        # Inject into appdata cache FIRST, then only bust standalone task cache
+        _cache_inject_item(wid(), "tasks", dict(t))
+        _cache_bust(wid(), "notifs")   # new notifs may have been created
         return jsonify(dict(t))
 
 
