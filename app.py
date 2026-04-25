@@ -5875,41 +5875,6 @@ def email_to_task():
             (tid, ws_id, subject, body, "", reporter_id, "medium", "backlog", ts(), "", 0, "[]", "", ""))
     return jsonify({"ok": True, "task_id": tid})
 
-@app.route("/api/import/csv", methods=["POST"])
-@login_required
-def import_csv():
-    import csv as _csv_mod
-    f = request.files.get("file")
-    if not f: return jsonify({"error": "No file uploaded"}), 400
-    try:
-        content = f.read().decode("utf-8-sig")
-        reader = _csv_mod.DictReader(io.StringIO(content))
-    except Exception as e:
-        return jsonify({"error": f"Parse error: {e}"}), 400
-    created_tasks = 0; errors = []
-    stage_map = {"todo": "backlog", "to do": "backlog", "open": "backlog",
-                 "in progress": "development", "in-progress": "development",
-                 "done": "completed", "closed": "completed", "resolved": "completed",
-                 "blocked": "blocked", "testing": "testing"}
-    with get_db() as db:
-        for i, row in enumerate(reader):
-            try:
-                row = {k.strip().lower(): (v or "").strip() for k, v in row.items()}
-                title = (row.get("title") or row.get("summary") or row.get("name") or "").strip()
-                if not title: errors.append(f"Row {i+2}: no title"); continue
-                stage_raw = (row.get("stage") or row.get("status") or "backlog").lower()
-                stage = stage_map.get(stage_raw, "backlog")
-                priority = row.get("priority", "medium").lower()
-                if priority not in ("critical", "high", "medium", "low"): priority = "medium"
-                tid = next_task_id(db, wid())
-                db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                           (tid, wid(), title, row.get("description", ""), "", "", priority, stage, ts(),
-                            row.get("due", row.get("due date", "")), 0, "[]", "", ""))
-                created_tasks += 1
-            except Exception as e:
-                errors.append(f"Row {i+2}: {e}")
-    return jsonify({"ok": True, "created_tasks": created_tasks, "errors": errors})
-
 @app.route("/api/export/csv")
 @login_required
 def export_csv():
