@@ -1997,14 +1997,24 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      history.pushState(null,'','/projects/'+slug);
+      // Build ws-scoped project URL if possible
+      try{
+        const dashUrl=window._pfWsBase||window.location.pathname;
+        const wsParts=dashUrl.split('/');
+        const wsBase=(wsParts.length>=3&&wsParts[2]&&wsParts[2].startsWith('ws'))?'/'+wsParts[1]+'/'+wsParts[2]:'';
+        history.pushState(null,'',wsBase+'/projects/'+slug);
+      }catch(_){history.pushState(null,'','/projects/'+slug);}
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      if(window.location.pathname.startsWith('/projects/')){
-        history.pushState(null,'','/projects');
+      const _cp=window.location.pathname;
+      if(_cp.includes('/projects/')){
+        // Restore to ws-scoped /projects or bare /projects
+        const _wsParts=_cp.split('/');
+        const _wsBase=(_wsParts.length>=3&&_wsParts[2]&&_wsParts[2].startsWith('ws'))?'/'+_wsParts[1]+'/'+_wsParts[2]:'';
+        history.pushState(null,'',_wsBase+'/projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2015,13 +2025,15 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
   useEffect(()=>{
     const onPop=()=>{
       const parts=window.location.pathname.split('/');
-      if(parts[1]==='projects'&&parts[2]){
-        const p=safe(projects).find(proj=>proj.id===parts[2]);
+      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>
+      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
+      const projSeg=isWs?parts[3]:parts[1];
+      const pidSeg=isWs?parts[4]:parts[2];
+      if(projSeg==='projects'&&pidSeg){
+        const p=safe(projects).find(proj=>proj.id===pidSeg);
         if(p){setDetail(p);return;}
       }
-      if(window.location.pathname==='/projects'||window.location.pathname==='/projects/'){
-        setDetail(null);
-      }
+      if(projSeg==='projects'&&!pidSeg){setDetail(null);}
     };
     window.addEventListener('popstate',onPop);
     return()=>window.removeEventListener('popstate',onPop);
@@ -6673,9 +6685,14 @@ function App(){
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      if(p.startsWith('/projects/')&&p.length>10){
-        const pid=p.split('/')[2];
-        if(pid)setInitialProjectId(pid);
+      const parts=p.split('/');
+      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>  → parts[3]==='projects'
+      // bare:      /projects/<pid>                    → parts[1]==='projects'
+      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
+      const projSeg=isWs?parts[3]:parts[1];
+      const pidSeg=isWs?parts[4]:parts[2];
+      if(projSeg==='projects'&&pidSeg){
+        setInitialProjectId(pidSeg);
         setView('projects');
       }
     }catch(e){}
@@ -6683,7 +6700,9 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      const parts=window.location.pathname.replace(/^\//, '').split('/');
+      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
+      const p = wsView || parts[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -6691,8 +6710,13 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
-      if(p&&VALID_VIEWS.includes(p)) return p;
+      const parts=window.location.pathname.replace(/^\//, '').split('/');
+      // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
+      // bare:      /<view>                     → parts[0]
+      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
+      const bareView = parts[0].trim();
+      const candidate = wsView || bareView;
+      if(candidate && VALID_VIEWS.includes(candidate)) return candidate;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
@@ -6706,21 +6730,37 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
+  // Build ws-scoped path helper
+  const _wsPath=useCallback((page)=>{
+    try{
+      const url=cu&&cu.workspace_dashboard_url;
+      if(url){
+        // url is like /fsbl/ws123/dashboard — extract prefix
+        const parts=url.split('/');
+        if(parts.length>=3) return '/'+parts[1]+'/'+parts[2]+'/'+page;
+      }
+    }catch(e){}
+    return '/'+page; // fallback
+  },[cu]);
   const _setView=useCallback((v)=>{
     setView(v);
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        history.pushState(null,'',_wsPath(base));
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[]);
+  },[_wsPath]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+        const parts=window.location.pathname.replace(/^\//, '').split('/');
+        // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
+        const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
+        const bareView = parts[0].trim();
+        const p = wsView || bareView;
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -6839,7 +6879,7 @@ function App(){
     }catch(e){console.error(e);}
   },[cu]);
 
-  useEffect(()=>{api.get('/api/auth/me').then(u=>{if(u&&!u.error)setCu(u);setLoading(false);}).catch(()=>setLoading(false));},[]);
+  useEffect(()=>{api.get('/api/auth/me').then(u=>{if(u&&!u.error){if(u.workspace_dashboard_url)window._pfWsBase=u.workspace_dashboard_url;setCu(u);}setLoading(false);}).catch(()=>setLoading(false));},[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
   // Expose DM target setter for notification click handlers
@@ -7011,7 +7051,7 @@ function App(){
     try{ await api.post('/api/auth/logout',{}); }catch(e){}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
     // Redirect to login immediately — clears all state and shows auth page
-    window.location.href='/?action=login';
+    window.location.href='/';
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
@@ -7101,7 +7141,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{ if(u.workspace_dashboard_url){window.history.replaceState({},'',u.workspace_dashboard_url);} setCu(u); }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{ if(u.workspace_dashboard_url){window.history.replaceState({},'',u.workspace_dashboard_url);window._pfWsBase=u.workspace_dashboard_url;} setCu(u); }}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>

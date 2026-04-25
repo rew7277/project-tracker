@@ -1691,6 +1691,20 @@ def me():
         result = dict(u)
         for k in ("password","plain_password","totp_secret"):
             result.pop(k, None)
+        # Attach workspace-scoped URL so the frontend can build proper ws-scoped links
+        try:
+            import re as _re
+            ws_row = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (u["workspace_id"],)
+            ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_slug"] = slug
+                result["workspace_id_from_me"] = u["workspace_id"]
+        except Exception:
+            pass
         return jsonify(result)
 
 # ── Vault ─────────────────────────────────────────────────────────────────────
@@ -3736,13 +3750,36 @@ def index():
 @app.route("/projects")
 @app.route("/tasks")
 @app.route("/messages")
+@app.route("/channels")
+@app.route("/dm")
 @app.route("/settings")
 @app.route("/profile")
 @app.route("/analytics")
 @app.route("/tickets")
 @app.route("/timeline")
+@app.route("/reminders")
+@app.route("/team")
+@app.route("/productivity")
+@app.route("/ai-docs")
+@app.route("/timesheet")
+@app.route("/vault")
 def serve_app():
-    """Serve the main application template for all app routes."""
+    """Serve the main application template, redirecting to ws-scoped URL if logged in."""
+    if "user_id" in session and session.get("workspace_id"):
+        ws_id = session["workspace_id"]
+        # Determine the page being requested
+        path_segment = request.path.strip("/") or "dashboard"
+        try:
+            import re as _re
+            with get_db() as db:
+                ws_row = db.execute(
+                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
+                ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                return redirect(f"/{slug}/{ws_id}/{path_segment}", code=302)
+        except Exception:
+            pass
     return HTML
 
 @app.route("/password-generator")
@@ -3866,14 +3903,27 @@ def ws_sso_callback(ws_name, ws_id):
 
 @app.route("/<ws_name>/<ws_id>/dashboard")
 @app.route("/<ws_name>/<ws_id>/projects")
+@app.route("/<ws_name>/<ws_id>/projects/<proj_id>")
 @app.route("/<ws_name>/<ws_id>/tasks")
+@app.route("/<ws_name>/<ws_id>/kanban")
 @app.route("/<ws_name>/<ws_id>/messages")
+@app.route("/<ws_name>/<ws_id>/channels")
+@app.route("/<ws_name>/<ws_id>/dm")
+@app.route("/<ws_name>/<ws_id>/dm/<other_user>")
 @app.route("/<ws_name>/<ws_id>/settings")
 @app.route("/<ws_name>/<ws_id>/profile")
 @app.route("/<ws_name>/<ws_id>/analytics")
 @app.route("/<ws_name>/<ws_id>/tickets")
 @app.route("/<ws_name>/<ws_id>/timeline")
-def ws_app_page(ws_name, ws_id):
+@app.route("/<ws_name>/<ws_id>/reminders")
+@app.route("/<ws_name>/<ws_id>/team")
+@app.route("/<ws_name>/<ws_id>/productivity")
+@app.route("/<ws_name>/<ws_id>/ai-docs")
+@app.route("/<ws_name>/<ws_id>/timesheet")
+@app.route("/<ws_name>/<ws_id>/vault")
+@app.route("/<ws_name>/<ws_id>/password-generator")
+@app.route("/<ws_name>/<ws_id>/app")
+def ws_app_page(ws_name, ws_id, **kwargs):
     """Serve the main SPA for workspace-scoped URLs.
     If not authenticated, redirect to the workspace SSO/login flow."""
     if "user_id" not in session:
