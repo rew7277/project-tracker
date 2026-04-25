@@ -3494,7 +3494,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },2000);
+    },15000); // reduced 2s->15s: channel message poll
     return()=>clearInterval(id);
   },[pid]);
 
@@ -3782,7 +3782,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },3000);
+    },15000); // reduced 3s->15s: DM message poll
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -6697,7 +6697,10 @@ function TimesheetView({cu,teams,users,projects,tasks}){
   </div>`;
 }
 function App(){
-  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);const [loading,setLoading]=useState(true);
+  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
+  // Skip loading screen if we know user has no active session — show login instantly
+  const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
+  const [loading,setLoading]=useState(_hadSession);
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet'];
   // Also treat /projects/<id> as valid
@@ -6941,9 +6944,12 @@ function App(){
           }catch(_){}
         }
         setCu(u);
+        try{localStorage.setItem('pf_had_session','1');}catch{} // cache: user has active session
+      } else {
+        try{localStorage.removeItem('pf_had_session');}catch{} // no session — next visit shows login instantly
       }
       setLoading(false);
-    }).catch(()=>setLoading(false));
+    }).catch(()=>{try{localStorage.removeItem('pf_had_session');}catch{}setLoading(false);});
   },[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
@@ -7044,7 +7050,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },5000);
+    },30000); // reduced 5s->30s: DM unread poll
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -7119,6 +7125,7 @@ function App(){
     // 3. Call logout endpoint (fire-and-forget — don't await)
     fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
     // 4. Clear React state
+    try{localStorage.removeItem('pf_had_session');}catch{} // clear session cache on logout
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
     // 5. Hard redirect instantly
     window.location.replace('/');
