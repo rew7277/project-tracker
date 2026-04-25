@@ -345,7 +345,7 @@ def add_security_headers(response):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com; "
+        "script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com; "  # FIX (Bug 7): removed 'unsafe-inline' — use nonces or hashes for any inline scripts
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
@@ -1399,12 +1399,27 @@ def wid(): return session.get("workspace_id","")
 
 # ── Login rate limiter (brute-force protection) ───────────────────────────────
 import time as _time_mod
-_login_attempts = {}   # {key: [timestamp, ...]}
-_LOGIN_MAX = 5         # max attempts
+# FIX (Bug 4): Rate limiter now uses Redis atomic INCR so the 5-attempt cap
+# holds across ALL gunicorn workers, not just per-process. Falls back to an
+# in-process list when Redis is unavailable (local dev / no REDIS_URL).
+_login_attempts = {}   # fallback only: {key: [timestamp, ...]}
+_LOGIN_MAX = 5         # max attempts per window
 _LOGIN_WINDOW = 60     # seconds
 
 def _check_rate_limit(key):
-    """Return (allowed, seconds_until_reset). Cleans up old entries."""
+    """Return (allowed, seconds_until_reset). Redis-backed when available."""
+    if _redis_client is not None:
+        try:
+            redis_key = f"rl:{key}"
+            count = _redis_client.get(redis_key)
+            count = int(count) if count else 0
+            if count >= _LOGIN_MAX:
+                ttl = _redis_client.ttl(redis_key)
+                return False, max(1, int(ttl))
+            return True, 0
+        except Exception:
+            pass  # Redis blip — fall through to in-process dict
+    # In-process fallback
     now = _time_mod.time()
     attempts = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
     _login_attempts[key] = attempts
@@ -1414,9 +1429,25 @@ def _check_rate_limit(key):
     return True, 0
 
 def _record_attempt(key):
+    if _redis_client is not None:
+        try:
+            redis_key = f"rl:{key}"
+            pipe = _redis_client.pipeline()
+            pipe.incr(redis_key)
+            pipe.expire(redis_key, _LOGIN_WINDOW)
+            pipe.execute()
+            return
+        except Exception:
+            pass
     _login_attempts.setdefault(key, []).append(_time_mod.time())
 
 def _clear_attempts(key):
+    if _redis_client is not None:
+        try:
+            _redis_client.delete(f"rl:{key}")
+            return
+        except Exception:
+            pass
     _login_attempts.pop(key, None)
 
 @app.route("/api/auth/login",methods=["POST"])
@@ -1969,12 +2000,27 @@ def logout():
                 _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
             except Exception as _e:
                 log.warning("[logout] DB write failed: %s", _e)
+            # FIX (Bug 2): Remove push subscriptions here so the frontend
+            # does not need a separate POST /api/push/unsubscribe call after
+            # logout. That call was arriving after session.clear() and getting
+            # a 401, leaving stale subscriptions in the DB.
+            try:
+                _raw_pg("DELETE FROM push_subscriptions WHERE user_id=?", (uid,))
+            except Exception as _e:
+                log.warning("[logout] push subscription cleanup failed: %s", _e)
             try:
                 _cache_bust_ws(ws)
             except Exception:
                 pass
-        _cthread.Thread(target=_bg_logout, daemon=True).start()
-        _audit("user_logout", uid, "User signed out — all sessions invalidated")
+            try:
+                _audit("user_logout", uid, "User signed out — all sessions invalidated")
+            except Exception:
+                pass
+        t = _cthread.Thread(target=_bg_logout, daemon=True)
+        t.start()
+        # FIX (Bug 3): _audit() calls the DB and can block long enough on a
+        # slow connection for the gunicorn worker to be recycled (→ 499).
+        # Moved inside the background thread so the 200 response goes out first.
     return jsonify({"ok": True})
 
 @app.route("/signout")
@@ -3379,8 +3425,14 @@ def add_ticket_comment(tid):
 # ── Calls (Huddle) ────────────────────────────────────────────────────────────
 
 @app.route("/api/migrate-timelog", methods=["GET","POST"])
+@login_required
 def migrate_timelog_public():
-    """Public migration — hit this URL once after deploy to fix live DB schema."""
+    """Schema migration helper — requires admin login.
+    FIX (Bug 5): Endpoint was completely unauthenticated, allowing any
+    anonymous user to trigger DDL operations on the database. Now requires
+    an active admin session."""
+    if get_user_role() != "admin":
+        return jsonify({"error": "Admin access required"}), 403
     results = []
     steps = [
         ("CREATE time_logs base", """CREATE TABLE IF NOT EXISTS time_logs (
@@ -3419,8 +3471,18 @@ def migrate_timelog_public():
 @app.route("/api/timelogs/setup", methods=["POST"])
 @login_required
 def timelogs_setup():
-    ensure_timelog_schema()
-    return jsonify({"ok": True})
+    # FIX (Bug 1): ensure_timelog_schema() runs ~12 sequential DDL statements
+    # that can take 5-6 s total. Running it on the request thread caused the
+    # client to disconnect (nginx/Railway 499) before the response arrived.
+    # Solution: mirror the pattern already used in logout() — return 200
+    # immediately and run the slow work in a daemon background thread.
+    def _bg_setup():
+        try:
+            ensure_timelog_schema()
+        except Exception as _e:
+            log.warning("[timelogs/setup] background schema migration failed: %s", _e)
+    _cthread.Thread(target=_bg_setup, daemon=True).start()
+    return jsonify({"ok": True, "message": "schema migration started in background"})
 
 
 @app.route("/api/timelogs", methods=["GET"])
