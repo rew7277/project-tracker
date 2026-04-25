@@ -417,6 +417,7 @@ function AuthScreen({onLogin}){
     if(tok.length!==6){setErr('Enter the 6-digit code.');return;}
     setErr('');setPhase('loading');
     const r=await api.post('/api/auth/totp/verify',{user_id:totpUserId,token:tok});
+    if(!r){setErr('Server error. Please try again.');setPhase('idle');return;}
     if(r.error){setErr(r.error);setTotpToken('');setPhase('idle');}
     else{setSuccessMsg('Verified! Welcome back, '+totpUserName);setPhase('success');setTimeout(()=>onLogin(r),1800);}
   };

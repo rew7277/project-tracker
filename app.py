@@ -489,8 +489,8 @@ import time as _time
 import threading as _cthread
 
 _CACHE: dict = {}        # {key: {"val": ..., "ts": float, "refreshing": bool}}
-_CACHE_TTL   = 20        # serve fresh data up to 20s
-_CACHE_STALE = 120       # serve stale data up to 120s while refreshing
+_CACHE_TTL   = 5         # serve fresh data up to 5s (was 20s — caused stale UI requiring cache clear)
+_CACHE_STALE = 60        # serve stale data up to 60s while refreshing (was 120s)
 _CACHE_LOCK  = _cthread.Lock()
 
 # ── Redis cache layer (optional, shared across workers) ──────────────────────
@@ -1571,6 +1571,8 @@ def google_callback():
 
         # ── Set session (same shape as password login) ────────────────────────
         login_ts = ts()
+        # Clear any stale session data first (prevents 401 loop after logout→Google login)
+        session.clear()
         session.permanent = True
         session["user_id"]      = user["id"]
         session["workspace_id"] = user["workspace_id"]
@@ -2978,9 +2980,9 @@ def get_tasks():
 def next_task_id(db, ws):
     import time
     base = int(time.time() * 1000)
-    row=db.execute("SELECT COUNT(*) as cnt FROM tasks WHERE workspace_id=?",(ws,)).fetchone()
-    count=row['cnt'] if row else 0
-    return f"T-{count+1:03d}-{base % 10000}"
+    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
+    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
+    return f"T-{base % 1000000:06d}"
 
 @app.route("/api/tasks",methods=["POST"])
 @login_required
