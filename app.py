@@ -3,6 +3,15 @@
 Project Tracker v5.0 — Enterprise Edition
 Multi-tenant workspaces | AI Assistant | Stage Dropdown | Direct Messages
 """
+# ── gevent monkey-patch — MUST be first import ───────────────────────────────
+# Enables non-blocking I/O for SSE streams and DB connections under gevent workers.
+# Safe to call even when running under gthread or development server.
+try:
+    from gevent import monkey as _monkey
+    _monkey.patch_all()
+except ImportError:
+    pass  # gevent not installed — falls back to gthread workers gracefully
+
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
 import socket, threading, time, webbrowser, mimetypes, base64, smtplib
 import re, struct, traceback, hmac, math, zlib, logging
@@ -264,6 +273,13 @@ if not _ALLOWED_ORIGINS:
 CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
 
 # ── Gzip compression for all compressible responses ───────────────────────────
+@app.route("/healthz")
+def healthz():
+    """Lightweight health check for uptime monitors (UptimeRobot etc).
+    No DB query — just confirms the process is alive. Use this URL
+    in UptimeRobot with a 5-minute interval to prevent Railway cold starts."""
+    return jsonify({"ok": True, "uptime": str(datetime.utcnow() - APP_STARTED_AT)}), 200
+
 @app.before_request
 def block_scanners():
     """Block common security scanner probes — archive/backup file probing, path traversal."""
@@ -338,34 +354,55 @@ def get_db(autocommit=False):
     # Wrap with a pool-returning _DB
     return _PooledDB(conn, autocommit=autocommit)
 
-# ── Simple pg8000 connection pool (3 reusable connections) ──────────────────
+# ── pg8000 connection pool — pre-warmed, sized for gthread workers ──────────
+# 2 workers × 4 threads = 8 max concurrent. Keep 12 slots, pre-warm 4.
 import queue as _queue, threading as _poollock
-_PG_POOL = _queue.Queue(maxsize=10)  # increased from 5→10 for concurrent requests
+_PG_POOL      = _queue.Queue(maxsize=12)
 _PG_POOL_LOCK = _poollock.Lock()
+_PG_KWARGS    = None   # cached once after first parse
+
+def _pg_kwargs():
+    global _PG_KWARGS
+    if _PG_KWARGS is None:
+        _PG_KWARGS = _parse_db_url(DATABASE_URL)
+    return _PG_KWARGS
+
+def _make_conn():
+    from pg8000.native import Connection as _PGConn
+    return _PGConn(**_pg_kwargs())
 
 def _get_pool_conn():
-    """Get a connection from pool or create a new one."""
-    from pg8000.native import Connection as _PGConn
-    try:
-        conn = _PG_POOL.get_nowait()
-        # Test connection is still alive
+    """Get a healthy connection from pool, or create a new one."""
+    for _ in range(3):   # try up to 3 stale connections before giving up
         try:
-            conn.run("SELECT 1")
-            return conn
-        except Exception:
-            try: conn.close()
-            except: pass
-    except _queue.Empty:
-        pass
-    return _PGConn(**_parse_db_url(DATABASE_URL))
+            conn = _PG_POOL.get_nowait()
+            try:
+                conn.run("SELECT 1")
+                return conn
+            except Exception:
+                try: conn.close()
+                except: pass
+        except _queue.Empty:
+            break
+    return _make_conn()
 
 def _return_pool_conn(conn):
-    """Return connection to pool, or close it if pool is full."""
+    """Return connection to pool, or close if pool is full."""
     try:
         _PG_POOL.put_nowait(conn)
     except _queue.Full:
         try: conn.close()
         except: pass
+
+def _prewarm_pool(n=4):
+    """Open n connections at startup so first requests don't stall."""
+    for _ in range(n):
+        try:
+            conn = _make_conn()
+            _return_pool_conn(conn)
+        except Exception as _e:
+            log.warning("[pool prewarm] %s", _e)
+            break
 
 def _raw_pg(sql, params=(), fetch=False):
     """Execute SQL via pooled pg8000 native connection, bypassing _DB wrapper.
@@ -395,7 +432,7 @@ def _raw_pg(sql, params=(), fetch=False):
 # ── Simple in-memory response cache (TTL-based) ─────────────────────────────
 import time as _time
 _CACHE: dict = {}
-_CACHE_TTL = 4  # seconds — short enough to feel fresh, long enough to help burst clicks
+_CACHE_TTL = 8  # 8s TTL — good balance for polling intervals of 15-30s
 
 def _cache_get(key):
     entry = _CACHE.get(key)
@@ -421,13 +458,27 @@ def _cache_bust_ws(workspace_id):
         if workspace_id in key:
             _CACHE.pop(key, None)
 
+# Shared DDL connection — reused across all _run_ddl calls to avoid opening
+# 170 separate connections on startup (which caused NO_SOCKET exhaustion).
+_DDL_CONN = None
+_DDL_LOCK = _poollock.Lock()
+
 def _run_ddl(sql):
-    """Run a single DDL statement in its own fresh connection. Never raises."""
-    try:
-        conn = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
+    """Run a single DDL statement, reusing a shared DDL connection. Never raises."""
+    global _DDL_CONN
+    with _DDL_LOCK:
         try:
-            # pg8000 native does NOT auto-wrap in transactions — DDL runs directly
-            conn.run(sql)
+            # Reuse existing connection if alive
+            if _DDL_CONN is not None:
+                try:
+                    _DDL_CONN.run("SELECT 1")
+                except Exception:
+                    try: _DDL_CONN.close()
+                    except: pass
+                    _DDL_CONN = None
+            if _DDL_CONN is None:
+                _DDL_CONN = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
+            _DDL_CONN.run(sql)
             print(f"  [DDL OK] {sql[:80]!r}")
         except Exception as e:
             msg = str(e).lower()
@@ -437,11 +488,19 @@ def _run_ddl(sql):
                 print(f"  [DDL skip — already exists] {sql[:60]!r}")
             else:
                 print(f"  [DDL WARN] {sql[:60]!r}: {type(e).__name__}: {e}")
-        finally:
-            try: conn.close()
+                # Reset connection on real errors
+                try: _DDL_CONN.close()
+                except: pass
+                _DDL_CONN = None
+
+def _close_ddl_conn():
+    """Call after all DDL is done to release the shared connection."""
+    global _DDL_CONN
+    with _DDL_LOCK:
+        if _DDL_CONN is not None:
+            try: _DDL_CONN.close()
             except: pass
-    except Exception as e:
-        print(f"  [DDL connect error] {e}")
+            _DDL_CONN = None
 
 def ensure_timelog_schema():
     """Ensure time_logs has ALL required columns. Safe to call repeatedly."""
@@ -980,6 +1039,13 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS vault_audit_log (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, card_id TEXT NOT NULL, action TEXT NOT NULL, detail TEXT DEFAULT '', ip TEXT DEFAULT '', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_vault_audit_user ON vault_audit_log(user_id, created)",
             "CREATE INDEX IF NOT EXISTS idx_vault_audit_card ON vault_audit_log(card_id)",
+            # Performance indexes for high-frequency polling queries
+            "CREATE INDEX IF NOT EXISTS idx_users_ws_active ON users(workspace_id, last_active)",
+            "CREATE INDEX IF NOT EXISTS idx_users_id ON users(id)",
+            "CREATE INDEX IF NOT EXISTS idx_dm_sender_ws ON direct_messages(workspace_id, sender, recipient, read)",
+            "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
             "ALTER TABLE workspaces ADD COLUMN plan TEXT DEFAULT 'starter'",
             "ALTER TABLE workspaces ADD COLUMN suspended INTEGER DEFAULT 0",
             # ── Stripe billing ──
@@ -1744,10 +1810,22 @@ def register():
 @app.route("/api/presence", methods=["POST"])
 @login_required
 def update_presence():
+    """Update user last_active timestamp. Throttled: only writes to DB once per 45s
+    per user to avoid excessive writes from aggressive heartbeats."""
+    uid = session["user_id"]
+    ws  = wid()
+    throttle_key = f"presence_write:{uid}"
+    # Skip DB write if we wrote recently — return cached OK
+    if _cache_get(throttle_key):
+        return jsonify({"ok": True, "throttled": True})
     with get_db() as db:
         db.execute("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
-                   (ts(), session["user_id"], wid()))
-        return jsonify({"ok": True})
+                   (ts(), uid, ws))
+    # Mark as written for 45s — matches new heartbeat interval
+    _CACHE[throttle_key] = {"val": True, "ts": _time.time()}
+    # Bust presence cache so next GET sees the fresh timestamp
+    _cache_bust(ws, "presence")
+    return jsonify({"ok": True})
 
 @app.route("/api/presence")
 @login_required
@@ -2145,7 +2223,8 @@ def get_app_data():
         "workspace": dict(ws_row) if ws_row else {},
         "teams": teams, "tickets": tickets, "reminders": reminders
     }
-    _cache_set(cache_key, result)
+    # Store with extended 15s TTL for this heavy combined endpoint
+    _CACHE[cache_key] = {"val": result, "ts": _time.time() - (_CACHE_TTL - 15)}
     return jsonify(result)
 
 @app.route("/api/projects")
@@ -4818,6 +4897,8 @@ try:
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
     ensure_timelog_schema()   # always run — adds any missing time_log columns
+    _close_ddl_conn()         # release shared DDL connection after all migrations
+    _prewarm_pool(4)          # pre-open 4 pool connections so first requests are fast
 except Exception as _ie:
     import traceback
     print(f"  ⚠ Init error: {_ie}")
@@ -5497,28 +5578,45 @@ def _sse_publish(workspace_id, event_type, data):
 @app.route("/api/stream")
 @login_required
 def sse_stream():
+    """Server-Sent Events endpoint.
+    Uses a short 15s heartbeat timeout so gthread workers are not held
+    indefinitely — clients reconnect automatically via EventSource.
+    With gevent workers (recommended) this is fully non-blocking.
+    """
     ws_id = wid()
+    uid   = session.get("user_id", "")
     q = _queue.Queue(maxsize=50)
     with _sse_lock:
         _sse_clients.setdefault(ws_id, []).append(q)
+
     def generate():
         yield "data: {\"type\":\"connected\"}\n\n"
         try:
             while True:
                 try:
-                    msg = q.get(timeout=25)
+                    msg = q.get(timeout=15)  # 15s timeout: release thread, client reconnects
                     yield f"data: {json.dumps(msg)}\n\n"
                 except _queue.Empty:
+                    # Heartbeat keeps connection alive through proxies
                     yield ": heartbeat\n\n"
-        except GeneratorExit:
+        except (GeneratorExit, Exception):
             pass
         finally:
             with _sse_lock:
                 clients = _sse_clients.get(ws_id, [])
                 if q in clients:
                     clients.remove(q)
-    return app.response_class(generate(), mimetype="text/event-stream",
-                               headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+    resp = app.response_class(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering":"no",
+            "Connection":       "keep-alive",
+        }
+    )
+    return resp
 
 # ═══════════════════════════════════════════════════════════════
 #  ONBOARDING PAGE ROUTE
@@ -6227,6 +6325,7 @@ def _run_v5_migrations():
 
 try:
     _run_v5_migrations()
+    _close_ddl_conn()   # release shared DDL conn after v5 migrations
 except Exception as _v5e:
     log.warning("[v5_migrations] %s", _v5e)
 

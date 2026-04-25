@@ -3458,7 +3458,7 @@ function MessagesView({projects,users,cu,tasks}){
       }
     };
     fetchTs();
-    const id=setInterval(fetchTs,15000); // reduced 8s→15s
+    const id=setInterval(()=>{if(!document.hidden)fetchTs();},45000); // 45s, skip when tab hidden
     return()=>clearInterval(id);
   },[]);
 
@@ -3512,7 +3512,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },15000); // reduced 2s->15s: channel message poll
+    },30000); // 30s channel message poll — SSE handles real-time, this is fallback
     return()=>clearInterval(id);
   },[pid]);
 
@@ -3800,7 +3800,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },15000); // reduced 3s->15s: DM message poll
+    },30000); // 30s DM message poll — SSE handles real-time, this is fallback
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -6864,10 +6864,12 @@ function App(){
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
     // Fire beat immediately on mount (beat already calls fetchPresence — no double-fetch)
     beat();
-    const beatId=setInterval(beat,30000); // heartbeat every 30s — also refreshes presence
-    const onFocus=()=>{beat();};
+    const beatId=setInterval(()=>{
+      // Skip heartbeat if tab is hidden — saves DB writes when user switches tabs
+      if(!document.hidden) beat();
+    },60000); // 60s heartbeat — presence updates are low-priority
+    const onFocus=()=>{beat();}; // immediate refresh when tab regains focus
     window.addEventListener('focus',onFocus);
-    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
     return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
