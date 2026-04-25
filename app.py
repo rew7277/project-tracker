@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Project Tracker v4.0
+Project Tracker v5.0 — Enterprise Edition
 Multi-tenant workspaces | AI Assistant | Stage Dropdown | Direct Messages
 """
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
@@ -92,7 +92,7 @@ def vault_decrypt(token: str) -> str:
         return token
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session, Response, send_file
+from flask import Flask, request, jsonify, session, Response, send_file, redirect
 from flask_cors import CORS
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -240,7 +240,42 @@ app.config.update(
     SESSION_COOKIE_SECURE=_is_https,PERMANENT_SESSION_LIFETIME=86400*30,
     SESSION_COOKIE_NAME="pf_session",
     MAX_CONTENT_LENGTH=150*1024*1024)
-CORS(app, supports_credentials=True)
+# CORS — restrict to known origins in production
+_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if not _ALLOWED_ORIGINS:
+    _ALLOWED_ORIGINS = ["*"]
+    if _is_https:
+        log.warning("ALLOWED_ORIGINS not set — CORS is open in production.")
+CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
+
+# ── Gzip compression for all compressible responses ───────────────────────────
+@app.after_request
+def compress_response(response):
+    """Gzip-compress HTML, JS, CSS and JSON responses when client supports it."""
+    accept_encoding = request.headers.get("Accept-Encoding", "")
+    if "gzip" not in accept_encoding:
+        return response
+    if response.status_code < 200 or response.status_code >= 300:
+        return response
+    content_type = response.content_type or ""
+    compressible = any(t in content_type for t in (
+        "text/html", "text/css", "application/javascript",
+        "application/json", "text/javascript", "text/plain"
+    ))
+    if not compressible:
+        return response
+    data = response.get_data()
+    if len(data) < 500:
+        return response
+    import gzip as _gzip
+    compressed = _gzip.compress(data, compresslevel=6)
+    if len(compressed) >= len(data):
+        return response
+    response.set_data(compressed)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = len(compressed)
+    response.headers.pop("Content-MD5", None)
+    return response
 
 @app.after_request
 def add_security_headers(response):
@@ -251,7 +286,7 @@ def add_security_headers(response):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdnjs.cloudflare.com; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdnjs.cloudflare.com; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
@@ -1558,6 +1593,19 @@ def totp_verify_login():
         result.pop("password", None)
         result.pop("totp_secret", None)
         result.pop("avatar_data", None)
+        # Include workspace-scoped dashboard URL (same as regular login)
+        try:
+            import re as _re_t
+            ws_row = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (u["workspace_id"],)
+            ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_slug"] = slug
+        except Exception:
+            pass
         return jsonify(result)
 
 @app.route("/api/auth/totp/reset", methods=["POST"])
@@ -1685,6 +1733,20 @@ def me():
         result = dict(u)
         for k in ("password","plain_password","totp_secret"):
             result.pop(k, None)
+        # Attach workspace-scoped URL so the frontend can build proper ws-scoped links
+        try:
+            import re as _re
+            ws_row = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (u["workspace_id"],)
+            ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_slug"] = slug
+                result["workspace_id_from_me"] = u["workspace_id"]
+        except Exception:
+            pass
         return jsonify(result)
 
 # ── Vault ─────────────────────────────────────────────────────────────────────
@@ -3367,12 +3429,13 @@ Prioritized list of immediate actions.
 @login_required
 def export_csv():
     with get_db() as db:
-        tasks=db.execute("SELECT * FROM tasks WHERE workspace_id=?",(wid(),)).fetchall()
-    lines=["id,title,project,assignee,priority,stage,due,pct"]
+        tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at=''", (wid(),)).fetchall()
+    lines = ["id,title,project,assignee,priority,stage,due,pct"]
     for t in tasks:
-        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}","{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
-    return Response("\n".join(lines),mimetype="text/csv",
-                    headers={"Content-Disposition":"attachment;filename=tasks.csv"})
+        lines.append(f'"{t["id"]}","{t["title"]}","{t["project"]}","{t["assignee"]}",'
+                     f'"{t["priority"]}","{t["stage"]}","{t["due"]}","{t["pct"]}"')
+    return Response("\n".join(lines), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment;filename=tasks.csv"})
 
 @app.route("/api/import/csv", methods=["POST"])
 @login_required
@@ -3540,7 +3603,7 @@ def serve_static(fn):
     with open(path, "rb") as fh:
         data = fh.read()
     resp = Response(data, mimetype=mime)
-    resp.headers["Cache-Control"] = "public, max-age=3600" if fn.endswith(".js") else "no-cache"
+    resp.headers["Cache-Control"] = "public, max-age=604800, immutable" if fn.endswith(".js") else "no-cache"
     return resp
 
 @app.route("/js/<path:fn>")
@@ -3554,7 +3617,7 @@ def serve_js(fn):
         "react.min.js":     "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
         "react-dom.min.js": "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
         "prop-types.min.js":"https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js",
-        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js",
+        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js",
         "htm.min.js":       "https://unpkg.com/htm@3.1.1/dist/htm.js",
     }
     if fn in CDN:
@@ -3717,8 +3780,20 @@ def icon_512():
 @app.route("/")
 def index():
     """Serve the landing page for non-authenticated users."""
-    if "user_id" in session:
-        return serve_app()
+    if "user_id" in session and session.get("workspace_id"):
+        ws_id = session["workspace_id"]
+        try:
+            import re as _re2
+            with get_db() as db:
+                ws_row = db.execute(
+                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
+                ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
+        except Exception:
+            pass
+        return HTML
     action = request.args.get("action", "")
     if action in ("login", "register"):
         return HTML
@@ -3729,13 +3804,36 @@ def index():
 @app.route("/projects")
 @app.route("/tasks")
 @app.route("/messages")
+@app.route("/channels")
+@app.route("/dm")
 @app.route("/settings")
 @app.route("/profile")
 @app.route("/analytics")
 @app.route("/tickets")
 @app.route("/timeline")
+@app.route("/reminders")
+@app.route("/team")
+@app.route("/productivity")
+@app.route("/ai-docs")
+@app.route("/timesheet")
+@app.route("/vault")
 def serve_app():
-    """Serve the main application template for all app routes."""
+    """Serve the main application template, redirecting to ws-scoped URL if logged in."""
+    if "user_id" in session and session.get("workspace_id"):
+        ws_id = session["workspace_id"]
+        # Determine the page being requested
+        path_segment = request.path.strip("/") or "dashboard"
+        try:
+            import re as _re
+            with get_db() as db:
+                ws_row = db.execute(
+                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
+                ).fetchone()
+            if ws_row:
+                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
+                return redirect(f"/{slug}/{ws_id}/{path_segment}", code=302)
+        except Exception:
+            pass
     return HTML
 
 @app.route("/password-generator")
@@ -3859,14 +3957,27 @@ def ws_sso_callback(ws_name, ws_id):
 
 @app.route("/<ws_name>/<ws_id>/dashboard")
 @app.route("/<ws_name>/<ws_id>/projects")
+@app.route("/<ws_name>/<ws_id>/projects/<proj_id>")
 @app.route("/<ws_name>/<ws_id>/tasks")
+@app.route("/<ws_name>/<ws_id>/kanban")
 @app.route("/<ws_name>/<ws_id>/messages")
+@app.route("/<ws_name>/<ws_id>/channels")
+@app.route("/<ws_name>/<ws_id>/dm")
+@app.route("/<ws_name>/<ws_id>/dm/<other_user>")
 @app.route("/<ws_name>/<ws_id>/settings")
 @app.route("/<ws_name>/<ws_id>/profile")
 @app.route("/<ws_name>/<ws_id>/analytics")
 @app.route("/<ws_name>/<ws_id>/tickets")
 @app.route("/<ws_name>/<ws_id>/timeline")
-def ws_app_page(ws_name, ws_id):
+@app.route("/<ws_name>/<ws_id>/reminders")
+@app.route("/<ws_name>/<ws_id>/team")
+@app.route("/<ws_name>/<ws_id>/productivity")
+@app.route("/<ws_name>/<ws_id>/ai-docs")
+@app.route("/<ws_name>/<ws_id>/timesheet")
+@app.route("/<ws_name>/<ws_id>/vault")
+@app.route("/<ws_name>/<ws_id>/password-generator")
+@app.route("/<ws_name>/<ws_id>/app")
+def ws_app_page(ws_name, ws_id, **kwargs):
     """Serve the main SPA for workspace-scoped URLs.
     If not authenticated, redirect to the workspace SSO/login flow."""
     if "user_id" not in session:
@@ -4507,19 +4618,34 @@ def admin_api_add_user():
 @app.route("/<path:path>")
 def catch_all(path):
     """Catch-all route for SPA client-side routing."""
-    # If it looks like a file request, return 404
-    if "." in path.split("/")[-1]:
+
+    # Block sensitive paths — never serve .git, .env, config files, etc.
+    _lower = path.lower()
+    _BLOCKED_PREFIXES = (".git", ".env", ".htaccess", ".DS_Store", "wp-admin", "wp-login")
+    _BLOCKED_EXTENSIONS = (".env", ".config", ".cfg", ".bak", ".sql", ".log", ".key", ".pem")
+    if any(_lower == p or _lower.startswith(p + "/") for p in _BLOCKED_PREFIXES):
+        return "", 404
+    _last = path.split("/")[-1]
+    if any(_last.endswith(ext) for ext in _BLOCKED_EXTENSIONS):
+        return "", 404
+    # Also block bare dotfiles
+    if _last.startswith("."):
         return "", 404
 
+    # Reject file requests (have an extension) that weren't caught above
+    if "." in _last:
+        return "", 404
+
+    # Reject unresolved JS template literals like ${imgSrc}, ${variable}
+    # These happen when a variable is used as a URL before it has a value
+    if path.startswith("${") or "${" in path:
+        return "", 400
+
     # Let explicitly registered routes handle /<ws_name>/<ws_id>/... paths
-    # (Flask already matches those first, so this is just a safety guard)
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
-        # Pattern: <anything>/<ws_id_like>/... where ws_id starts with "ws"
         potential_ws_id = parts[1] if len(parts) >= 2 else ""
         if potential_ws_id.startswith("ws"):
-            # Route not matched above means it's an unrecognised sub-path;
-            # still serve the SPA so client-side router can handle it.
             return HTML
 
     # Otherwise serve the app (for client-side routing)
@@ -5265,8 +5391,710 @@ def onboarding_page():
         return redirect("/?action=login")
     return send_from_directory(".", "onboarding.html")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLACK INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+def send_slack_notification(workspace_id, message, channel="#general"):
+    try:
+        rows = _raw_pg("SELECT slack_webhook_url FROM workspaces WHERE id=?", (workspace_id,), fetch=True)
+        if not rows or not rows[0].get("slack_webhook_url"):
+            return False
+        payload = json.dumps({"text": message, "channel": channel}).encode()
+        req = urllib.request.Request(rows[0]["slack_webhook_url"], data=payload,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=8):
+            return True
+    except Exception as e:
+        log.error("[Slack] %s", e)
+        return False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART SEARCH
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/search")
+@login_required
+def smart_search():
+    q = request.args.get("q", "").strip()
+    entity_type = request.args.get("type", "all")
+    if not q or len(q) < 2:
+        return jsonify({"results": [], "total": 0})
+    like = f"%{q.lower()}%"
+    results = []
+    with get_db() as db:
+        if entity_type in ("all", "tasks"):
+            rows = db.execute(
+                "SELECT id,title,stage,priority,assignee,project,'task' as type FROM tasks "
+                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
+                (wid(), like, like)).fetchall()
+            results.extend([{"type": "task", **dict(r)} for r in rows])
+        if entity_type in ("all", "projects"):
+            rows = db.execute(
+                "SELECT id,name as title,description,color,'project' as type FROM projects "
+                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(name) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
+                (wid(), like, like)).fetchall()
+            results.extend([{"type": "project", **dict(r)} for r in rows])
+        if entity_type in ("all", "tickets"):
+            rows = db.execute(
+                "SELECT id,title,status,priority,'ticket' as type FROM tickets "
+                "WHERE workspace_id=? AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?) LIMIT 10",
+                (wid(), like, like)).fetchall()
+            results.extend([{"type": "ticket", **dict(r)} for r in rows])
+        if entity_type in ("all", "users"):
+            rows = db.execute(
+                "SELECT id,name as title,email,role,'user' as type FROM users "
+                "WHERE workspace_id=? AND deleted_at='' AND (LOWER(name) LIKE ? OR LOWER(email) LIKE ?) LIMIT 5",
+                (wid(), like, like)).fetchall()
+            results.extend([{"type": "user", **dict(r)} for r in rows])
+    return jsonify({"results": results[:30], "total": len(results), "query": q})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INCIDENT MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/incidents", methods=["GET"])
+@login_required
+def get_incidents():
+    status = request.args.get("status", "")
+    with get_db() as db:
+        sql = "SELECT i.*,u.name as assignee_name FROM incidents i LEFT JOIN users u ON i.assignee=u.id WHERE i.workspace_id=?"
+        params = [wid()]
+        if status:
+            sql += " AND i.status=?"; params.append(status)
+        sql += " ORDER BY i.created DESC"
+        rows = db.execute(sql, params).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/incidents", methods=["POST"])
+@login_required
+def create_incident():
+    d = request.json or {}
+    if not d.get("title"):
+        return jsonify({"error": "title required"}), 400
+    iid = f"inc{int(datetime.now().timestamp()*1000)}"
+    now = ts()
+    severity = d.get("severity", "medium")
+    timeline = json.dumps([{"ts": now, "message": "Incident created", "user": session["user_id"]}])
+    _raw_pg(
+        "INSERT INTO incidents(id,workspace_id,title,severity,status,description,"
+        "affected_systems,timeline,assignee,reporter,created,updated,resolved_at,rca,postmortem) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (iid, wid(), d["title"], severity, "open", d.get("description", ""),
+         json.dumps(d.get("affected_systems", [])), timeline,
+         d.get("assignee", ""), session["user_id"], now, now, "", "", "")
+    )
+    if severity in ("critical", "high"):
+        send_slack_notification(wid(), f"{'🔴' if severity=='critical' else '🟠'} *INCIDENT [{severity.upper()}]* — {d['title']}\n> {d.get('description','')}")
+    _audit("incident_created", iid, f"{d['title']} [{severity}]")
+    with get_db() as db:
+        return jsonify(dict(db.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()))
+
+@app.route("/api/incidents/<iid>", methods=["PUT"])
+@login_required
+def update_incident(iid):
+    d = request.json or {}
+    with get_db() as db:
+        inc = db.execute("SELECT * FROM incidents WHERE id=? AND workspace_id=?", (iid, wid())).fetchone()
+        if not inc: return jsonify({"error": "Not found"}), 404
+        now = ts()
+        resolved_at = now if d.get("status") == "resolved" and inc["status"] != "resolved" else (inc["resolved_at"] or "")
+        timeline = json.loads(inc["timeline"] or "[]")
+        if d.get("status") and d["status"] != inc["status"]:
+            timeline.append({"ts": now, "message": f"Status → {d['status']}", "user": session["user_id"]})
+        if d.get("update_message"):
+            timeline.append({"ts": now, "message": d["update_message"], "user": session["user_id"]})
+        db.execute(
+            "UPDATE incidents SET title=?,severity=?,status=?,description=?,affected_systems=?,"
+            "timeline=?,assignee=?,updated=?,resolved_at=?,rca=?,postmortem=? WHERE id=? AND workspace_id=?",
+            (d.get("title", inc["title"]), d.get("severity", inc["severity"]),
+             d.get("status", inc["status"]), d.get("description", inc["description"]),
+             json.dumps(d.get("affected_systems", json.loads(inc["affected_systems"] or "[]"))),
+             json.dumps(timeline), d.get("assignee", inc["assignee"]),
+             now, resolved_at, d.get("rca", inc.get("rca", "") or ""),
+             d.get("postmortem", inc.get("postmortem", "") or ""), iid, wid()))
+        return jsonify(dict(db.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()))
+
+@app.route("/api/incidents/<iid>", methods=["DELETE"])
+@login_required
+def delete_incident(iid):
+    if get_user_role() not in ("Admin", "Manager"):
+        return jsonify({"error": "Admin only"}), 403
+    _raw_pg("DELETE FROM incidents WHERE id=? AND workspace_id=?", (iid, wid()))
+    return jsonify({"ok": True})
+
+@app.route("/api/incidents/stats")
+@login_required
+def incident_stats():
+    with get_db() as db:
+        total = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=?", (wid(),)).fetchone()["c"]
+        open_cnt = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=? AND status='open'", (wid(),)).fetchone()["c"]
+        critical = db.execute("SELECT COUNT(*) as c FROM incidents WHERE workspace_id=? AND severity='critical' AND status!='resolved'", (wid(),)).fetchone()["c"]
+        return jsonify(total=total, open=open_cnt, critical=critical)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APPROVAL WORKFLOWS
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/approvals", methods=["GET"])
+@login_required
+def get_approvals():
+    status = request.args.get("status", "")
+    with get_db() as db:
+        sql = "SELECT a.*,u.name as requester_name FROM approvals a LEFT JOIN users u ON a.requested_by=u.id WHERE a.workspace_id=?"
+        params = [wid()]
+        if status: sql += " AND a.status=?"; params.append(status)
+        sql += " ORDER BY a.created DESC"
+        return jsonify([dict(r) for r in db.execute(sql, params).fetchall()])
+
+@app.route("/api/approvals", methods=["POST"])
+@login_required
+def create_approval():
+    d = request.json or {}
+    if not d.get("title"): return jsonify({"error": "title required"}), 400
+    aid = f"apv{int(datetime.now().timestamp()*1000)}"
+    now = ts()
+    approvers = d.get("approvers", [])
+    _raw_pg(
+        "INSERT INTO approvals(id,workspace_id,entity_type,entity_id,title,description,"
+        "status,requested_by,approvers,approved_by,rejected_by,rejection_reason,created,updated,expires_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (aid, wid(), d.get("entity_type", "task"), d.get("entity_id", ""),
+         d["title"], d.get("description", ""), "pending", session["user_id"],
+         json.dumps(approvers), json.dumps([]), "", "", now, now, d.get("expires_at", ""))
+    )
+    with get_db() as db:
+        for approver_id in approvers:
+            nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                       (nid, wid(), "approval_requested", f"Your approval needed: {d['title']}", approver_id, 0, now))
+        return jsonify(dict(db.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()))
+
+@app.route("/api/approvals/<aid>/approve", methods=["POST"])
+@login_required
+def approve_request(aid):
+    with get_db() as db:
+        apv = db.execute("SELECT * FROM approvals WHERE id=? AND workspace_id=?", (aid, wid())).fetchone()
+        if not apv: return jsonify({"error": "Not found"}), 404
+        approvers = json.loads(apv["approvers"] or "[]")
+        if session["user_id"] not in approvers: return jsonify({"error": "Not an approver"}), 403
+        approved_by = json.loads(apv["approved_by"] or "[]")
+        if session["user_id"] not in approved_by: approved_by.append(session["user_id"])
+        status = "approved" if set(approved_by) >= set(approvers) else "pending"
+        now = ts()
+        db.execute("UPDATE approvals SET approved_by=?,status=?,updated=? WHERE id=?",
+                   (json.dumps(approved_by), status, now, aid))
+        if status == "approved":
+            nid = f"n{int(datetime.now().timestamp()*1000)}"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                       (nid, wid(), "approval_approved", f"✅ Approved: {apv['title']}", apv["requested_by"], 0, now))
+        _audit("approval_action", aid, f"Approved by {session['user_id']}, status={status}")
+        return jsonify({"ok": True, "status": status})
+
+@app.route("/api/approvals/<aid>/reject", methods=["POST"])
+@login_required
+def reject_request(aid):
+    d = request.json or {}
+    with get_db() as db:
+        apv = db.execute("SELECT * FROM approvals WHERE id=? AND workspace_id=?", (aid, wid())).fetchone()
+        if not apv: return jsonify({"error": "Not found"}), 404
+        approvers = json.loads(apv["approvers"] or "[]")
+        if session["user_id"] not in approvers: return jsonify({"error": "Not an approver"}), 403
+        now = ts()
+        db.execute("UPDATE approvals SET rejected_by=?,rejection_reason=?,status=?,updated=? WHERE id=?",
+                   (session["user_id"], d.get("reason", ""), "rejected", now, aid))
+        nid = f"n{int(datetime.now().timestamp()*1000)}"
+        db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                   (nid, wid(), "approval_rejected", f"❌ Rejected: {apv['title']}", apv["requested_by"], 0, now))
+        return jsonify({"ok": True, "status": "rejected"})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RECURRING TASKS
+# ═══════════════════════════════════════════════════════════════════════════════
+def _calc_next_run(frequency, day_of_week=1, day_of_month=1):
+    now = datetime.now()
+    if frequency == "daily":
+        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    elif frequency == "weekly":
+        days_ahead = (int(day_of_week) - now.weekday()) % 7 or 7
+        return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    elif frequency == "monthly":
+        dom = int(day_of_month)
+        if now.day < dom:
+            return now.replace(day=dom).strftime("%Y-%m-%d")
+        if now.month == 12:
+            return now.replace(year=now.year+1, month=1, day=dom).strftime("%Y-%m-%d")
+        return now.replace(month=now.month+1, day=dom).strftime("%Y-%m-%d")
+    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+@app.route("/api/recurring-tasks", methods=["GET"])
+@login_required
+def get_recurring_tasks():
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM recurring_tasks WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/recurring-tasks", methods=["POST"])
+@login_required
+def create_recurring_task():
+    d = request.json or {}
+    if not d.get("title"): return jsonify({"error": "title required"}), 400
+    rid = f"rt{int(datetime.now().timestamp()*1000)}"
+    freq = d.get("frequency", "weekly")
+    next_run = _calc_next_run(freq, d.get("day_of_week", 1), d.get("day_of_month", 1))
+    _raw_pg(
+        "INSERT INTO recurring_tasks(id,workspace_id,title,description,project,assignee,priority,stage,"
+        "frequency,day_of_week,day_of_month,next_run,last_run,enabled,created_by,created) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (rid, wid(), d["title"], d.get("description", ""), d.get("project", ""),
+         d.get("assignee", ""), d.get("priority", "medium"), d.get("stage", "backlog"),
+         freq, d.get("day_of_week", 1), d.get("day_of_month", 1), next_run, "", 1, session["user_id"], ts())
+    )
+    with get_db() as db:
+        return jsonify(dict(db.execute("SELECT * FROM recurring_tasks WHERE id=?", (rid,)).fetchone()))
+
+@app.route("/api/recurring-tasks/<rid>", methods=["PUT"])
+@login_required
+def update_recurring_task(rid):
+    d = request.json or {}
+    with get_db() as db:
+        rt = db.execute("SELECT * FROM recurring_tasks WHERE id=? AND workspace_id=?", (rid, wid())).fetchone()
+        if not rt: return jsonify({"error": "Not found"}), 404
+        freq = d.get("frequency", rt["frequency"])
+        next_run = _calc_next_run(freq, d.get("day_of_week", rt["day_of_week"]), d.get("day_of_month", rt["day_of_month"]))
+        db.execute(
+            "UPDATE recurring_tasks SET title=?,description=?,project=?,assignee=?,priority=?,"
+            "frequency=?,day_of_week=?,day_of_month=?,next_run=?,enabled=? WHERE id=? AND workspace_id=?",
+            (d.get("title", rt["title"]), d.get("description", rt["description"]),
+             d.get("project", rt["project"]), d.get("assignee", rt["assignee"]),
+             d.get("priority", rt["priority"]), freq, d.get("day_of_week", rt["day_of_week"]),
+             d.get("day_of_month", rt["day_of_month"]), next_run,
+             int(d.get("enabled", rt["enabled"])), rid, wid()))
+        return jsonify(dict(db.execute("SELECT * FROM recurring_tasks WHERE id=?", (rid,)).fetchone()))
+
+@app.route("/api/recurring-tasks/<rid>", methods=["DELETE"])
+@login_required
+def delete_recurring_task(rid):
+    _raw_pg("DELETE FROM recurring_tasks WHERE id=? AND workspace_id=?", (rid, wid()))
+    return jsonify({"ok": True})
+
+def _recurring_task_runner():
+    while True:
+        try:
+            time.sleep(3600)
+            today = datetime.now().strftime("%Y-%m-%d")
+            due = _raw_pg("SELECT * FROM recurring_tasks WHERE enabled=1 AND next_run<=?", (today,), fetch=True)
+            for rt in (due or []):
+                tid = f"T-r{secrets.token_hex(4)}"
+                _raw_pg(
+                    "INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,"
+                    "created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (tid, rt["workspace_id"], rt["title"], rt["description"], rt["project"],
+                     rt["assignee"], rt["priority"], rt["stage"], ts(), "", 0, "[]", "", ""))
+                next_run = _calc_next_run(rt["frequency"], rt["day_of_week"], rt["day_of_month"])
+                _raw_pg("UPDATE recurring_tasks SET last_run=?,next_run=? WHERE id=?", (today, next_run, rt["id"]))
+        except Exception as e:
+            log.error("[recurring] %s", e)
+
+threading.Thread(target=_recurring_task_runner, daemon=True).start()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GITHUB INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/github/repos", methods=["GET"])
+@login_required
+def list_github_repos():
+    with get_db() as db:
+        rows = db.execute("SELECT id,workspace_id,repo_full_name,repo_url,connected_by,created FROM github_repos WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/github/repos", methods=["POST"])
+@login_required
+def link_github_repo():
+    d = request.json or {}
+    repo_full_name = d.get("repo_full_name", "").strip()
+    if not repo_full_name: return jsonify({"error": "repo_full_name required"}), 400
+    rid = f"ghrepo{int(datetime.now().timestamp()*1000)}"
+    token = d.get("github_token", "")
+    _raw_pg(
+        "INSERT INTO github_repos(id,workspace_id,repo_full_name,repo_url,github_token,connected_by,created) VALUES (?,?,?,?,?,?,?)",
+        (rid, wid(), repo_full_name, f"https://github.com/{repo_full_name}", token, session["user_id"], ts()))
+    _audit("github_repo_linked", rid, f"Linked: {repo_full_name}")
+    return jsonify({"ok": True, "id": rid, "repo_full_name": repo_full_name})
+
+@app.route("/api/github/repos/<repo_id>", methods=["DELETE"])
+@login_required
+def unlink_github_repo(repo_id):
+    if get_user_role() not in ("Admin", "Manager"): return jsonify({"error": "Admin only"}), 403
+    _raw_pg("DELETE FROM github_repos WHERE id=? AND workspace_id=?", (repo_id, wid()))
+    return jsonify({"ok": True})
+
+@app.route("/api/github/webhook", methods=["POST"])
+def github_webhook():
+    event_type = request.headers.get("X-GitHub-Event", "")
+    payload = request.get_data()
+    try: data = json.loads(payload)
+    except Exception: return "Bad JSON", 400
+    ws_id = request.args.get("ws", "")
+    repo_id = request.args.get("repo", "")
+    text_to_search = ""
+    if event_type == "push":
+        text_to_search = " ".join(c.get("message","") for c in data.get("commits", []))
+    elif event_type in ("pull_request", "issues"):
+        obj = data.get("pull_request") or data.get("issue") or {}
+        text_to_search = f"{obj.get('title','')} {obj.get('body','')}"
+    task_id = ""
+    m = re.search(r'T-\d{3,}(?:-\d+)?', text_to_search)
+    if m: task_id = m.group(0)
+    if ws_id:
+        eid = f"ghe{int(datetime.now().timestamp()*1000)}"
+        _raw_pg("INSERT INTO github_events(id,workspace_id,repo_id,event_type,payload,task_id,created) VALUES (?,?,?,?,?,?,?)",
+                (eid, ws_id, repo_id, event_type, json.dumps(data)[:4000], task_id, ts()))
+    return "ok", 200
+
+@app.route("/api/github/events")
+@login_required
+def get_github_events():
+    task_id = request.args.get("task_id", "")
+    with get_db() as db:
+        if task_id:
+            rows = db.execute("SELECT * FROM github_events WHERE workspace_id=? AND task_id=? ORDER BY created DESC LIMIT 50", (wid(), task_id)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM github_events WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GDPR — DATA EXPORT & DELETION
+# ═══════════════════════════════════════════════════════════════════════════════
+import zipfile, io
+
+@app.route("/api/gdpr/export")
+@login_required
+def gdpr_export():
+    uid = session["user_id"]
+    ws = wid()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        with get_db() as db:
+            u = db.execute("SELECT id,name,email,role,avatar,color,created,last_active FROM users WHERE id=?", (uid,)).fetchone()
+            zf.writestr("profile.json", json.dumps(dict(u) if u else {}, indent=2))
+            tasks = db.execute("SELECT * FROM tasks WHERE workspace_id=? AND assignee=? AND deleted_at=''", (ws, uid)).fetchall()
+            zf.writestr("tasks.json", json.dumps([dict(t) for t in tasks], indent=2))
+            messages = db.execute("SELECT * FROM messages WHERE workspace_id=? AND sender=?", (ws, uid)).fetchall()
+            zf.writestr("messages.json", json.dumps([dict(m) for m in messages], indent=2))
+            dms = db.execute("SELECT * FROM direct_messages WHERE workspace_id=? AND (sender=? OR recipient=?)", (ws, uid, uid)).fetchall()
+            zf.writestr("direct_messages.json", json.dumps([dict(d) for d in dms], indent=2))
+            timelogs = db.execute("SELECT * FROM time_logs WHERE workspace_id=? AND user_id=?", (ws, uid)).fetchall()
+            zf.writestr("time_logs.json", json.dumps([dict(t) for t in timelogs], indent=2))
+        zf.writestr("README.txt", f"GDPR Export for {uid}\nGenerated: {datetime.now().isoformat()}\n")
+    buf.seek(0)
+    _log_audit("gdpr_export", uid, "GDPR data export")
+    return send_file(buf, download_name=f"my_data_{uid}.zip", as_attachment=True, mimetype="application/zip")
+
+@app.route("/api/gdpr/delete", methods=["POST"])
+@login_required
+def gdpr_delete():
+    d = request.json or {}
+    if d.get("confirm") != "DELETE MY DATA":
+        return jsonify({"error": "Confirm with 'DELETE MY DATA'"}), 400
+    uid = session["user_id"]
+    ws = wid()
+    with get_db() as db:
+        anon_name = f"Deleted User {secrets.token_hex(4)}"
+        anon_email = f"deleted_{secrets.token_hex(6)}@deleted.invalid"
+        db.execute("UPDATE users SET name=?,email=?,password=?,avatar='?',color='#999',deleted_at=? WHERE id=?",
+                   (anon_name, anon_email, hash_pw(secrets.token_hex(32)), ts(), uid))
+        db.execute("DELETE FROM direct_messages WHERE workspace_id=? AND sender=?", (ws, uid))
+        db.execute("DELETE FROM push_subscriptions WHERE user_id=?", (uid,))
+        db.execute("DELETE FROM vault_cards WHERE user_id=?", (uid,))
+    session.clear()
+    _log_audit("gdpr_delete", uid, "User data deleted (GDPR)")
+    return jsonify({"ok": True, "message": "Your data has been anonymized."})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE FLAGS
+# ═══════════════════════════════════════════════════════════════════════════════
+DEFAULT_FLAGS = {
+    "github_integration": True, "slack_integration": True,
+    "incident_management": True, "approval_workflows": True,
+    "recurring_tasks": True, "smart_search": True, "time_tracking": True,
+    "public_api": True, "ai_assistant": True, "billing": False, "public_roadmap": False,
+}
+
+@app.route("/api/feature-flags", methods=["GET"])
+@login_required
+def get_feature_flags():
+    flags = dict(DEFAULT_FLAGS)
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT flag_name,enabled FROM feature_flags WHERE workspace_id=?", (wid(),)).fetchall()
+            for r in rows:
+                flags[r["flag_name"]] = bool(r["enabled"])
+    except Exception: pass
+    return jsonify(flags)
+
+@app.route("/api/feature-flags", methods=["PUT"])
+@login_required
+def update_feature_flags():
+    if get_user_role() not in ("Admin", "Owner"): return jsonify({"error": "Admin only"}), 403
+    d = request.json or {}
+    with get_db() as db:
+        for flag_name, enabled in d.items():
+            if flag_name not in DEFAULT_FLAGS: continue
+            existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (wid(), flag_name)).fetchone()
+            if existing:
+                db.execute("UPDATE feature_flags SET enabled=?,updated=? WHERE id=?", (1 if enabled else 0, ts(), existing["id"]))
+            else:
+                _raw_pg("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
+                        (secrets.token_hex(6), wid(), flag_name, 1 if enabled else 0, "{}", ts()))
+    return jsonify({"ok": True})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RELEASE CALENDAR
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/releases", methods=["GET"])
+@login_required
+def get_releases():
+    with get_db() as db:
+        rows = db.execute("SELECT r.*,u.name as created_by_name FROM release_calendar r LEFT JOIN users u ON r.created_by=u.id WHERE r.workspace_id=? ORDER BY r.release_date ASC", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/releases", methods=["POST"])
+@login_required
+def create_release():
+    d = request.json or {}
+    if not d.get("title") or not d.get("release_date"): return jsonify({"error": "title and release_date required"}), 400
+    rid = f"rel{int(datetime.now().timestamp()*1000)}"
+    _raw_pg("INSERT INTO release_calendar(id,workspace_id,title,release_date,project,status,environment,notes,created_by,created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (rid, wid(), d["title"], d["release_date"], d.get("project", ""),
+             d.get("status", "planned"), d.get("environment", "production"),
+             d.get("notes", ""), session["user_id"], ts()))
+    with get_db() as db:
+        return jsonify(dict(db.execute("SELECT * FROM release_calendar WHERE id=?", (rid,)).fetchone()))
+
+@app.route("/api/releases/<rid>", methods=["PUT"])
+@login_required
+def update_release(rid):
+    d = request.json or {}
+    with get_db() as db:
+        r = db.execute("SELECT * FROM release_calendar WHERE id=? AND workspace_id=?", (rid, wid())).fetchone()
+        if not r: return jsonify({"error": "Not found"}), 404
+        db.execute("UPDATE release_calendar SET title=?,release_date=?,project=?,status=?,environment=?,notes=? WHERE id=?",
+                   (d.get("title", r["title"]), d.get("release_date", r["release_date"]),
+                    d.get("project", r["project"]), d.get("status", r["status"]),
+                    d.get("environment", r["environment"]), d.get("notes", r["notes"]), rid))
+        return jsonify(dict(db.execute("SELECT * FROM release_calendar WHERE id=?", (rid,)).fetchone()))
+
+@app.route("/api/releases/<rid>", methods=["DELETE"])
+@login_required
+def delete_release(rid):
+    _raw_pg("DELETE FROM release_calendar WHERE id=? AND workspace_id=?", (rid, wid()))
+    return jsonify({"ok": True})
+
+@app.route("/api/roadmap/public/<ws_id>")
+def public_roadmap(ws_id):
+    rows = _raw_pg("SELECT id,title,release_date,status,environment,notes FROM release_calendar WHERE workspace_id=? AND status IN ('planned','in_progress','released') ORDER BY release_date ASC LIMIT 50", (ws_id,), fetch=True)
+    ws_rows = _raw_pg("SELECT name FROM workspaces WHERE id=?", (ws_id,), fetch=True)
+    return jsonify({"workspace": ws_rows[0]["name"] if ws_rows else "Unknown", "releases": rows or []})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ON-CALL SCHEDULE
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/oncall", methods=["GET"])
+@login_required
+def get_oncall():
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM on_call_schedules WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/oncall", methods=["POST"])
+@login_required
+def create_oncall():
+    d = request.json or {}
+    if not d.get("name") or not d.get("members"): return jsonify({"error": "name and members required"}), 400
+    oid = f"oc{int(datetime.now().timestamp()*1000)}"
+    members = d.get("members", [])
+    _raw_pg("INSERT INTO on_call_schedules(id,workspace_id,name,members,current_oncall,rotation_days,started_at,created) VALUES (?,?,?,?,?,?,?,?)",
+            (oid, wid(), d["name"], json.dumps(members), members[0] if members else "", d.get("rotation_days", 7), ts(), ts()))
+    with get_db() as db:
+        return jsonify(dict(db.execute("SELECT * FROM on_call_schedules WHERE id=?", (oid,)).fetchone()))
+
+@app.route("/api/oncall/<oid>/rotate", methods=["POST"])
+@login_required
+def rotate_oncall(oid):
+    with get_db() as db:
+        s = db.execute("SELECT * FROM on_call_schedules WHERE id=? AND workspace_id=?", (oid, wid())).fetchone()
+        if not s: return jsonify({"error": "Not found"}), 404
+        members = json.loads(s["members"] or "[]")
+        if not members: return jsonify({"error": "No members"}), 400
+        idx = members.index(s["current_oncall"]) if s["current_oncall"] in members else -1
+        new_oncall = members[(idx + 1) % len(members)]
+        db.execute("UPDATE on_call_schedules SET current_oncall=? WHERE id=?", (new_oncall, oid))
+        return jsonify({"ok": True, "current_oncall": new_oncall})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RISK DASHBOARD & PROJECT HEALTH
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/projects/<pid>/health")
+@login_required
+def project_health(pid):
+    with get_db() as db:
+        p = db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?", (pid, wid())).fetchone()
+        if not p: return jsonify({"error": "Not found"}), 404
+        tasks = db.execute("SELECT * FROM tasks WHERE project=? AND workspace_id=? AND deleted_at=''", (pid, wid())).fetchall()
+        today = datetime.now().strftime("%Y-%m-%d")
+        total = len(tasks)
+        completed = len([t for t in tasks if t["stage"] == "completed"])
+        blocked = len([t for t in tasks if t["stage"] == "blocked"])
+        overdue = len([t for t in tasks if t["due"] and t["due"][:10] < today and t["stage"] != "completed"])
+        completion_rate = (completed / total * 100) if total > 0 else 0
+        score = max(0, min(100, int(100 - (blocked/max(total,1))*30 - (overdue/max(total,1))*25 - max(0, 100-completion_rate)*0.3)))
+        status = "healthy" if score >= 80 else ("at_risk" if score >= 60 else ("warning" if score >= 40 else "critical"))
+        return jsonify({"project_id": pid, "score": score, "status": status, "total_tasks": total,
+                        "completed": completed, "blocked": blocked, "overdue": overdue,
+                        "completion_rate": round(completion_rate, 1)})
+
+@app.route("/api/risk-dashboard")
+@login_required
+def risk_dashboard():
+    with get_db() as db:
+        today = datetime.now().strftime("%Y-%m-%d")
+        risky = db.execute(
+            "SELECT t.*,u.name as assignee_name,p.name as project_name FROM tasks t "
+            "LEFT JOIN users u ON t.assignee=u.id LEFT JOIN projects p ON t.project=p.id "
+            "WHERE t.workspace_id=? AND t.deleted_at='' AND ("
+            "(t.due!='' AND t.due<? AND t.stage!='completed') OR t.stage='blocked' OR t.priority='critical'"
+            ") ORDER BY t.priority DESC, t.due ASC LIMIT 20",
+            (wid(), today)).fetchall()
+        blocked_by = db.execute(
+            "SELECT project,COUNT(*) as cnt FROM tasks WHERE workspace_id=? AND stage='blocked' AND deleted_at='' GROUP BY project",
+            (wid(),)).fetchall()
+        return jsonify({
+            "risky_tasks": [dict(t) for t in risky],
+            "blocked_by_project": [dict(r) for r in blocked_by],
+            "summary": {"total_risky": len(risky),
+                        "overdue": len([t for t in risky if t["due"] and t["due"][:10] < today]),
+                        "blocked": len([t for t in risky if t["stage"] == "blocked"]),
+                        "critical": len([t for t in risky if t["priority"] == "critical"])}
+        })
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EMAIL-TO-TASK & CSV IMPORT/EXPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/email-to-task", methods=["POST"])
+def email_to_task():
+    d = request.json or {}
+    token = request.headers.get("X-Email-Token", "") or d.get("token", "")
+    if not token: return jsonify({"error": "Token required"}), 401
+    rows = _raw_pg("SELECT id FROM workspaces WHERE invite_code=?", (token.upper(),), fetch=True)
+    if not rows: return jsonify({"error": "Invalid token"}), 401
+    ws_id = rows[0]["id"]
+    subject = d.get("subject", "Task from email")[:200]
+    body = d.get("body", "")[:2000]
+    from_email = d.get("from", "")
+    user_rows = _raw_pg("SELECT id FROM users WHERE workspace_id=? AND email=? LIMIT 1", (ws_id, from_email), fetch=True)
+    reporter_id = user_rows[0]["id"] if user_rows else ""
+    tid = f"T-email-{secrets.token_hex(4)}"
+    _raw_pg("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (tid, ws_id, subject, body, "", reporter_id, "medium", "backlog", ts(), "", 0, "[]", "", ""))
+    return jsonify({"ok": True, "task_id": tid})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPENAPI DOCS
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route("/api/docs")
+def openapi_docs():
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "Project Tracker API", "version": "5.0.0",
+                 "description": "Enterprise project management API — projectflow.app"},
+        "servers": [{"url": APP_URL or "/", "description": "Production"}],
+        "security": [{"bearerAuth": []}],
+        "components": {"securitySchemes": {
+            "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "pt_..."},
+            "sessionAuth": {"type": "apiKey", "in": "cookie", "name": "pf_session"}
+        }},
+        "paths": {
+            "/api/v1/tasks": {"get": {"summary": "List tasks", "tags": ["Tasks"]},
+                              "post": {"summary": "Create task", "tags": ["Tasks"]}},
+            "/api/v1/projects": {"get": {"summary": "List projects", "tags": ["Projects"]}},
+            "/api/incidents": {"get": {"summary": "List incidents", "tags": ["Incidents"]},
+                               "post": {"summary": "Create incident", "tags": ["Incidents"]}},
+            "/api/approvals": {"get": {"summary": "List approvals", "tags": ["Approvals"]},
+                               "post": {"summary": "Create approval", "tags": ["Approvals"]}},
+            "/api/releases": {"get": {"summary": "Release calendar", "tags": ["Releases"]}},
+            "/api/search": {"get": {"summary": "Full-text search", "tags": ["Search"],
+                                    "parameters": [{"name": "q", "in": "query", "required": True,
+                                                    "schema": {"type": "string"}}]}},
+            "/api/gdpr/export": {"get": {"summary": "Export personal data (GDPR)", "tags": ["GDPR"]}},
+            "/api/gdpr/delete": {"post": {"summary": "Delete personal data (GDPR)", "tags": ["GDPR"]}},
+        }
+    }
+    return jsonify(spec)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DB MIGRATIONS FOR NEW TABLES
+# ═══════════════════════════════════════════════════════════════════════════════
+def _run_v5_migrations():
+    new_ddls = [
+        "ALTER TABLE workspaces ADD COLUMN slack_webhook_url TEXT DEFAULT ''",
+        "ALTER TABLE workspaces ADD COLUMN github_client_id TEXT DEFAULT ''",
+        "ALTER TABLE workspaces ADD COLUMN github_client_secret TEXT DEFAULT ''",
+        "ALTER TABLE workspaces ADD COLUMN github_org TEXT DEFAULT ''",
+        """CREATE TABLE IF NOT EXISTS incidents (
+            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
+            severity TEXT DEFAULT 'medium', status TEXT DEFAULT 'open',
+            description TEXT DEFAULT '', affected_systems TEXT DEFAULT '[]',
+            timeline TEXT DEFAULT '[]', assignee TEXT DEFAULT '',
+            reporter TEXT, created TEXT, updated TEXT,
+            resolved_at TEXT DEFAULT '', rca TEXT DEFAULT '', postmortem TEXT DEFAULT '')""",
+        """CREATE TABLE IF NOT EXISTS approvals (
+            id TEXT PRIMARY KEY, workspace_id TEXT, entity_type TEXT,
+            entity_id TEXT, title TEXT, description TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending', requested_by TEXT,
+            approvers TEXT DEFAULT '[]', approved_by TEXT DEFAULT '[]',
+            rejected_by TEXT DEFAULT '', rejection_reason TEXT DEFAULT '',
+            created TEXT, updated TEXT, expires_at TEXT DEFAULT '')""",
+        """CREATE TABLE IF NOT EXISTS recurring_tasks (
+            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
+            description TEXT DEFAULT '', project TEXT DEFAULT '',
+            assignee TEXT DEFAULT '', priority TEXT DEFAULT 'medium',
+            stage TEXT DEFAULT 'backlog', frequency TEXT DEFAULT 'weekly',
+            day_of_week INTEGER DEFAULT 1, day_of_month INTEGER DEFAULT 1,
+            next_run TEXT, last_run TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+            created_by TEXT, created TEXT)""",
+        """CREATE TABLE IF NOT EXISTS github_repos (
+            id TEXT PRIMARY KEY, workspace_id TEXT, repo_full_name TEXT,
+            repo_url TEXT, github_token TEXT DEFAULT '',
+            connected_by TEXT, created TEXT)""",
+        """CREATE TABLE IF NOT EXISTS github_events (
+            id TEXT PRIMARY KEY, workspace_id TEXT, repo_id TEXT,
+            event_type TEXT, payload TEXT DEFAULT '{}',
+            task_id TEXT DEFAULT '', created TEXT)""",
+        """CREATE TABLE IF NOT EXISTS feature_flags (
+            id TEXT PRIMARY KEY, workspace_id TEXT, flag_name TEXT,
+            enabled INTEGER DEFAULT 0, config TEXT DEFAULT '{}', updated TEXT)""",
+        """CREATE TABLE IF NOT EXISTS release_calendar (
+            id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT,
+            release_date TEXT, project TEXT DEFAULT '',
+            status TEXT DEFAULT 'planned', environment TEXT DEFAULT 'production',
+            notes TEXT DEFAULT '', created_by TEXT, created TEXT)""",
+        """CREATE TABLE IF NOT EXISTS on_call_schedules (
+            id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT,
+            members TEXT DEFAULT '[]', current_oncall TEXT DEFAULT '',
+            rotation_days INTEGER DEFAULT 7, started_at TEXT, created TEXT)""",
+        "CREATE INDEX IF NOT EXISTS idx_incidents_ws ON incidents(workspace_id,status)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_ws ON approvals(workspace_id,status)",
+        "CREATE INDEX IF NOT EXISTS idx_recurring_ws ON recurring_tasks(workspace_id,next_run)",
+        "CREATE INDEX IF NOT EXISTS idx_github_repos ON github_repos(workspace_id)",
+    ]
+    for ddl in new_ddls:
+        _run_ddl(ddl)
+
+try:
+    _run_v5_migrations()
+except Exception as _v5e:
+    log.warning("[v5_migrations] %s", _v5e)
+
+
 if __name__=="__main__":
-    print("\n⚡ Project Tracker v4.0 — Multi-Tenant | AI | Workspaces")
+    print("\n⚡ Project Tracker v5.0 — Enterprise Edition — Multi-Tenant | AI | Workspaces")
     print("="*54)
     print("  Initializing database...")
     init_db()

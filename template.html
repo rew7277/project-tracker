@@ -140,23 +140,33 @@ window._pfPushUnsubscribe = async function(){
 })();
 </script>
 
+<link rel="dns-prefetch" href="https://fonts.googleapis.com"/>
+<link rel="dns-prefetch" href="https://fonts.gstatic.com"/>
+<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com"/>
+<link rel="dns-prefetch" href="https://unpkg.com"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet"/>
 <script>
 (function(){
-  var libs=[
-    'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js', 'https://unpkg.com/htm@3.1.1/dist/htm.js', 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js', ];
-  function loadNext(i){
-    if(i>=libs.length)return;
+  // Load independent libs in parallel; React-DOM depends on React so those are ordered.
+  var parallelLibs=[
+    'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js',
+    'https://unpkg.com/htm@3.1.1/dist/htm.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js',
+  ];
+  function addScript(src,cb){
     var s=document.createElement('script');
-    s.src=libs[i];
-    s.crossOrigin='anonymous';
-    s.onload=function(){loadNext(i+1);};
-    s.onerror=function(){loadNext(i+1);};
+    s.src=src;s.crossOrigin='anonymous';
+    if(cb){s.onload=cb;s.onerror=cb;}
     document.head.appendChild(s);
   }
-  loadNext(0);
+  // React → ReactDOM (must be sequential), then everything else in parallel
+  addScript('https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',function(){
+    addScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js');
+  });
+  parallelLibs.forEach(function(src){addScript(src);});
 })();
 </script>
 <style>
@@ -840,10 +850,13 @@ function AppLoader(){
   </div>`;
 }
 
+// Global abort controller — cancelled on logout to kill all in-flight requests
+let _apiAbortCtrl = new AbortController();
 const api={
+  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get: async (u) => {
     try {
-      const r = await fetch(u, {credentials: 'include'});
+      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal});
       if (!r.ok) {
         if (r.status === 401) {
           console.warn('[API] 401 Unauthorized:', u);
@@ -854,6 +867,7 @@ const api={
       }
       return await r.json();
     } catch (e) {
+      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -873,6 +887,7 @@ const api={
       }
       return await r.json();
     } catch (e) {
+      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -1020,7 +1035,7 @@ function AuthScreen({onLogin}){
     const s=document.createElement('style');
     s.id=id;
     s.textContent=`
-      @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,300;400;700;800&family=Inter:wght@300;400;500;600&display=swap');
+      /* fonts loaded in <head> */
 
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
@@ -8513,17 +8528,17 @@ function App(){
   // Presence heartbeat — ping every 30s, fetch online users every 15s
   useEffect(()=>{
     if(!cu)return;
-    const fetchPresence=()=>api.get('/api/presence').then(ids=>{
+    const fetchPresence=()=>api.get('/api/presence').then(ids=>{\
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    // Fire immediately on mount
-    fetchPresence(); // fetch current online users right away (don't wait for beat)
-    beat();          // then beat + fetch again
-    const beatId=setInterval(beat,15000);
-    window.addEventListener('focus',()=>{beat();});
-    const presId=setInterval(fetchPresence,20000); // reduced 8s→20s
-    return()=>{clearInterval(beatId);clearInterval(presId);};
+    // Fire beat immediately on mount (beat already calls fetchPresence — no double-fetch)
+    beat();
+    const beatId=setInterval(beat,30000); // 15s→30s: heartbeat every 30s
+    const onFocus=()=>{beat();};
+    window.addEventListener('focus',onFocus);
+    const presId=setInterval(fetchPresence,30000); // passive refresh every 30s
+    return()=>{clearInterval(beatId);clearInterval(presId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -8574,8 +8589,8 @@ function App(){
     try{
       const projUrl=tCtx?'/api/projects?team_id='+tCtx:'/api/projects';
       const taskUrl=tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks';
-      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw]=await Promise.all([
-        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'), ]);
+      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw,rems]=await Promise.all([
+        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'),api.get('/api/reminders'), ]);
       
       // Handle 401 errors - API returns null for auth failures
       if (users === null || projects === null || tasks === null) {
@@ -8591,7 +8606,6 @@ function App(){
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
-      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
   },[cu,teamCtx]);
@@ -8812,11 +8826,16 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
-    try{ await api.post('/api/auth/logout',{}); }catch(e){}
+    // 1. Abort all in-flight API requests immediately so polling stops
+    api._abort();
+    // 2. Unsubscribe from push notifications
+    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
+    // 3. Call logout endpoint (best-effort, don't await — we're leaving anyway)
+    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+    // 4. Clear React state
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // Redirect to login immediately — clears all state and shows auth page
-    window.location.href='/?action=login';
+    // 5. Hard redirect — instant, no waiting for any network
+    window.location.replace('/?action=login');
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
@@ -8839,7 +8858,7 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      const due=await api.get('/api/reminders/due');
+      const [due,rems]=await Promise.all([api.get('/api/reminders/due'),api.get('/api/reminders')]);
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
           addToast('reminder','⏰ Reminder: '+r.task_title,'Click to view');
@@ -8850,7 +8869,6 @@ function App(){
           playSound('reminder');
         });
       }
-      const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){
         const now=new Date();
         rems.forEach(r=>{
