@@ -325,15 +325,15 @@ def compress_response(response):
 
 @app.after_request
 def bust_cache_on_write(response):
-    """Auto-bust the appdata cache for the current workspace on any
-    successful write operation (POST/PUT/PATCH/DELETE).
-    This ensures stale-while-revalidate never serves data older than 1 poll cycle
-    after a mutation — without requiring manual _cache_bust in every endpoint."""
-    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-        if response.status_code in (200, 201, 204):
-            ws = session.get("workspace_id", "")
-            if ws:
-                _cache_bust_ws(ws)
+    """Auto-bust cache on writes — ONLY for endpoints that don't already call
+    _cache_bust/_cache_bust_ws themselves. Uses targeted per-table bust instead
+    of full workspace bust to avoid the 30-second slowness on every mutation.
+    Endpoints like create_project, create_task already call _cache_bust directly,
+    so we skip those paths here."""
+    # NOTE: Individual endpoints call _cache_bust() with specific table names.
+    # A full _cache_bust_ws here would wipe ALL cached data on every POST/PUT/DELETE,
+    # forcing every subsequent API call to re-hit the DB — causing 30s perceived lag.
+    # Do NOT call _cache_bust_ws here. Endpoints manage their own cache invalidation.
     return response
 
 # ── Per-request CSP nonce (stored in Flask g) ────────────────────────────────
@@ -3863,8 +3863,8 @@ def due_reminders():
             try:
                 with get_db() as db:
                     db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-                # Bust appdata cache so next poll gets updated fired status
-                _cache_bust_ws(ws)
+                # Bust reminders cache so next poll gets updated fired status
+                _cache_bust(ws, "reminders")
             except Exception: pass
         return jsonify(due)
     # Fallback: hit DB directly
