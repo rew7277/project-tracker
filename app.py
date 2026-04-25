@@ -2119,9 +2119,9 @@ def get_app_data():
     proj_sql = ("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC"
                 if team_id else
                 "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC")
-    task_sql = ("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' ORDER BY created DESC"
+    task_sql = ("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500"
                 if team_id else
-                "SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC")
+                "SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500")
     now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
     uid = session["user_id"]
     with get_db() as db:
@@ -2130,8 +2130,10 @@ def get_app_data():
         users     = [dict(r) for r in db.execute("SELECT id,name,email,role,avatar_data,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",(ws,)).fetchall()]
         projects  = [dict(r) for r in db.execute(proj_sql, proj_params).fetchall()]
         tasks     = [dict(r) for r in db.execute(task_sql, task_params).fetchall()]
-        notifs    = [dict(r) for r in db.execute("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY created DESC LIMIT 50",(ws,uid)).fetchall()]
-        dm_unread_rows = db.execute("SELECT sender_id,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient_id=? AND read=0 GROUP BY sender_id",(ws,uid)).fetchall()
+        # notifications: sort by 'ts' (not 'created' — that column doesn't exist on this table)
+        notifs    = [dict(r) for r in db.execute("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY ts DESC LIMIT 50",(ws,uid)).fetchall()]
+        # dm_unread: columns are 'sender'/'recipient', not 'sender_id'/'recipient_id'
+        dm_unread_rows = db.execute("SELECT sender,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",(ws,uid)).fetchall()
         dm_unread = [dict(r) for r in dm_unread_rows]
         ws_row    = db.execute("SELECT * FROM workspaces WHERE id=?",(ws,)).fetchone()
         teams     = [dict(r) for r in db.execute("SELECT * FROM teams WHERE workspace_id=?",(ws,)).fetchall()]
