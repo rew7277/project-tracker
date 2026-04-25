@@ -106,15 +106,15 @@ async function _pfSetupPush(reg){
 }
 
 function _pfSendSubToServer(sub){
-  // Guard: only call push/subscribe if the user session is active (avoid 401 in console)
-  fetch('/api/auth/me',{credentials:'include'}).then(function(r){
-    if(!r.ok) return; // not authenticated — skip silently
-    var subJson = sub.toJSON();
-    return fetch('/api/push/subscribe',{
-      method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-        endpoint: subJson.endpoint, keys: subJson.keys
-      })
-    });
+  // Guard: only send push subscription if React has confirmed an active session.
+  // window._pfCurrentUser is set by the App useEffect after /api/auth/me succeeds,
+  // preventing a redundant 401 call before auth state is resolved.
+  if(!window._pfCurrentUser) return;
+  var subJson = sub.toJSON();
+  fetch('/api/push/subscribe',{
+    method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      endpoint: subJson.endpoint, keys: subJson.keys
+    })
   }).catch(function(){});
 }
 
@@ -8630,7 +8630,7 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
       else {
         // Got a response but errored (e.g. 401 not logged in) — show login instantly
         try{localStorage.removeItem('pf_had_session');}catch{}
@@ -8851,6 +8851,7 @@ function App(){
     fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
     // 4. Clear React state
     try{localStorage.removeItem('pf_had_session');}catch{} // clear session cache on logout
+    window._pfCurrentUser=null;
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
     // 5. Hard redirect — instant, no waiting for any network
     window.location.replace('/?action=login');
