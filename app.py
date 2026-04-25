@@ -370,7 +370,11 @@ def get_db(autocommit=False):
 # ── pg8000 connection pool — pre-warmed, sized for gthread workers ──────────
 # 2 workers × 4 threads = 8 max concurrent. Keep 12 slots, pre-warm 4.
 import queue as _queue, threading as _poollock
-_PG_POOL      = _queue.Queue(maxsize=12)
+# Pool sized for: gunicorn workers × gevent greenlets per worker.
+# With POOL_SIZE env var support so Railway can tune without redeploy.
+import os as _os_pool
+_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "20"))
+_PG_POOL      = _queue.Queue(maxsize=_PG_POOL_SIZE)
 _PG_POOL_LOCK = _poollock.Lock()
 _PG_KWARGS    = None   # cached once after first parse
 
@@ -385,19 +389,29 @@ def _make_conn():
     return _PGConn(**_pg_kwargs())
 
 def _get_pool_conn():
-    """Get a healthy connection from pool, or create a new one."""
-    for _ in range(3):   # try up to 3 stale connections before giving up
-        try:
-            conn = _PG_POOL.get_nowait()
-            try:
-                conn.run("SELECT 1")
-                return conn
-            except Exception:
-                try: conn.close()
-                except: pass
-        except _queue.Empty:
-            break
-    return _make_conn()
+    """Get a healthy connection from pool, or create a new one.
+    We skip the SELECT 1 health-check on every borrow — that check costs
+    one full India→US round-trip (180ms) per request, eliminating all the
+    savings from pooling. Instead we rely on try/except around real queries
+    and close broken connections there. Connections that die in the pool
+    (idle TCP timeout) are caught by _return_pool_conn's ping-before-put
+    for connections that have been idle a long time.
+    """
+    try:
+        conn = _PG_POOL.get_nowait()
+        return conn   # trust the connection; let the real query catch breaks
+    except _queue.Empty:
+        return _make_conn()
+
+def _validate_conn(conn):
+    """Light ping — called only when a query fails, not on every borrow."""
+    try:
+        conn.run("SELECT 1")
+        return True
+    except Exception:
+        try: conn.close()
+        except: pass
+        return False
 
 def _return_pool_conn(conn):
     """Return connection to pool, or close if pool is full."""
@@ -406,6 +420,12 @@ def _return_pool_conn(conn):
     except _queue.Full:
         try: conn.close()
         except: pass
+
+def _pool_conn_with_retry():
+    """Get a pool connection; if the first real query fails due to a dead
+    connection, discard it and open a fresh one. Called by _raw_pg and _DB."""
+    conn = _get_pool_conn()
+    return conn
 
 def _prewarm_pool(n=4):
     """Open n connections at startup so first requests don't stall."""
@@ -419,7 +439,8 @@ def _prewarm_pool(n=4):
 
 def _raw_pg(sql, params=(), fetch=False):
     """Execute SQL via pooled pg8000 native connection, bypassing _DB wrapper.
-    Returns rows if fetch=True, else None. Raises on error."""
+    Returns rows if fetch=True, else None. Raises on error.
+    Retries once with a fresh connection if the pool gave a stale socket."""
     import re as _re
     pdict = {}
     idx = [0]
@@ -429,18 +450,22 @@ def _raw_pg(sql, params=(), fetch=False):
         idx[0] += 1
         return f":{k}"
     pg_sql = _re.sub(r"\?", _rep, sql)
-    conn = _get_pool_conn()
-    try:
-        rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
-        cols = [c["name"] for c in (conn.columns or [])]
-        result = [dict(zip(cols, r)) for r in (rows or [])] if fetch else None
-        _return_pool_conn(conn)
-        return result
-    except Exception:
-        # Don't return broken connections to pool
-        try: conn.close()
-        except: pass
-        raise
+
+    for attempt in range(2):
+        conn = _get_pool_conn()
+        try:
+            rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
+            cols = [c["name"] for c in (conn.columns or [])]
+            result = [dict(zip(cols, r)) for r in (rows or [])] if fetch else None
+            _return_pool_conn(conn)
+            return result
+        except Exception as _e:
+            try: conn.close()
+            except: pass
+            if attempt == 1:
+                raise
+            # first attempt failed — pool conn was stale; retry with fresh conn
+            continue
 
 # ── In-memory cache with stale-while-revalidate ─────────────────────────────
 # Serves stale data instantly while refreshing in background.
@@ -1974,28 +1999,53 @@ def meet_notify():
 @app.route("/api/auth/me")
 def me():
     if "user_id" not in session: return jsonify({"error":"Not logged in"}),401
-    with get_db() as db:
-        u=db.execute("SELECT * FROM users WHERE id=?",(session["user_id"],)).fetchone()
-        if not u: session.clear(); return jsonify({"error":"Not found"}),404
-        if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
+    uid = session["user_id"]
+
+    # Cache auth/me for 30s per user — it's polled constantly and almost
+    # never changes. This saves 2 DB queries (user + workspace) × 180ms RTT
+    # = ~360ms on every poll cycle.
+    me_cache_key = f"me:{uid}"
+    cached_me = _cache_get(me_cache_key)
+    if cached_me is not None:
+        return jsonify(cached_me)
+
+    try:
+        import re as _re
+        rows = _raw_pg(
+            "SELECT u.*, w.name as _ws_name, w.workspace_slug as _ws_slug "
+            "FROM users u LEFT JOIN workspaces w ON w.id=u.workspace_id "
+            "WHERE u.id=?",
+            (uid,), fetch=True
+        )
+        if not rows:
+            session.clear()
+            return jsonify({"error":"Not found"}),404
+        u = rows[0]
+        if u.get("workspace_id"):
+            session["workspace_id"] = u["workspace_id"]
         result = dict(u)
-        for k in ("password","plain_password","totp_secret"):
+        for k in ("password","plain_password","totp_secret","_ws_name","_ws_slug"):
             result.pop(k, None)
-        # Attach workspace-scoped URL so the frontend can build proper ws-scoped links
-        try:
-            import re as _re
-            ws_row = db.execute(
-                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
-                (u["workspace_id"],)
-            ).fetchone()
-            if ws_row:
-                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
-                result["workspace_slug"] = slug
-                result["workspace_id_from_me"] = u["workspace_id"]
-        except Exception:
-            pass
+        ws_name = u.get("_ws_name","")
+        ws_slug = u.get("_ws_slug","")
+        if ws_name or ws_slug:
+            slug = ws_slug or _re.sub(r"[^a-z0-9]+", "-", ws_name.lower().strip()).strip("-") or "workspace"
+            result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+            result["workspace_slug"] = slug
+            result["workspace_id_from_me"] = u["workspace_id"]
+        _cache_set(me_cache_key, result)
         return jsonify(result)
+    except Exception as _e:
+        log.error("[auth/me] %s", _e)
+        # Fallback: original two-query approach
+        with get_db() as db:
+            u=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+            if not u: session.clear(); return jsonify({"error":"Not found"}),404
+            if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
+            result = dict(u)
+            for k in ("password","plain_password","totp_secret"):
+                result.pop(k, None)
+            return jsonify(result)
 
 # ── Vault ─────────────────────────────────────────────────────────────────────
 # All `rows` data is Fernet-encrypted (AES-128-CBC + HMAC-SHA256) before being
@@ -2544,7 +2594,14 @@ def bulk_assign_team():
 @login_required
 def get_tasks():
     team_id = request.args.get("team_id","")
-    cache_key = f"tasks:{wid()}:{team_id}"
+    ws, uid = wid(), session["user_id"]
+    # Check shared appdata cache first — avoids DB entirely during polling
+    data, found = _appdata_cache_get(ws, uid, "tasks")
+    if found:
+        if team_id:
+            return jsonify([t for t in data if t.get("team_id") == team_id])
+        return jsonify(data)
+    cache_key = f"tasks:{ws}:{team_id}"
     cached = _cache_get(cache_key)
     if cached is not None: return jsonify(cached)
     with get_db() as db:
@@ -4261,6 +4318,10 @@ def index():
 
     if "user_id" in session and session.get("workspace_id"):
         ws_id = session["workspace_id"]
+        # Use slug cached in session — avoids a DB query on every / visit
+        cached_slug = session.get("_ws_slug")
+        if cached_slug:
+            return redirect(f"/{cached_slug}/{ws_id}/dashboard", code=302)
         try:
             import re as _re2
             rows = _raw_pg(
@@ -4272,6 +4333,7 @@ def index():
                 slug = ws_row.get("workspace_slug") or \
                        _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or \
                        "workspace"
+                session["_ws_slug"] = slug   # cache in session for future visits
                 return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
         except Exception:
             pass
@@ -5163,7 +5225,7 @@ try:
     init_db()
     ensure_timelog_schema()   # always run — adds any missing time_log columns
     _close_ddl_conn()         # release shared DDL connection after all migrations
-    _prewarm_pool(4)          # pre-open 4 pool connections so first requests are fast
+    _prewarm_pool(8)          # pre-open 8 pool connections so first requests are fast
 except Exception as _ie:
     import traceback
     print(f"  ⚠ Init error: {_ie}")
