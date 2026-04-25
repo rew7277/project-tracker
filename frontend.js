@@ -1796,7 +1796,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
 }
 
 /* ─── ProjectDetail ───────────────────────────────────────────────────────── */
-function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,onSetReminder,teams,activeTeam}){
+function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,onSetReminder,teams,activeTeam}){
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
@@ -1828,7 +1828,16 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,onSetRemin
     await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
     await onReload();setSaving(false);setEdit(false);
   };
-  const delProject=async()=>{if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;await api.del('/api/projects/'+project.id);await onReload();onClose();};
+  const delProject=async()=>{
+    if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
+    onClose(); // close modal immediately for snappy feel
+    // Optimistic: remove project + its tasks from UI right away
+    setData&&setData(prev=>({...prev,
+      projects:prev.projects.filter(p=>p.id!==project.id),
+      tasks:prev.tasks.filter(t=>t.project!==project.id)
+    }));
+    api.del('/api/projects/'+project.id).then(()=>onReload()).catch(()=>onReload());
+  };
   const saveTask=async p=>{
     let r;
     if(p.id&&allTasks.find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
@@ -1983,7 +1992,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,onSetRemin
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
+function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -2073,9 +2082,8 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      await new Promise(r=>setTimeout(r,300));
-      await reload();
-      setTimeout(()=>reload(),1000);
+      // Optimistic: inject new project immediately, then sync once in background
+      reload();
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
 
@@ -2293,7 +2301,7 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
         </div>`:null}
 
       ${detail?html`<${ProjectDetail} project=${detail} allTasks=${tasks} allUsers=${users} cu=${cu}
-        onClose=${()=>setDetail(null)} onReload=${reload} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
+        onClose=${()=>setDetail(null)} onReload=${reload} setData=${setData} onSetReminder=${onSetReminder} teams=${teams} activeTeam=${activeTeam}/>`:null}
     </div>`;
 }
 
@@ -2302,7 +2310,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2413,9 +2421,17 @@ function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,in
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
+    // Optimistic: reflect change immediately, server will confirm
+    if(p.id){
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+    }
     reload();return r;
   };
-  const delT=async id=>{await api.del('/api/tasks/'+id);reload();};
+  const delT=async id=>{
+    // Optimistic: remove from UI immediately
+    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
+    api.del('/api/tasks/'+id).then(()=>reload()).catch(()=>reload());
+  };
   const quickStage=async(tid,stage)=>{
     const autoPct=STAGE_PCT[stage];
     const payload={stage};
@@ -2425,7 +2441,9 @@ function TasksView({tasks,projects,users,cu,reload,onSetReminder,initialStage,in
       const tk=safe(tasks).find(t=>t.id===tid);
       if(tk)triggerTaskCelebration(tk.title,tk.project);
     }
-    await api.put('/api/tasks/'+tid,payload);reload();
+    // Optimistic: update stage in UI immediately
+    setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tid?{...t,...payload}:t)}));
+    api.put('/api/tasks/'+tid,payload).then(()=>reload()).catch(()=>reload());
   };
 
   // Export filtered tasks as CSV
@@ -7301,8 +7319,8 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
-            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
+            ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}

@@ -216,6 +216,20 @@ class _DB:
         self.close()
         return False
 
+class _PooledDB(_DB):
+    """Like _DB but returns connection to pool on exit instead of closing it."""    def __init__(self, conn, autocommit=False):
+        super().__init__(conn)
+        self._autocommit = autocommit
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self._autocommit:
+            try:
+                if exc_type: self._conn.run("ROLLBACK")
+                else: self._conn.run("COMMIT")
+            except Exception: pass
+        # Return to pool instead of closing — this is the key perf improvement
+        _return_pool_conn(self._conn)
+        return False
+
 def get_secret_key():
     env_key = os.environ.get("SECRET_KEY","")
     if len(env_key) >= 32: return env_key
@@ -301,13 +315,15 @@ def add_security_headers(response):
 CLRS=["#7c3aed","#2563eb","#059669","#d97706","#dc2626","#ec4899","#0891b2","#5a8cff"]
 
 def get_db(autocommit=False):
-    conn = pg8000.native.Connection(**_parse_db_url(DATABASE_URL))
-    conn.autocommit = autocommit  # pg8000 supports autocommit property
-    return _DB(conn)
+    """Get a DB wrapper using the connection pool for performance.
+    Falls back to a fresh connection if pool is exhausted."""    conn = _get_pool_conn()
+    conn.autocommit = autocommit
+    # Wrap with a pool-returning _DB
+    return _PooledDB(conn, autocommit=autocommit)
 
 # ── Simple pg8000 connection pool (3 reusable connections) ──────────────────
 import queue as _queue, threading as _poollock
-_PG_POOL = _queue.Queue(maxsize=5)
+_PG_POOL = _queue.Queue(maxsize=10)  # increased from 5→10 for concurrent requests
 _PG_POOL_LOCK = _poollock.Lock()
 
 def _get_pool_conn():
@@ -358,6 +374,35 @@ def _raw_pg(sql, params=(), fetch=False):
         try: conn.close()
         except: pass
         raise
+
+# ── Simple in-memory response cache (TTL-based) ─────────────────────────────
+import time as _time
+_CACHE: dict = {}
+_CACHE_TTL = 4  # seconds — short enough to feel fresh, long enough to help burst clicks
+
+def _cache_get(key):
+    entry = _CACHE.get(key)
+    if entry and (_time.time() - entry["ts"]) < _CACHE_TTL:
+        return entry["val"]
+    return None
+
+def _cache_set(key, val):
+    _CACHE[key] = {"val": val, "ts": _time.time()}
+
+def _cache_bust(workspace_id, *tables):
+    """Invalidate cache entries for the given workspace + tables on write ops."""
+    for key in list(_CACHE.keys()):
+        if workspace_id in key:
+            for t in tables:
+                if t in key:
+                    _CACHE.pop(key, None)
+                    break
+
+def _cache_bust_ws(workspace_id):
+    """Bust ALL cache entries for a workspace (used on destructive ops)."""
+    for key in list(_CACHE.keys()):
+        if workspace_id in key:
+            _CACHE.pop(key, None)
 
 def _run_ddl(sql):
     """Run a single DDL statement in its own fresh connection. Never raises."""
@@ -2041,6 +2086,9 @@ def get_projects_last_messages():
 @login_required
 def get_projects():
     team_id = request.args.get("team_id","")
+    cache_key = f"projects:{wid()}:{team_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None: return jsonify(cached)
     with get_db() as db:
         if team_id:
             rows = db.execute(
@@ -2049,7 +2097,9 @@ def get_projects():
         else:
             rows = db.execute(
                 "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (wid(),)).fetchall()
-        return jsonify([dict(r) for r in rows])
+        result = [dict(r) for r in rows]
+        _cache_set(cache_key, result)
+        return jsonify(result)
 
 @app.route("/api/projects",methods=["POST"])
 @login_required
@@ -2075,6 +2125,7 @@ def create_project():
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
+        _cache_bust_ws(wid())  # new project — bust all cache
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
@@ -2106,6 +2157,7 @@ def update_project(pid):
             threading.Thread(target=push_notification_to_user,
                 args=(db,uid,f"📁 Project updated: {updated['name']}",
                       f"{aname} made changes to '{updated['name']}'","/"),daemon=True).start()
+        _cache_bust(wid(), "projects")
         return jsonify(dict(updated))
 
 @app.route("/api/projects/<pid>",methods=["DELETE"])
@@ -2119,6 +2171,7 @@ def del_project(pid):
         db.execute("DELETE FROM projects WHERE id=? AND workspace_id=?",(pid,wid()))
         db.execute("DELETE FROM tasks WHERE project=? AND workspace_id=?",(pid,wid()))
         db.execute("DELETE FROM files WHERE project_id=? AND workspace_id=?",(pid,wid()))
+        _cache_bust_ws(wid())  # project + tasks gone — bust all
         return jsonify({"ok":True})
 
 @app.route("/api/projects/bulk-assign-team",methods=["POST"])
@@ -2142,6 +2195,9 @@ def bulk_assign_team():
 @login_required
 def get_tasks():
     team_id = request.args.get("team_id","")
+    cache_key = f"tasks:{wid()}:{team_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None: return jsonify(cached)
     with get_db() as db:
         if team_id:
             team = db.execute("SELECT member_ids FROM teams WHERE id=? AND workspace_id=?",(team_id,wid())).fetchone()
@@ -2158,10 +2214,14 @@ def get_tasks():
                 {f"assignee IN ({placeholders_m})" if member_ids else "1=0"}
             ) ORDER BY created DESC LIMIT 500"""
             params = [wid(), team_id] + proj_ids + member_ids
-            return jsonify([dict(r) for r in db.execute(sql, params).fetchall()])
+            result = [dict(r) for r in db.execute(sql, params).fetchall()]
+            _cache_set(f"tasks:{wid()}:{team_id}", result)
+            return jsonify(result)
         # Limit to 500 most recent — prevents huge payloads on large workspaces
-        return jsonify([dict(r) for r in db.execute(
-            "SELECT * FROM tasks WHERE workspace_id=? ORDER BY created DESC LIMIT 500",(wid(),)).fetchall()])
+        result = [dict(r) for r in db.execute(
+            "SELECT * FROM tasks WHERE workspace_id=? ORDER BY created DESC LIMIT 500",(wid(),)).fetchall()]
+        _cache_set(f"tasks:{wid()}:", result)
+        return jsonify(result)
 
 def next_task_id(db, ws):
     import time
@@ -2223,6 +2283,7 @@ def create_task():
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
+        _cache_bust(wid(), "tasks")
         return jsonify(dict(t))
 
 
@@ -2365,6 +2426,7 @@ def update_task(tid):
                     args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
                           f"{cname}: {latest.get('text','')[:80]}", "/"),
                     daemon=True).start()
+        _cache_bust(wid(), "tasks")
         return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
 
 
@@ -2431,6 +2493,7 @@ def del_task(tid):
         if cu_role not in ("Admin","Manager","TeamLead"):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
         db.execute("DELETE FROM tasks WHERE id=? AND workspace_id=?",(tid,wid()))
+        _cache_bust(wid(), "tasks")
         return jsonify({"ok":True})
 
 # ── Files ─────────────────────────────────────────────────────────────────────
