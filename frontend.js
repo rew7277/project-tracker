@@ -1,15 +1,3 @@
-// ── Workspace URL prefix bootstrap ─────────────────────────────────────────
-// Set _pfWsBase immediately from the current URL if it looks ws-scoped.
-// This runs synchronously before React mounts, so _wsPath works from frame 0.
-(function(){
-  try{
-    var p=window.location.pathname.split('/');
-    // ws-scoped pattern: /slug/wsXXX/page  → p[2] starts with 'ws'
-    if(p.length>=3&&p[2]&&p[2].startsWith('ws')){
-      window._pfWsBase='/'+p[1]+'/'+p[2]+'/dashboard';
-    }
-  }catch(e){}
-})();
 const {useState,useEffect,useRef,useCallback,useMemo}=React;
 const RC=Recharts;
 
@@ -47,15 +35,8 @@ function AppLoader(){
   </div>`;
 }
 
-// Global abort controller — cancelled on logout to stop all in-flight requests
-let _apiAbortCtrl = new AbortController();
 const api={
-  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:u=>fetch(u,{credentials:'include',signal:_apiAbortCtrl.signal}).then(r=>r.json()).catch(e=>{if(e.name==='AbortError')return null;return {};}),
-  post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})),
-  upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
+  get:u=>fetch(u,{credentials:'include'}).then(r=>r.json()).catch(()=>({})), post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})), del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})), upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
 };
 
 const STAGES={
@@ -2016,24 +1997,14 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      // Build ws-scoped project URL if possible
-      try{
-        const dashUrl=window._pfWsBase||window.location.pathname;
-        const wsParts=dashUrl.split('/');
-        const wsBase=(wsParts.length>=3&&wsParts[2]&&wsParts[2].startsWith('ws'))?'/'+wsParts[1]+'/'+wsParts[2]:'';
-        history.pushState(null,'',wsBase+'/projects/'+slug);
-      }catch(_){history.pushState(null,'','/projects/'+slug);}
+      history.pushState(null,'','/projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      const _cp=window.location.pathname;
-      if(_cp.includes('/projects/')){
-        // Restore to ws-scoped /projects or bare /projects
-        const _wsParts=_cp.split('/');
-        const _wsBase=(_wsParts.length>=3&&_wsParts[2]&&_wsParts[2].startsWith('ws'))?'/'+_wsParts[1]+'/'+_wsParts[2]:'';
-        history.pushState(null,'',_wsBase+'/projects');
+      if(window.location.pathname.startsWith('/projects/')){
+        history.pushState(null,'','/projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2044,15 +2015,13 @@ function ProjectsView({projects,tasks,users,cu,reload,onSetReminder,teams,active
   useEffect(()=>{
     const onPop=()=>{
       const parts=window.location.pathname.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        const p=safe(projects).find(proj=>proj.id===pidSeg);
+      if(parts[1]==='projects'&&parts[2]){
+        const p=safe(projects).find(proj=>proj.id===parts[2]);
         if(p){setDetail(p);return;}
       }
-      if(projSeg==='projects'&&!pidSeg){setDetail(null);}
+      if(window.location.pathname==='/projects'||window.location.pathname==='/projects/'){
+        setDetail(null);
+      }
     };
     window.addEventListener('popstate',onPop);
     return()=>window.removeEventListener('popstate',onPop);
@@ -5214,19 +5183,29 @@ INSTRUCTIONS:
     const history=messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-12).map(m=>({role:m.role,content:m.content}));
     history.push({role:'user',content:text});
 
-    // Route ALL AI calls through backend — API key never exposed to browser
+    // Check for API key
+    const ws=await api.get('/api/workspace');
+    if(!ws.ai_api_key){
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.\n\nYou can get a key at [anthropic.com](https://anthropic.com).'}:msg));
+      setSending(false);scrollToBottom();return;
+    }
+
     try{
-      const r=await api.post('/api/ai/chat',{message:text,history:messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-10).map(m=>({role:m.role,content:m.content}))});
-      if(r.error==='NO_KEY'){
-        setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.'}:msg));
-        setSending(false);scrollToBottom();return;
+      const r=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-api-key':ws.ai_api_key,'anthropic-version':'2023-06-01'},
+        body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:3000,system:systemPrompt,messages:history})
+      });
+      if(!r.ok){
+        const e=await r.json().catch(()=>({}));
+        throw new Error(e.error?.message||'API error '+r.status);
       }
-      if(r.error){throw new Error(r.message||r.error);}
-      const reply=r.message||'Sorry, I could not generate a response.';
+      const data=await r.json();
+      const reply=data.content?.[0]?.text||'Sorry, I could not generate a response.';
       setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'assistant',content:reply}:msg));
     }catch(e){
       const errMsg=e.message||'Network error';
-      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nCheck your API key in Workspace Settings.`}:msg));
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nPlease check your API key in Workspace Settings.`}:msg));
     }
     setSending(false);scrollToBottom();
     // Auto-save to recents after AI responds
@@ -6704,14 +6683,9 @@ function App(){
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      const parts=p.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>  → parts[3]==='projects'
-      // bare:      /projects/<pid>                    → parts[1]==='projects'
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        setInitialProjectId(pidSeg);
+      if(p.startsWith('/projects/')&&p.length>10){
+        const pid=p.split('/')[2];
+        if(pid)setInitialProjectId(pid);
         setView('projects');
       }
     }catch(e){}
@@ -6719,9 +6693,7 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const p = wsView || parts[0].trim();
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -6729,13 +6701,8 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-      // bare:      /<view>                     → parts[0]
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const bareView = parts[0].trim();
-      const candidate = wsView || bareView;
-      if(candidate && VALID_VIEWS.includes(candidate)) return candidate;
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
@@ -6749,50 +6716,21 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
-  // Build ws-scoped path helper — reads prefix from multiple sources for robustness
-  const _wsPath=useCallback((page)=>{
-    try{
-      // Source 1: window._pfWsBase set synchronously on login / /api/auth/me
-      const base=window._pfWsBase;
-      if(base){
-        const p=base.split('/');
-        // p = ['','fsbl','ws123','dashboard']
-        if(p.length>=3&&p[2]&&p[2].startsWith('ws'))
-          return '/'+p[1]+'/'+p[2]+'/'+page;
-      }
-      // Source 2: current URL is already ws-scoped (e.g. /fsbl/ws123/dashboard)
-      const loc=window.location.pathname.split('/');
-      if(loc.length>=3&&loc[2]&&loc[2].startsWith('ws'))
-        return '/'+loc[1]+'/'+loc[2]+'/'+page;
-      // Source 3: React state cu (may be null on first render)
-      const url=cu&&cu.workspace_dashboard_url;
-      if(url){
-        const parts=url.split('/');
-        if(parts.length>=3&&parts[2]&&parts[2].startsWith('ws'))
-          return '/'+parts[1]+'/'+parts[2]+'/'+page;
-      }
-    }catch(e){}
-    return '/'+page; // last-resort fallback
-  },[cu]);
   const _setView=useCallback((v)=>{
     setView(v);
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'',_wsPath(base));
+        history.pushState(null,'','/'+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[_wsPath]);
+  },[]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const parts=window.location.pathname.replace(/^\//, '').split('/');
-        // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-        const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-        const bareView = parts[0].trim();
-        const p = wsView || bareView;
+        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -6905,47 +6843,13 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      // Keep _pfWsBase in sync if workspace slug changes
-      if(ws&&ws.id){
-        try{
-          const _slug=ws.workspace_slug||(ws.name||'workspace').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-          window._pfWsBase='/'+_slug+'/'+ws.id+'/dashboard';
-        }catch(_){}
-      }
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       const rems=await api.get('/api/reminders');
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error(e);}
   },[cu]);
 
-  useEffect(()=>{
-    api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){
-        if(u.workspace_dashboard_url){
-          window._pfWsBase=u.workspace_dashboard_url;
-          // If currently on a bare path, redirect to ws-scoped URL immediately
-          try{
-            const loc=window.location.pathname;
-            const parts=loc.split('/');
-            const isAlreadyWsScoped=parts.length>=3&&parts[2]&&parts[2].startsWith('ws');
-            if(!isAlreadyWsScoped){
-              // Extract page segment from bare path (e.g. /dashboard → dashboard)
-              const barePage=parts[1]||'dashboard';
-              const validPages=['dashboard','projects','tasks','messages','channels','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','vault','app'];
-              const page=validPages.includes(barePage)?barePage:'dashboard';
-              const wsParts=u.workspace_dashboard_url.split('/');
-              if(wsParts.length>=3){
-                const wsUrl='/'+wsParts[1]+'/'+wsParts[2]+'/'+page;
-                window.history.replaceState({},'',wsUrl);
-              }
-            }
-          }catch(_){}
-        }
-        setCu(u);
-      }
-      setLoading(false);
-    }).catch(()=>setLoading(false));
-  },[]);
+  useEffect(()=>{api.get('/api/auth/me').then(u=>{if(u&&!u.error)setCu(u);setLoading(false);}).catch(()=>setLoading(false));},[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
   // Expose DM target setter for notification click handlers
@@ -7113,16 +7017,11 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
-    api._abort();
-    // 2. Unsubscribe from push notifications
-    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (fire-and-forget — don't await)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear React state
+    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
+    try{ await api.post('/api/auth/logout',{}); }catch(e){}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect instantly
-    window.location.replace('/');
+    // Redirect to login immediately — clears all state and shows auth page
+    window.location.href='/?action=login';
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
@@ -7212,15 +7111,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
-    if(u.workspace_dashboard_url){
-      window._pfWsBase=u.workspace_dashboard_url;
-      // Hard redirect to ws-scoped URL so page reloads with correct URL from the start
-      window.location.replace(u.workspace_dashboard_url);
-    } else {
-      setCu(u);
-    }
-  }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{ if(u.workspace_dashboard_url){window.history.replaceState({},'',u.workspace_dashboard_url);} setCu(u); }}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>

@@ -140,33 +140,23 @@ window._pfPushUnsubscribe = async function(){
 })();
 </script>
 
-<link rel="dns-prefetch" href="https://fonts.googleapis.com"/>
-<link rel="dns-prefetch" href="https://fonts.gstatic.com"/>
-<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com"/>
-<link rel="dns-prefetch" href="https://unpkg.com"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script>
 (function(){
-  // Load independent libs in parallel; React-DOM depends on React so those are ordered.
-  var parallelLibs=[
-    'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js',
-    'https://unpkg.com/htm@3.1.1/dist/htm.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js',
-  ];
-  function addScript(src,cb){
+  var libs=[
+    'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js', 'https://unpkg.com/htm@3.1.1/dist/htm.js', 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js', ];
+  function loadNext(i){
+    if(i>=libs.length)return;
     var s=document.createElement('script');
-    s.src=src;s.crossOrigin='anonymous';
-    if(cb){s.onload=cb;s.onerror=cb;}
+    s.src=libs[i];
+    s.crossOrigin='anonymous';
+    s.onload=function(){loadNext(i+1);};
+    s.onerror=function(){loadNext(i+1);};
     document.head.appendChild(s);
   }
-  // React → ReactDOM (must be sequential), then everything else in parallel
-  addScript('https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',function(){
-    addScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js');
-  });
-  parallelLibs.forEach(function(src){addScript(src);});
+  loadNext(0);
 })();
 </script>
 <style>
@@ -850,13 +840,10 @@ function AppLoader(){
   </div>`;
 }
 
-// Global abort controller — cancelled on logout to kill all in-flight requests
-let _apiAbortCtrl = new AbortController();
 const api={
-  _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get: async (u) => {
     try {
-      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal});
+      const r = await fetch(u, {credentials: 'include'});
       if (!r.ok) {
         if (r.status === 401) {
           console.warn('[API] 401 Unauthorized:', u);
@@ -867,7 +854,6 @@ const api={
       }
       return await r.json();
     } catch (e) {
-      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -887,7 +873,6 @@ const api={
       }
       return await r.json();
     } catch (e) {
-      if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
       return null;
     }
@@ -1035,7 +1020,7 @@ function AuthScreen({onLogin}){
     const s=document.createElement('style');
     s.id=id;
     s.textContent=`
-      /* fonts loaded in <head> */
+      @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,300;400;700;800&family=Inter:wght@300;400;500;600&display=swap');
 
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
@@ -8827,16 +8812,11 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
-    api._abort();
-    // 2. Unsubscribe from push notifications
-    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (best-effort, don't await — we're leaving anyway)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear React state
+    if(window._pfPushUnsubscribe) await window._pfPushUnsubscribe().catch(()=>{});
+    try{ await api.post('/api/auth/logout',{}); }catch(e){}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect — instant, no waiting for any network
-    window.location.replace('/?action=login');
+    // Redirect to login immediately — clears all state and shows auth page
+    window.location.href='/?action=login';
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
