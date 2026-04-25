@@ -4716,7 +4716,7 @@ def index():
     action = request.args.get("action", "")
     if action in ("login", "register"):
         return _serve_html()
-    return LANDING_HTML
+    return _serve_landing()
 
 @app.route("/app")
 @app.route("/dashboard")
@@ -4763,22 +4763,22 @@ def password_generator_page():
 @app.route("/privacy")
 def privacy_page():
     """Serve the Privacy Policy page."""
-    return _load_template('privacy.html')
+    return _inject_nonce(_load_template('privacy.html'))
 
 @app.route("/terms")
 def terms_page():
     """Serve the Terms of Service page."""
-    return _load_template('terms.html')
+    return _inject_nonce(_load_template('terms.html'))
 
 @app.route("/security")
 def security_info_page():
     """Serve the Security page."""
-    return _load_template('security.html')
+    return _inject_nonce(_load_template('security.html'))
 
 @app.route("/about")
 def about_page():
     """Serve the About page — always public, no login required."""
-    return _load_template('about.html')
+    return _inject_nonce(_load_template('about.html'))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5244,7 +5244,7 @@ def admin_api_user_change_role(uid):
 @app.route("/adminpanel/<path:workspace>")
 def admin_panel_page(workspace=None):
     """Serve the admin panel HTML."""
-    return ADMIN_HTML
+    return _inject_nonce(ADMIN_HTML)
 
 @app.route("/api/admin/login", methods=["POST"])
 def admin_api_login():
@@ -5589,21 +5589,36 @@ HTML                    = _load_template('template.html')
 
 _RE_SCRIPT_TAG = __import__('re').compile(r'<script([^>]*)>', __import__('re').IGNORECASE)
 
-def _serve_html():
-    """Return template.html with CSP nonce stamped onto every <script> tag.
-    Both inline scripts (<script>) and external scripts (<script src="...">) need
-    the nonce when unsafe-inline is absent from the CSP."""
+def _inject_nonce(html_content):
+    """Inject CSP nonce into every <script> tag in an HTML string.
+    Skips tags that already have a nonce or type=application/ld+json (structured data)."""
     nonce = getattr(_g, "csp_nonce", "")
     if not nonce:
-        # Fallback — should never happen in normal flow
-        return HTML
+        return html_content
     def _stamp(m):
         attrs = m.group(1)
-        # Avoid double-stamping if somehow already has nonce
         if 'nonce=' in attrs:
             return m.group(0)
+        # Don't stamp JSON-LD or other non-JS script types
+        if 'application/ld+json' in attrs or 'application/json' in attrs:
+            return m.group(0)
         return f'<script nonce="{nonce}"{attrs}>'
-    return _RE_SCRIPT_TAG.sub(_stamp, HTML)
+    return _RE_SCRIPT_TAG.sub(_stamp, html_content)
+
+def _serve_html():
+    """Return template.html with CSP nonce stamped onto every <script> tag."""
+    nonce = getattr(_g, "csp_nonce", "")
+    if not nonce:
+        return HTML
+    return _inject_nonce(HTML)
+
+def _serve_landing():
+    """Return landing.html with CSP nonce stamped onto every <script> tag."""
+    nonce = getattr(_g, "csp_nonce", "")
+    if not nonce:
+        return LANDING_HTML
+    return _inject_nonce(LANDING_HTML)
+
 LANDING_HTML            = _load_template('landing.html')
 PASSWORD_GENERATOR_HTML = _load_template('password-generator.html')
 ADMIN_HTML              = _load_template('adminpanel.html')

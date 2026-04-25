@@ -149,28 +149,31 @@ window._pfPushUnsubscribe = async function(){
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet"/>
 <script>
 (function(){
-  // Load independent libs in parallel; React-DOM depends on React so those are ordered.
-  // We grab the nonce from this script tag so dynamically created scripts can carry it too.
+  // Load libs in correct dependency order.
+  // React must load first, then ReactDOM, then Recharts (needs React.forwardRef).
+  // Prop-types and htm can load in parallel since they are standalone.
   var _scripts=document.querySelectorAll('script[nonce]');
   var _nonce=_scripts.length?_scripts[_scripts.length-1].nonce:'';
-  var parallelLibs=[
-    'https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js',
-    'https://unpkg.com/htm@3.1.1/dist/htm.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js',
-  ];
+
   function addScript(src,cb){
     var s=document.createElement('script');
     s.src=src;s.crossOrigin='anonymous';
     if(_nonce){s.nonce=_nonce;}
-    if(cb){s.onload=cb;s.onerror=cb;}
+    if(cb){s.onload=cb;s.onerror=function(){cb&&cb();};}
     document.head.appendChild(s);
   }
-  // React → ReactDOM (must be sequential), then everything else in parallel
+
+  // Load standalone libs immediately (no React dependency)
+  addScript('https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js');
+  addScript('https://unpkg.com/htm@3.1.1/dist/htm.js');
+  addScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js');
+
+  // React → ReactDOM → Recharts (strict sequential — Recharts needs React.forwardRef)
   addScript('https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',function(){
-    addScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js');
+    addScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',function(){
+      addScript('https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js');
+    });
   });
-  parallelLibs.forEach(function(src){addScript(src);});
 })();
 </script>
 <style>
