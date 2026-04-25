@@ -630,6 +630,10 @@ def _close_ddl_conn():
             except: pass
             _DDL_CONN = None
 
+def _ensure_logout_column():
+    """Add logged_out_at column to users if it doesn't exist (migration)."""
+    _run_ddl("ALTER TABLE users ADD COLUMN logged_out_at TEXT DEFAULT ''")
+
 def ensure_timelog_schema():
     """Ensure time_logs has ALL required columns. Safe to call repeatedly."""
     # Step 1: create minimal base table (id only — everything else added via ALTER)
@@ -1034,7 +1038,8 @@ def init_db():
                 id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, email TEXT,
                 password TEXT, role TEXT, avatar TEXT, color TEXT, created TEXT,
                 two_fa_enabled INTEGER DEFAULT 0, totp_secret TEXT DEFAULT '',
-                totp_verified INTEGER DEFAULT 0);
+                totp_verified INTEGER DEFAULT 0,
+                logged_out_at TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, description TEXT,
                 owner TEXT, members TEXT DEFAULT '[]', start_date TEXT,
@@ -1323,10 +1328,60 @@ def _seed_demo(db, ws_id):
         try: db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",(n[0],ws_id,n[1],n[2],n[3],n[4],ts()))
         except: pass
 
+# Cache of logged_out_at timestamps: {uid: logged_out_at_str}
+# Checked in login_required so we don't hit DB on every request.
+# Busted when logout is called.
+_logout_cache: dict = {}
+_logout_cache_lock = _cthread.Lock()
+
+def _get_logged_out_at(uid):
+    """Return the user's logged_out_at value. Cached in memory (Redis if available)."""
+    cache_key = f"logout_ts:{uid}"
+    # Try Redis first
+    if _redis_client is not None:
+        try:
+            val = _redis_client.get(f"ptcache:{cache_key}")
+            return val or ""
+        except Exception:
+            pass
+    # In-process dict
+    with _logout_cache_lock:
+        return _logout_cache.get(uid, None)  # None = not cached yet
+
+def _set_logged_out_at(uid, ts_val):
+    """Store logged_out_at in cache (all workers via Redis, or local dict)."""
+    cache_key = f"logout_ts:{uid}"
+    if _redis_client is not None:
+        try:
+            _redis_client.set(f"ptcache:{cache_key}", ts_val or "", ex=86400*30)
+            return
+        except Exception:
+            pass
+    with _logout_cache_lock:
+        _logout_cache[uid] = ts_val or ""
+
 def login_required(f):
     @wraps(f)
     def d(*a,**kw):
-        if "user_id" not in session: return jsonify({"error":"Unauthorized"}),401
+        if "user_id" not in session:
+            return jsonify({"error":"Unauthorized"}),401
+        uid = session["user_id"]
+        login_at = session.get("login_at", "")
+        if login_at:
+            # Check if this session has been remotely invalidated
+            cached_logout = _get_logged_out_at(uid)
+            if cached_logout is None:
+                # Not cached — fetch from DB once, then cache it
+                try:
+                    rows = _raw_pg("SELECT logged_out_at FROM users WHERE id=?", (uid,), fetch=True)
+                    cached_logout = rows[0].get("logged_out_at","") if rows else ""
+                    _set_logged_out_at(uid, cached_logout)
+                except Exception:
+                    cached_logout = ""
+            # If user logged out after this session was created → reject
+            if cached_logout and login_at < cached_logout:
+                session.clear()
+                return jsonify({"error":"Session expired. Please log in again."}),401
         return f(*a,**kw)
     return d
 
@@ -1386,12 +1441,15 @@ def login():
             return jsonify({"totp_required": True, "user_id": u["id"], "name": u["name"]}), 200
         # ── No 2FA configured — direct login ─────────────────────────────────
         _clear_attempts(rl_key)  # reset limiter on success
+        login_ts = ts()
         session.permanent=True
         session["user_id"]=u["id"]
         session["workspace_id"]=u["workspace_id"]
         session["role"]=u.get("role","")  # cache role in session
+        session["login_at"]=login_ts       # used to detect remote logout
         try:
-            db.execute("UPDATE users SET last_active=? WHERE id=?", (ts(), u["id"]))
+            # Clear logged_out_at so this new login is valid
+            db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
         except Exception: pass
         _audit("user_login", u["id"], f"{u['name']} ({email}) logged in")
         result = dict(u)
@@ -1881,7 +1939,22 @@ def totp_reset():
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
     uid = session.get("user_id", "")
-    _audit("user_logout", uid, "User signed out")
+    if uid:
+        logout_ts = ts()
+        # Write logged_out_at to DB — this invalidates ALL sessions for this user
+        # on all devices immediately (checked in login_required on next request)
+        try:
+            _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
+        except Exception as _e:
+            log.warning("[logout] failed to set logged_out_at: %s", _e)
+        # Update cache so this worker knows immediately too
+        _set_logged_out_at(uid, logout_ts)
+        # Bust the auth/me cache for this user
+        try:
+            _cache_bust_ws(session.get("workspace_id",""))
+        except Exception:
+            pass
+        _audit("user_logout", uid, "User signed out — all sessions invalidated")
     session.clear()
     return jsonify({"ok": True})
 
@@ -1889,6 +1962,12 @@ def logout():
 @app.route("/sign-out")
 def signout_redirect():
     """GET /signout — clear session and redirect to login page."""
+    uid = session.get("user_id","")
+    if uid:
+        logout_ts = ts()
+        try: _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
+        except Exception: pass
+        _set_logged_out_at(uid, logout_ts)
     session.clear()
     return '<html><head><meta http-equiv="refresh" content="0;url=/?action=login"/></head><body>Signing out...</body></html>'
 
@@ -1938,19 +2017,22 @@ def register():
 @app.route("/api/presence", methods=["POST"])
 @login_required
 def update_presence():
-    """Update user last_active timestamp. Throttled: only writes to DB once per 45s
-    per user to avoid excessive writes from aggressive heartbeats."""
+    """Update user last_active timestamp. Throttled: only writes to DB once per 60s
+    per user. Uses _raw_pg (pooled, no extra SELECT 1) for the write."""
     uid = session["user_id"]
     ws  = wid()
     throttle_key = f"presence_write:{uid}"
-    # Skip DB write if we wrote recently — return cached OK
+    # Skip DB write if we wrote recently — return instantly
     if _cache_get(throttle_key):
         return jsonify({"ok": True, "throttled": True})
-    with get_db() as db:
-        db.execute("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
-                   (ts(), uid, ws))
-    # Mark as written for 45s — matches new heartbeat interval
-    _CACHE[throttle_key] = {"val": True, "ts": _time.time()}
+    try:
+        _raw_pg("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
+                (ts(), uid, ws))
+    except Exception as _e:
+        log.warning("[presence] write failed: %s", _e)
+    # Mark as written for 60s (matches frontend heartbeat interval)
+    with _CACHE_LOCK:
+        _CACHE[throttle_key] = {"val": True, "ts": _time.time()}
     # Bust presence cache so next GET sees the fresh timestamp
     _cache_bust(ws, "presence")
     return jsonify({"ok": True})
@@ -1958,18 +2040,21 @@ def update_presence():
 @app.route("/api/presence")
 @login_required
 def get_presence():
-    """Returns list of user IDs active in last 3 minutes. Cached 10s — no need for realtime."""
-    cache_key = f"presence:{wid()}"
+    """Returns list of user IDs active in last 3 minutes. Cached 15s."""
+    ws = wid()
+    cache_key = f"presence:{ws}"
     cached = _cache_get(cache_key)
     if cached is not None: return jsonify(cached)
-    with get_db() as db:
+    try:
         cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
-        rows = db.execute(
+        rows = _raw_pg(
             "SELECT id FROM users WHERE workspace_id=? AND last_active>?",
-            (wid(), cutoff)).fetchall()
-        result = [r["id"] for r in rows]
-        _cache_set(cache_key, result)
-        return jsonify(result)
+            (ws, cutoff), fetch=True)
+        result = [r["id"] for r in (rows or [])]
+    except Exception:
+        result = []
+    _cache_set(cache_key, result)
+    return jsonify(result)
 
 @app.route("/api/meet/notify", methods=["POST"])
 @login_required
@@ -5224,6 +5309,7 @@ try:
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
     ensure_timelog_schema()   # always run — adds any missing time_log columns
+    _ensure_logout_column()    # add logged_out_at if upgrading from older deploy
     _close_ddl_conn()         # release shared DDL connection after all migrations
     _prewarm_pool(8)          # pre-open 8 pool connections so first requests are fast
 except Exception as _ie:
