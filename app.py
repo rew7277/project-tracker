@@ -92,7 +92,7 @@ def vault_decrypt(token: str) -> str:
         return token
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session, Response, send_file
+from flask import Flask, request, jsonify, session, Response, send_file, redirect
 from flask_cors import CORS
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -247,6 +247,35 @@ if not _ALLOWED_ORIGINS:
     if _is_https:
         log.warning("ALLOWED_ORIGINS not set — CORS is open in production.")
 CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
+
+# ── Gzip compression for all compressible responses ───────────────────────────
+@app.after_request
+def compress_response(response):
+    """Gzip-compress HTML, JS, CSS and JSON responses when client supports it."""
+    accept_encoding = request.headers.get("Accept-Encoding", "")
+    if "gzip" not in accept_encoding:
+        return response
+    if response.status_code < 200 or response.status_code >= 300:
+        return response
+    content_type = response.content_type or ""
+    compressible = any(t in content_type for t in (
+        "text/html", "text/css", "application/javascript",
+        "application/json", "text/javascript", "text/plain"
+    ))
+    if not compressible:
+        return response
+    data = response.get_data()
+    if len(data) < 500:
+        return response
+    import gzip as _gzip
+    compressed = _gzip.compress(data, compresslevel=6)
+    if len(compressed) >= len(data):
+        return response
+    response.set_data(compressed)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = len(compressed)
+    response.headers.pop("Content-MD5", None)
+    return response
 
 @app.after_request
 def add_security_headers(response):
@@ -3574,7 +3603,7 @@ def serve_static(fn):
     with open(path, "rb") as fh:
         data = fh.read()
     resp = Response(data, mimetype=mime)
-    resp.headers["Cache-Control"] = "public, max-age=3600" if fn.endswith(".js") else "no-cache"
+    resp.headers["Cache-Control"] = "public, max-age=604800, immutable" if fn.endswith(".js") else "no-cache"
     return resp
 
 @app.route("/js/<path:fn>")
@@ -3588,7 +3617,7 @@ def serve_js(fn):
         "react.min.js":     "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
         "react-dom.min.js": "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
         "prop-types.min.js":"https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js",
-        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js",
+        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js",
         "htm.min.js":       "https://unpkg.com/htm@3.1.1/dist/htm.js",
     }
     if fn in CDN:
