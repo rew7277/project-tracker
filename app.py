@@ -3629,8 +3629,8 @@ def serve_js(fn):
 def serve_sw():
     """Service Worker for background push notifications and offline caching."""
     sw_code = r"""
-// Project Tracker Service Worker v2
-const CACHE = 'pf-v2';
+// Project Tracker Service Worker v3
+const CACHE = 'pf-v3';
 const ICON = '/favicon.ico';
 
 // Install & cache shell assets
@@ -3639,7 +3639,12 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
-  e.waitUntil(clients.claim());
+  // Delete ALL old caches so stale requests (e.g. /${imgSrc}) are never replayed
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    ).then(() => clients.claim())
+  );
 });
 
 // ── Push notification handler ────────────────────────────────────────────────
