@@ -5183,29 +5183,19 @@ INSTRUCTIONS:
     const history=messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-12).map(m=>({role:m.role,content:m.content}));
     history.push({role:'user',content:text});
 
-    // Check for API key
-    const ws=await api.get('/api/workspace');
-    if(!ws.ai_api_key){
-      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.\n\nYou can get a key at [anthropic.com](https://anthropic.com).'}:msg));
-      setSending(false);scrollToBottom();return;
-    }
-
+    // Route ALL AI calls through backend — API key never exposed to browser
     try{
-      const r=await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':ws.ai_api_key,'anthropic-version':'2023-06-01'},
-        body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:3000,system:systemPrompt,messages:history})
-      });
-      if(!r.ok){
-        const e=await r.json().catch(()=>({}));
-        throw new Error(e.error?.message||'API error '+r.status);
+      const r=await api.post('/api/ai/chat',{message:text,history:messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-10).map(m=>({role:m.role,content:m.content}))});
+      if(r.error==='NO_KEY'){
+        setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.'}:msg));
+        setSending(false);scrollToBottom();return;
       }
-      const data=await r.json();
-      const reply=data.content?.[0]?.text||'Sorry, I could not generate a response.';
+      if(r.error){throw new Error(r.message||r.error);}
+      const reply=r.message||'Sorry, I could not generate a response.';
       setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'assistant',content:reply}:msg));
     }catch(e){
       const errMsg=e.message||'Network error';
-      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nPlease check your API key in Workspace Settings.`}:msg));
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nCheck your API key in Workspace Settings.`}:msg));
     }
     setSending(false);scrollToBottom();
     // Auto-save to recents after AI responds
