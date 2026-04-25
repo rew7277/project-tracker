@@ -1431,11 +1431,20 @@ import json as _json_mod
 
 _GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 _GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-_APP_BASE_URL         = os.environ.get("APP_BASE_URL", "").rstrip("/")
+_APP_BASE_URL         = os.environ.get("APP_BASE_URL", os.environ.get("APP_URL", "")).rstrip("/")
 
 _GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+def _get_base_url():
+    """Return base URL — prefer env var, fall back to detecting from request."""
+    if _APP_BASE_URL:
+        return _APP_BASE_URL
+    # Auto-detect from incoming request (handles reverse proxies via X-Forwarded headers)
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host", "")
+    proto = request.headers.get("X-Forwarded-Proto", "https")
+    return f"{proto}://{host}".rstrip("/")
 
 @app.route("/api/auth/google/login")
 def google_login():
@@ -1447,7 +1456,9 @@ def google_login():
     state = secrets.token_urlsafe(24)
     session["google_oauth_state"] = state
 
-    redirect_uri = f"{_APP_BASE_URL}/api/auth/google/callback"
+    base_url = _get_base_url()
+    redirect_uri = f"{base_url}/api/auth/google/callback"
+    log.info("[google_oauth] redirect_uri = %s", redirect_uri)  # log so you can verify it matches Google Console
     params = _urlparse.urlencode({
         "client_id":     _GOOGLE_CLIENT_ID,
         "redirect_uri":  redirect_uri,
@@ -1479,7 +1490,7 @@ def google_callback():
     if not code:
         return redirect("/?action=login&error=no_code")
 
-    redirect_uri = f"{_APP_BASE_URL}/api/auth/google/callback"
+    redirect_uri = f"{_get_base_url()}/api/auth/google/callback"
 
     # ── Exchange code for tokens ──────────────────────────────────────────────
     try:
@@ -1594,7 +1605,7 @@ def google_callback():
 @app.route("/api/auth/google/config")
 def google_auth_config():
     """Return whether Google OAuth is configured so the frontend can show/hide button."""
-    return jsonify({"enabled": bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET and _APP_BASE_URL)})
+    return jsonify({"enabled": bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET)})
 
 # ── Login rate limiter (brute-force protection) ───────────────────────────────
 import time as _time_mod
@@ -2867,7 +2878,7 @@ def create_project():
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
-        _cache_bust_ws(wid())  # new project — bust all cache
+        _cache_bust(wid(), "projects", "notifs")  # targeted bust — faster than _cache_bust_ws
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
