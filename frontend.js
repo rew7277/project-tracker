@@ -139,6 +139,18 @@ function AuthScreen({onLogin}){
   const [totpUserId,setTotpUserId]=useState('');
   const [totpUserName,setTotpUserName]=useState('');
   const [totpToken,setTotpToken]=useState('');
+  // Forgot / reset password states
+  const [forgotMode,setForgotMode]=useState(false);
+  const [forgotEmail,setForgotEmail]=useState('');
+  const [forgotSent,setForgotSent]=useState(false);
+  const [resetToken,setResetToken]=useState((()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='reset-password'?p.get('token')||'':'';}catch{return '';}})());
+  const [resetPw,setResetPw]=useState('');
+  const [resetPw2,setResetPw2]=useState('');
+  const [resetDone,setResetDone]=useState(false);
+  const [verifiedMsg,setVerifiedMsg]=useState((()=>{try{return new URLSearchParams(window.location.search).get('verified')==='1';}catch{return false;}})());
+  const [acceptInviteToken,setAcceptInviteToken]=useState((()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='accept-invite'?p.get('token')||'':'';}catch{return '';}})());
+  const [acceptInviteName,setAcceptInviteName]=useState('');
+  const [acceptInvitePw,setAcceptInvitePw]=useState('');
   const canvasRef=useRef(null);
   const formRef=useRef(null);
 
@@ -395,6 +407,34 @@ function AuthScreen({onLogin}){
     return()=>{ro.disconnect();cancelAnimationFrame(raf);};
   },[]);
 
+  const sendForgot=async()=>{
+    if(!forgotEmail){setErr('Enter your email address.');return;}
+    setErr('');setPhase('loading');
+    await api.post('/api/auth/forgot-password',{email:forgotEmail});
+    setPhase('idle');setForgotSent(true);
+  };
+
+  const doReset=async()=>{
+    if(!resetPw||!resetPw2){setErr('Enter and confirm your new password.');return;}
+    if(resetPw!==resetPw2){setErr('Passwords do not match.');return;}
+    if(resetPw.length<8){setErr('Password must be at least 8 characters.');return;}
+    setErr('');setPhase('loading');
+    const r=await api.post('/api/auth/reset-password',{token:resetToken,password:resetPw});
+    setPhase('idle');
+    if(r.error){setErr(r.error);}
+    else{setResetDone(true);}
+  };
+
+  const doAcceptInvite=async()=>{
+    if(!acceptInviteName||!acceptInvitePw){setErr('Name and password are required.');return;}
+    if(acceptInvitePw.length<8){setErr('Password must be at least 8 characters.');return;}
+    setErr('');setPhase('loading');
+    const r=await api.post('/api/auth/accept-invite',{token:acceptInviteToken,name:acceptInviteName,password:acceptInvitePw});
+    setPhase('idle');
+    if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
+    else{setSuccessMsg('Welcome! Joining your workspace...');setPhase('success');setTimeout(()=>onLogin(r),1800);}
+  };
+
   const go=async()=>{
     setErr('');setPhase('loading');
     if(tab==='login'){
@@ -526,6 +566,99 @@ function AuthScreen({onLogin}){
         <div style=${{height:2,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',maxWidth:220,margin:'0 auto'}}>
           <div style=${{height:'100%',borderRadius:2,transformOrigin:'left',background:'linear-gradient(90deg,#5a8cff,#a855f7,#ec4899)',animation:'ap-progress 1.8s cubic-bezier(0.4,0,0.2,1) forwards'}}></div>
         </div>
+      </div>
+    `)}
+    </div>`;
+
+  // ── Accept Workspace Invite ──
+  if(acceptInviteToken) return html`
+    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
+    ${RIGHT(html`
+      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
+        <div style=${{width:54,height:54,borderRadius:16,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',marginBottom:24,boxShadow:'0 6px 28px rgba(90,140,255,0.45)'}}>
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>You're Invited!</h2>
+        <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Create your account to join the workspace.</p>
+        ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
+        ${phase==='success'?html`<div style=${{color:'#5aff8c',fontWeight:700,fontSize:15,textAlign:'center',padding:'12px 0'}}>${successMsg}</div>`:html`
+          <div style=${{marginBottom:16}}>
+            <${LBL}>Your Name</${LBL}>
+            <input class="ap-input" placeholder="Full name" value=${acceptInviteName} onInput=${e=>setAcceptInviteName(e.target.value)}/>
+          </div>
+          <div style=${{marginBottom:24}}>
+            <${LBL}>Password</${LBL}>
+            <input class="ap-input" type="password" placeholder="Min 8 characters" value=${acceptInvitePw} onInput=${e=>setAcceptInvitePw(e.target.value)}/>
+          </div>
+          <button class="ap-btn-primary" onClick=${doAcceptInvite} disabled=${phase==='loading'}>
+            ${phase==='loading'?html`<span class="spin"></span>`:null} Join Workspace
+          </button>
+        `}
+      </div>
+    `)}
+    </div>`;
+
+  // ── Reset Password ──
+  if(resetToken) return html`
+    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
+    ${RIGHT(html`
+      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
+        <div style=${{width:54,height:54,borderRadius:16,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',marginBottom:24,boxShadow:'0 6px 28px rgba(90,140,255,0.45)'}}>
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        </div>
+        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>Reset Password</h2>
+        ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
+        ${resetDone?html`
+          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'16px',marginBottom:24}}>
+            <p style=${{color:'#5aff8c',fontWeight:700,margin:0}}>Password reset successfully!</p>
+            <p style=${{color:'rgba(175,170,210,0.7)',fontSize:13,margin:'6px 0 0'}}>You can now sign in with your new password.</p>
+          </div>
+          <button class="ap-btn-primary" onClick=${()=>{setResetToken('');window.history.replaceState({},'','/');}} >Back to Sign In</button>
+        `:html`
+          <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Enter a new password. The reset link expires in 12 minutes.</p>
+          <div style=${{marginBottom:16}}>
+            <${LBL}>New Password</${LBL}>
+            <input class="ap-input" type="password" placeholder="Min 8 characters" value=${resetPw} onInput=${e=>setResetPw(e.target.value)}/>
+          </div>
+          <div style=${{marginBottom:24}}>
+            <${LBL}>Confirm Password</${LBL}>
+            <input class="ap-input" type="password" placeholder="Repeat password" value=${resetPw2} onInput=${e=>setResetPw2(e.target.value)}/>
+          </div>
+          <button class="ap-btn-primary" onClick=${doReset} disabled=${phase==='loading'}>
+            ${phase==='loading'?html`<span class="spin"></span>`:null} Set New Password
+          </button>
+        `}
+      </div>
+    `)}
+    </div>`;
+
+  // ── Forgot Password ──
+  if(forgotMode) return html`
+    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
+    ${RIGHT(html`
+      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
+        <button onClick=${()=>{setForgotMode(false);setForgotSent(false);setErr('');}} style=${{background:'none',border:'none',color:'rgba(175,170,210,0.6)',fontSize:13,cursor:'pointer',padding:'0 0 20px',display:'flex',alignItems:'center',gap:6}}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 5l-7 7 7 7"/></svg> Back to Sign In
+        </button>
+        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>Forgot Password</h2>
+        ${forgotSent?html`
+          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'16px',marginBottom:24}}>
+            <p style=${{color:'#5aff8c',fontWeight:700,margin:0}}>Check your inbox!</p>
+            <p style=${{color:'rgba(175,170,210,0.7)',fontSize:13,margin:'6px 0 0'}}>If an account exists for <b>${forgotEmail}</b>, a reset link has been sent. It expires in 12 minutes.</p>
+          </div>
+          <button class="ap-btn-primary" onClick=${()=>{setForgotMode(false);setForgotSent(false);}}>Back to Sign In</button>
+        `:html`
+          <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Enter your email and we'll send a reset link valid for 12 minutes.</p>
+          ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
+          <div style=${{marginBottom:24}}>
+            <${LBL}>Email Address</${LBL}>
+            <input class="ap-input" type="email" placeholder="you@company.com" value=${forgotEmail} onInput=${e=>setForgotEmail(e.target.value)}
+              onKeyDown=${e=>{if(e.key==='Enter')sendForgot();}}/>
+          </div>
+          <button class="ap-btn-primary" onClick=${sendForgot} disabled=${phase==='loading'}>
+            ${phase==='loading'?html`<span class="spin"></span>`:null} Send Reset Link
+          </button>
+        `}
       </div>
     `)}
     </div>`;
@@ -674,6 +807,20 @@ function AuthScreen({onLogin}){
               :html`<span>${tab==='login'?'Sign In':regMode==='create'?'Create Workspace':'Join Workspace'} →</span>`}
           </button>
         </div>
+
+        <!-- Forgot password link (login tab only) -->
+        ${tab==='login'?html`
+          <div style=${{textAlign:'center',marginTop:14}}>
+            <button class="ap-link" onClick=${()=>{setForgotMode(true);setForgotEmail(email);setErr('');}} style=${{fontSize:12.5,color:'rgba(140,160,255,0.65)'}}>Forgot password?</button>
+          </div>
+        `:null}
+
+        <!-- Email verified success banner -->
+        ${verifiedMsg?html`
+          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#5aff8c',marginTop:12,textAlign:'center'}}>
+            ✓ Email verified successfully — please sign in.
+          </div>
+        `:null}
 
         <!-- Switch tab -->
         <p style=${{fontSize:13.5,color:'rgba(175,170,210,0.4)',textAlign:'center',marginTop:22,lineHeight:1.7}}>
@@ -956,6 +1103,76 @@ function QRCodeDisplay({otpauth,size}){
     }
   },[otpauth,sz]);
   return html`<div ref=${ref} style=${{width:sz+'px',height:sz+'px',display:'inline-flex',alignItems:'center',justifyContent:'center'}}></div>`;
+}
+
+/* ─── SessionManager — active device/session list ─────────────────────────── */
+function SessionManager({cu}){
+  const [sessions,setSessions]=useState([]);
+  const [loading,setLoading]=useState(false);
+  const [open,setOpen]=useState(false);
+  const [revoking,setRevoking]=useState('');
+
+  const load=async()=>{
+    setLoading(true);
+    const d=await api.get('/api/auth/sessions').catch(()=>null);
+    if(Array.isArray(d))setSessions(d);
+    setLoading(false);
+  };
+
+  useEffect(()=>{if(open)load();},[open]);
+
+  const revoke=async(sid)=>{
+    if(!window.confirm('Log out this device?'))return;
+    setRevoking(sid);
+    await api.del('/api/auth/sessions/'+sid).catch(()=>{});
+    setSessions(prev=>prev.filter(s=>s.id!==sid));
+    setRevoking('');
+  };
+
+  const logoutAll=async()=>{
+    if(!window.confirm('Log out from ALL devices? You will be signed out now.'))return;
+    await api.post('/api/auth/sessions/logout-all',{});
+    window.location.replace('/');
+  };
+
+  const fmtDate=d=>{try{return new Date(d).toLocaleString();}catch{return d||'—';}};
+
+  return html`
+    <div style=${{borderTop:'1px solid var(--bd)',padding:'10px 14px'}}>
+      <button class="btn bg" style=${{width:'100%',justifyContent:'space-between',fontSize:12,display:'flex',alignItems:'center'}}
+        onClick=${()=>setOpen(v=>!v)}>
+        <span style=${{display:'flex',alignItems:'center',gap:6}}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          Active Sessions
+        </span>
+        <span style=${{fontSize:10,color:'var(--tx3)'}}>${open?'▲':'▼'}</span>
+      </button>
+      ${open?html`
+        <div style=${{marginTop:8}}>
+          ${loading?html`<div style=${{textAlign:'center',padding:'8px',fontSize:11,color:'var(--tx3)'}}>Loading…</div>`:html`
+            ${sessions.map(s=>html`
+              <div key=${s.id} style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px solid var(--bd2)',gap:8}}>
+                <div style=${{minWidth:0}}>
+                  <div style=${{fontSize:12,fontWeight:600,color:s.is_current?'var(--ac)':'var(--tx)',display:'flex',alignItems:'center',gap:4}}>
+                    ${s.device_name}${s.is_current?html` <span style=${{fontSize:9,background:'var(--ac)',color:'#fff',borderRadius:4,padding:'1px 5px',fontWeight:700}}>THIS DEVICE</span>`:''}
+                  </div>
+                  <div style=${{fontSize:10,color:'var(--tx3)',fontFamily:'monospace',marginTop:2}}>${s.ip||'—'}</div>
+                  <div style=${{fontSize:10,color:'var(--tx3)',marginTop:1}}>Last seen: ${fmtDate(s.last_seen)}</div>
+                </div>
+                ${!s.is_current?html`
+                  <button class="btn" style=${{fontSize:10,padding:'3px 8px',flexShrink:0,color:'var(--rd)'}} onClick=${()=>revoke(s.id)} disabled=${revoking===s.id}>
+                    ${revoking===s.id?'…':'Revoke'}
+                  </button>
+                `:null}
+              </div>
+            `)}
+            <button class="btn bg" style=${{width:'100%',justifyContent:'center',fontSize:11,marginTop:8,color:'var(--rd)'}} onClick=${logoutAll}>
+              Logout from All Devices
+            </button>
+          `}
+        </div>
+      `:null}
+    </div>`;
 }
 
 /* ─── PersonalTwoFAToggle — profile panel ─────────────────────────────────── */
@@ -1333,6 +1550,7 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                 <div style=${{padding:'12px 14px',borderBottom:'1px solid var(--bd)'}}>
                   <${PersonalTwoFAToggle} cu=${cu} setCu=${setCu}/>
                 </div>
+                <${SessionManager} cu=${cu}/>
                 <div style=${{padding:'10px 12px'}}>
                   <p style=${{fontSize:10,color:'var(--tx3)',textAlign:'center',marginBottom:8,fontFamily:'monospace'}}>Click avatar to change profile photo</p>
                   <button class="btn bg" style=${{width:'100%',justifyContent:'center',fontSize:12}} onClick=${()=>setShowProfile(false)}>Close</button>
@@ -4738,6 +4956,53 @@ function WorkspaceSettings({cu,onReload}){
     setTimeout(()=>setTestResult(null),5000);
   };
 
+  // ── Phase 2: Email Invites & Domain Settings ─────────────────────────────
+  const [inviteEmail,setInviteEmail]=useState('');
+  const [inviteRole,setInviteRole]=useState('viewer');
+  const [inviteSending,setInviteSending]=useState(false);
+  const [inviteMsg,setInviteMsg]=useState('');
+  const [pendingInvites,setPendingInvites]=useState([]);
+  const [allowedDomains,setAllowedDomains]=useState([]);
+  const [newDomain,setNewDomain]=useState('');
+  const [domainRequiresApproval,setDomainRequiresApproval]=useState(true);
+  const [domainSaving,setDomainSaving]=useState(false);
+
+  useEffect(()=>{
+    api.get('/api/workspace/invites').then(d=>{if(Array.isArray(d))setPendingInvites(d.filter(i=>!i.accepted));}).catch(()=>{});
+    api.get('/api/workspace/domain-settings').then(d=>{
+      if(d&&!d.error){setAllowedDomains(d.allowed_domains||[]);setDomainRequiresApproval(d.requires_approval!==false);}
+    }).catch(()=>{});
+  },[]);
+
+  const sendInvite=async()=>{
+    if(!inviteEmail){setInviteMsg('Enter an email address.');return;}
+    setInviteSending(true);setInviteMsg('');
+    const r=await api.post('/api/workspace/invite',{email:inviteEmail,role:inviteRole});
+    setInviteSending(false);
+    if(r.error){setInviteMsg('Error: '+r.error);}
+    else{setInviteMsg('Invite sent to '+inviteEmail+'!');setInviteEmail('');
+      const d=await api.get('/api/workspace/invites').catch(()=>null);
+      if(Array.isArray(d))setPendingInvites(d.filter(i=>!i.accepted));
+    }
+  };
+
+  const revokeInvite=async(id)=>{
+    await api.del('/api/workspace/invites/'+id).catch(()=>{});
+    setPendingInvites(prev=>prev.filter(i=>i.id!==id));
+  };
+
+  const saveDomainSettings=async()=>{
+    setDomainSaving(true);
+    await api.post('/api/workspace/domain-settings',{allowed_domains:allowedDomains,requires_approval:domainRequiresApproval});
+    setDomainSaving(false);
+  };
+
+  const addDomain=()=>{
+    const d=newDomain.trim().toLowerCase().replace(/^@/,'');
+    if(d&&d.includes('.')&&!allowedDomains.includes(d)){setAllowedDomains(prev=>[...prev,d]);}
+    setNewDomain('');
+  };
+
   const newInvite=async()=>{
     if(!window.confirm('Generate a new invite code? The old one will stop working.'))return;
     const r=await api.post('/api/workspace/new-invite',{});
@@ -4856,6 +5121,69 @@ function WorkspaceSettings({cu,onReload}){
             <button class="btn bam" style=${{fontSize:12,padding:'8px 14px'}} onClick=${newInvite}>↻ New Code</button>
           </div>
         </div>
+      </div>
+
+      <!-- Email Invite Card -->
+      <div class="card" style=${{marginBottom:16}}>
+        <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>✉️ Invite by Email</h3>
+        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Send a direct invite link to a specific email. They'll be prompted to create an account and join this workspace.</p>
+        <div style=${{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+          <input class="inp" style=${{flex:1,minWidth:180}} placeholder="colleague@company.com" value=${inviteEmail} onInput=${e=>setInviteEmail(e.target.value)}
+            onKeyDown=${e=>{if(e.key==='Enter')sendInvite();}}/>
+          <select class="inp" style=${{width:130}} value=${inviteRole} onChange=${e=>setInviteRole(e.target.value)}>
+            <option value="viewer">Viewer</option>
+            <option value="tester">Tester</option>
+            <option value="developer">Developer</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button class="btn bp" style=${{fontSize:12,padding:'8px 14px',whiteSpace:'nowrap'}} onClick=${sendInvite} disabled=${inviteSending}>
+            ${inviteSending?html`<span class="spin"></span>`:null} Send Invite
+          </button>
+        </div>
+        ${inviteMsg?html`<div style=${{fontSize:12,color:inviteMsg.startsWith('Error')?'var(--rd)':'var(--gn)',marginBottom:8}}>${inviteMsg}</div>`:null}
+        ${pendingInvites.length>0?html`
+          <div style=${{marginTop:12}}>
+            <div style=${{fontSize:11,color:'var(--tx3)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>Pending Invites</div>
+            ${pendingInvites.map(inv=>html`
+              <div key=${inv.id} style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--bd2)'}}>
+                <div>
+                  <span style=${{fontSize:12,color:'var(--tx)'}}>${inv.email}</span>
+                  <span style=${{fontSize:10,color:'var(--tx3)',marginLeft:8,fontFamily:'monospace'}}>${inv.role}</span>
+                </div>
+                <button class="btn" style=${{fontSize:10,padding:'2px 8px',color:'var(--rd)'}} onClick=${()=>revokeInvite(inv.id)}>Revoke</button>
+              </div>
+            `)}
+          </div>
+        `:null}
+      </div>
+
+      <!-- Domain Auto-Join Card -->
+      <div class="card" style=${{marginBottom:16}}>
+        <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🌐 Domain Auto-Join</h3>
+        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Allow anyone with a matching email domain to request access. E.g. add <code>company.in</code> to let <code>@company.in</code> emails join.</p>
+        <div style=${{display:'flex',gap:8,marginBottom:12}}>
+          <input class="inp" style=${{flex:1}} placeholder="example.com" value=${newDomain}
+            onInput=${e=>setNewDomain(e.target.value)}
+            onKeyDown=${e=>{if(e.key==='Enter')addDomain();}}/>
+          <button class="btn bp" style=${{fontSize:12,padding:'8px 14px'}} onClick=${addDomain}>+ Add Domain</button>
+        </div>
+        ${allowedDomains.length>0?html`
+          <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
+            ${allowedDomains.map(d=>html`
+              <span key=${d} style=${{display:'inline-flex',alignItems:'center',gap:5,background:'rgba(29,78,216,.1)',border:'1px solid rgba(29,78,216,.2)',borderRadius:6,padding:'3px 10px',fontSize:12,color:'var(--ac)'}}>
+                @${d}
+                <button onClick=${()=>setAllowedDomains(prev=>prev.filter(x=>x!==d))} style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:13,lineHeight:1,padding:0}}>×</button>
+              </span>
+            `)}
+          </div>
+        `:html`<div style=${{fontSize:12,color:'var(--tx3)',marginBottom:12}}>No domains configured.</div>`}
+        <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+          <input type="checkbox" id="domain-approval" checked=${domainRequiresApproval} onChange=${e=>setDomainRequiresApproval(e.target.checked)}/>
+          <label for="domain-approval" style=${{fontSize:12,color:'var(--tx2)',cursor:'pointer'}}>Require admin approval before domain-matched users can access the workspace</label>
+        </div>
+        <button class="btn bp" style=${{fontSize:12,padding:'8px 14px'}} onClick=${saveDomainSettings} disabled=${domainSaving}>
+          ${domainSaving?html`<span class="spin"></span>`:null} Save Domain Settings
+        </button>
       </div>
 
       <div class="card" style=${{marginBottom:16}}>
@@ -7141,14 +7469,18 @@ function App(){
   const logout=async()=>{
     // 1. Abort all in-flight API requests immediately so polling stops
     api._abort();
-    // 2. Unsubscribe from push notifications
+    // 2. Unsubscribe from push notifications (fire-and-forget)
     if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (fire-and-forget — don't await)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear React state
-    try{localStorage.removeItem('pf_had_session');}catch{} // clear session cache on logout
+    // 3. Clear local state and session cache BEFORE redirect
+    try{localStorage.removeItem('pf_had_session');}catch{}
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect instantly
+    // 4. AWAIT logout endpoint so the server clears the cookie before we redirect.
+    //    Without await, some browsers redirect before the Set-Cookie header arrives,
+    //    leaving the session cookie alive and causing the "still logged in" bug.
+    try{
+      await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});
+    }catch(e){}
+    // 5. Hard redirect after cookie is cleared
     window.location.replace('/');
   };
 

@@ -1406,6 +1406,45 @@ def init_db():
             "ALTER TABLE workspaces ADD COLUMN sso_attr_name TEXT DEFAULT 'name'",
             "ALTER TABLE workspaces ADD COLUMN sso_allow_password_login INTEGER DEFAULT 1",
             "ALTER TABLE workspaces ADD COLUMN workspace_slug TEXT DEFAULT ''",
+            # ── Phase 1: Email verification ──
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN email_verify_token TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN email_verify_expires TEXT DEFAULT ''",
+            # ── Phase 1: Password reset tokens (10-15 min expiry) ──
+            "ALTER TABLE users ADD COLUMN pw_reset_token TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN pw_reset_expires TEXT DEFAULT ''",
+            # ── Phase 1: Device/session management ──
+            """CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                device_name TEXT DEFAULT 'Unknown',
+                ip TEXT DEFAULT '',
+                user_agent TEXT DEFAULT '',
+                login_at TEXT,
+                last_seen TEXT,
+                is_current INTEGER DEFAULT 0
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id)",
+            # ── Phase 2: Workspace email invites ──
+            """CREATE TABLE IF NOT EXISTS workspace_invites (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                role TEXT DEFAULT 'viewer',
+                invited_by TEXT,
+                token TEXT UNIQUE,
+                expires TEXT,
+                accepted INTEGER DEFAULT 0,
+                created TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_invites_token ON workspace_invites(token)",
+            "CREATE INDEX IF NOT EXISTS idx_invites_ws ON workspace_invites(workspace_id)",
+            # ── Phase 2: Domain auto-join ──
+            "ALTER TABLE workspaces ADD COLUMN allowed_domains TEXT DEFAULT '[]'",
+            "ALTER TABLE workspaces ADD COLUMN domain_join_requires_approval INTEGER DEFAULT 1",
+            # ── Phase 2: Workspace URL slug (already exists but ensure column) ──
+            "ALTER TABLE workspaces ADD COLUMN custom_url_id TEXT DEFAULT ''",
         ]:
             try: db.execute(stmt)
             except: pass
@@ -1729,6 +1768,8 @@ def google_callback():
         session["workspace_id"] = user["workspace_id"]
         session["role"]         = user.get("role", "")
         session["login_at"]     = login_ts
+        session_id = secrets.token_hex(16)
+        session["session_id"] = session_id
 
         db.execute(
             "UPDATE users SET last_active=?, logged_out_at='' WHERE id=?",
@@ -1737,6 +1778,7 @@ def google_callback():
         _set_logged_out_at(user["id"], "")
         _clear_attempts(f"login:{request.remote_addr}:{g_email}")
         _audit("google_login", user["id"], f"{g_name} ({g_email}) signed in via Google")
+        _register_session(user["id"], user["workspace_id"], session_id)
 
     # Redirect to app — JS will detect the active session on next /api/auth/me
     return redirect("/?google_auth=1")
@@ -1754,7 +1796,7 @@ import time as _time_mod
 # in-process list when Redis is unavailable (local dev / no REDIS_URL).
 _login_attempts = {}   # fallback only: {key: [timestamp, ...]}
 _LOGIN_MAX = 5         # max attempts per window
-_LOGIN_WINDOW = 60     # seconds
+_LOGIN_WINDOW = 900    # 15-minute window (Phase 1: max 5 attempts per 15 min)
 
 def _check_rate_limit(key):
     """Return (allowed, seconds_until_reset). Redis-backed when available."""
@@ -1836,6 +1878,8 @@ def login():
         session["workspace_id"]=u["workspace_id"]
         session["role"]=u.get("role","")  # cache role in session
         session["login_at"]=login_ts       # used to detect remote logout
+        session_id = secrets.token_hex(16)
+        session["session_id"] = session_id
         try:
             # Clear logged_out_at so this new login is valid
             db.execute("UPDATE users SET last_active=?, logged_out_at='' WHERE id=?", (login_ts, u["id"]))
@@ -1843,6 +1887,7 @@ def login():
         # CRITICAL: clear the logout cache so login_required doesn't reject
         # this new session using a stale cached logout timestamp
         _set_logged_out_at(u["id"], "")
+        _register_session(u["id"], u["workspace_id"], session_id)
         _audit("user_login", u["id"], f"{u['name']} ({email}) logged in")
         result = dict(u)
         result.pop("totp_secret", None)
@@ -2387,6 +2432,498 @@ def signout_redirect():
     return '<html><head><meta http-equiv="refresh" content="0;url=/?action=login"/></head><body>Signing out...</body></html>'
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — AUTH HARDENING
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Email Verification ────────────────────────────────────────────────────────
+
+def _send_verification_email(user_email, user_name, token, workspace_id=None):
+    """Send email verification link."""
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/api/auth/verify-email?token={token}"
+    subject = "Project Tracker — Verify Your Email"
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
+        <p style="color:#555;margin:0 0 24px;">Click the button below to verify your email address and activate your account.</p>
+        <div style="text-align:center;margin:0 0 24px;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Verify Email</a>
+        </div>
+        <p style="color:#888;font-size:12px;">Link expires in 24 hours. If you didn't create an account, ignore this email.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
+
+@app.route("/api/auth/verify-email")
+def verify_email():
+    token = request.args.get("token", "").strip()
+    if not token:
+        return redirect("/?action=login&error=invalid_token")
+    now_str = ts()
+    with get_db() as db:
+        u = db.execute("SELECT * FROM users WHERE email_verify_token=?", (token,)).fetchone()
+        if not u:
+            return redirect("/?action=login&error=invalid_token")
+        if u["email_verify_expires"] and u["email_verify_expires"] < now_str:
+            return redirect("/?action=login&error=token_expired")
+        db.execute("UPDATE users SET email_verified=1, email_verify_token='', email_verify_expires='' WHERE id=?", (u["id"],))
+    return redirect("/?action=login&verified=1")
+
+@app.route("/api/auth/resend-verification", methods=["POST"])
+def resend_verification():
+    d = request.json or {}
+    email = d.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+    with get_db() as db:
+        u = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if not u:
+            return jsonify({"ok": True})  # don't reveal user existence
+        if u.get("email_verified"):
+            return jsonify({"ok": True, "already_verified": True})
+        token = secrets.token_urlsafe(32)
+        from datetime import timedelta
+        expires = (now_ist() + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
+        db.execute("UPDATE users SET email_verify_token=?, email_verify_expires=? WHERE id=?", (token, expires, u["id"]))
+    _send_verification_email(email, u["name"], token)
+    return jsonify({"ok": True})
+
+# ── Forgot Password / Reset Token ─────────────────────────────────────────────
+
+def _send_password_reset_email(user_email, user_name, token, workspace_id=None):
+    """Send password reset email. Token expires in 12 minutes."""
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/?action=reset-password&token={token}"
+    subject = "Project Tracker — Reset Your Password"
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
+        <p style="color:#555;margin:0 0 24px;">Click the button below to reset your password. This link expires in <b>12 minutes</b>.</p>
+        <div style="text-align:center;margin:0 0 24px;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Reset Password</a>
+        </div>
+        <p style="color:#888;font-size:12px;">If you didn't request a password reset, you can safely ignore this email.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+def forgot_password():
+    d = request.json or {}
+    email = d.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+    with get_db() as db:
+        u = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if not u:
+            return jsonify({"ok": True})  # don't reveal user existence
+        token = secrets.token_urlsafe(32)
+        from datetime import timedelta
+        # 12-minute expiry (within the 10-15 minute requirement)
+        expires = (now_ist() + timedelta(minutes=12)).strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
+        db.execute("UPDATE users SET pw_reset_token=?, pw_reset_expires=? WHERE id=?", (token, expires, u["id"]))
+    _send_password_reset_email(email, u["name"], token)
+    _audit("forgot_password", email, "Password reset requested")
+    return jsonify({"ok": True})
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def reset_password():
+    d = request.json or {}
+    token = d.get("token", "").strip()
+    new_pw = d.get("password", "")
+    if not token or not new_pw:
+        return jsonify({"error": "Token and new password required"}), 400
+    if len(new_pw) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    now_str = ts()
+    with get_db() as db:
+        u = db.execute("SELECT * FROM users WHERE pw_reset_token=?", (token,)).fetchone()
+        if not u:
+            return jsonify({"error": "Invalid or expired reset link"}), 400
+        if u["pw_reset_expires"] and u["pw_reset_expires"] < now_str:
+            return jsonify({"error": "Reset link expired. Please request a new one."}), 400
+        new_hash = hash_pw(new_pw)
+        # Invalidate all sessions by updating logged_out_at
+        logout_ts = ts()
+        db.execute("UPDATE users SET password=?, pw_reset_token='', pw_reset_expires='', logged_out_at=? WHERE id=?",
+                   (new_hash, logout_ts, u["id"]))
+        _set_logged_out_at(u["id"], logout_ts)
+    _audit("password_reset", u["email"], "Password reset via token")
+    return jsonify({"ok": True})
+
+# ── Device / Session Management ───────────────────────────────────────────────
+
+def _register_session(uid, ws_id, session_id):
+    """Record a new login session in user_sessions table."""
+    ua = request.headers.get("User-Agent", "")[:300]
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()[:64]
+    # Simple device name from UA
+    device_name = "Unknown"
+    ua_lower = ua.lower()
+    if "mobile" in ua_lower or "android" in ua_lower:
+        device_name = "Mobile"
+    elif "iphone" in ua_lower or "ipad" in ua_lower:
+        device_name = "iPhone/iPad"
+    elif "windows" in ua_lower:
+        device_name = "Windows PC"
+    elif "mac" in ua_lower:
+        device_name = "Mac"
+    elif "linux" in ua_lower:
+        device_name = "Linux"
+    now_str = ts()
+    try:
+        with get_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO user_sessions(id,user_id,workspace_id,device_name,ip,user_agent,login_at,last_seen,is_current) VALUES(?,?,?,?,?,?,?,?,1)",
+                (session_id, uid, ws_id, device_name, ip, ua, now_str, now_str)
+            )
+    except Exception as e:
+        log.warning("[session_mgr] Could not register session: %s", e)
+
+@app.route("/api/auth/sessions", methods=["GET"])
+@login_required
+def list_sessions():
+    uid = session.get("user_id")
+    sid = session.get("session_id", "")
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id,device_name,ip,login_at,last_seen FROM user_sessions WHERE user_id=? ORDER BY last_seen DESC LIMIT 20",
+            (uid,)
+        ).fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r["id"],
+            "device_name": r["device_name"],
+            "ip": r["ip"],
+            "login_at": r["login_at"],
+            "last_seen": r["last_seen"],
+            "is_current": r["id"] == sid
+        })
+    return jsonify(result)
+
+@app.route("/api/auth/sessions/<sid>", methods=["DELETE"])
+@login_required
+def revoke_session(sid):
+    uid = session.get("user_id")
+    with get_db() as db:
+        db.execute("DELETE FROM user_sessions WHERE id=? AND user_id=?", (sid, uid))
+    return jsonify({"ok": True})
+
+@app.route("/api/auth/sessions/logout-all", methods=["POST"])
+@login_required
+def logout_all_sessions():
+    uid = session.get("user_id")
+    ws  = session.get("workspace_id", "")
+    logout_ts = ts()
+    _set_logged_out_at(uid, logout_ts)
+    try:
+        _raw_pg("UPDATE users SET logged_out_at=? WHERE id=?", (logout_ts, uid))
+    except Exception: pass
+    try:
+        with get_db() as db:
+            db.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
+    except Exception: pass
+    session.clear()
+    _audit("logout_all_sessions", uid, "User logged out from all devices")
+    return jsonify({"ok": True})
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — ORGANIZATION / WORKSPACE MODEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Email Invites ─────────────────────────────────────────────────────────────
+
+def _send_workspace_invite_email(to_email, inviter_name, ws_name, token, role, workspace_id=None):
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/?action=accept-invite&token={token}"
+    subject = f"You're invited to join {ws_name} on Project Tracker"
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">{inviter_name} invited you!</h2>
+        <p style="color:#555;margin:0 0 8px;">You've been invited to join the <b>{ws_name}</b> workspace as <b>{role.title()}</b>.</p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Accept Invitation</a>
+        </div>
+        <p style="color:#888;font-size:12px;">Invite link expires in 7 days. If you weren't expecting this, ignore it.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(to_email, subject, body, workspace_id), daemon=True).start()
+
+@app.route("/api/workspace/invite", methods=["POST"])
+@login_required
+def workspace_invite_user():
+    """Admin/Owner sends an email invite to a specific address."""
+    d = request.json or {}
+    email = d.get("email", "").strip().lower()
+    role  = d.get("role", "viewer")
+    if role not in ("owner","admin","developer","tester","viewer"):
+        role = "viewer"
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+    uid  = session.get("user_id")
+    ws   = wid()
+    with get_db() as db:
+        me = db.execute("SELECT role,name FROM users WHERE id=?", (uid,)).fetchone()
+        if not me or me["role"] not in ("owner","admin"):
+            return jsonify({"error": "Only owners and admins can invite"}), 403
+        ws_row = db.execute("SELECT name FROM workspaces WHERE id=?", (ws,)).fetchone()
+        ws_name = ws_row["name"] if ws_row else "the workspace"
+        # Check if already a member
+        existing = db.execute("SELECT id FROM users WHERE email=? AND workspace_id=?", (email, ws)).fetchone()
+        if existing:
+            return jsonify({"error": "User is already a workspace member"}), 409
+        # Create or update invite
+        from datetime import timedelta
+        token = secrets.token_urlsafe(32)
+        expires = (now_ist() + timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
+        inv_id = f"inv{secrets.token_hex(8)}"
+        db.execute(
+            "INSERT INTO workspace_invites(id,workspace_id,email,role,invited_by,token,expires,accepted,created) VALUES(?,?,?,?,?,?,?,0,?)",
+            (inv_id, ws, email, role, uid, token, expires, ts())
+        )
+    _send_workspace_invite_email(email, me["name"], ws_name, token, role, ws)
+    _audit("workspace_invite_sent", uid, f"Invited {email} as {role}")
+    return jsonify({"ok": True, "invite_id": inv_id})
+
+@app.route("/api/auth/accept-invite", methods=["POST"])
+def accept_workspace_invite():
+    """Accept a workspace email invite — creates or links user account."""
+    d = request.json or {}
+    token = d.get("token", "").strip()
+    name  = d.get("name", "").strip()
+    password = d.get("password", "")
+    if not token:
+        return jsonify({"error": "Invite token required"}), 400
+    now_str = ts()
+    with get_db() as db:
+        inv = db.execute("SELECT * FROM workspace_invites WHERE token=?", (token,)).fetchone()
+        if not inv:
+            return jsonify({"error": "Invalid or expired invite link"}), 400
+        if inv["accepted"]:
+            return jsonify({"error": "Invite already used"}), 400
+        if inv["expires"] and inv["expires"] < now_str:
+            return jsonify({"error": "Invite link has expired"}), 400
+        ws_id = inv["workspace_id"]
+        email = inv["email"]
+        role  = inv["role"]
+        # Check if user already exists in any workspace
+        existing = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if existing:
+            # Link to this workspace — create a new user record for this workspace
+            new_uid = f"u{secrets.token_hex(8)}"
+            av = "".join(w[0] for w in (existing["name"] or name or email).split())[:2].upper()
+            import random
+            c = random.choice(CLRS)
+            db.execute(
+                "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified,auth_provider) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
+                (new_uid, ws_id, existing["name"] or name or email.split("@")[0], email, existing["password"], role, av, c, now_str, existing.get("auth_provider","password"))
+            )
+            uid = new_uid
+        else:
+            # New user — require name + password
+            if not name or not password:
+                return jsonify({"error": "Name and password required to create your account"}), 400
+            if len(password) < 8:
+                return jsonify({"error": "Password must be at least 8 characters"}), 400
+            new_uid = f"u{secrets.token_hex(8)}"
+            av = "".join(w[0] for w in name.split())[:2].upper() or "?"
+            import random
+            c = random.choice(CLRS)
+            db.execute(
+                "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified,auth_provider) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
+                (new_uid, ws_id, name, email, hash_pw(password), role, av, c, now_str, "password")
+            )
+            uid = new_uid
+        db.execute("UPDATE workspace_invites SET accepted=1 WHERE token=?", (token,))
+        # Set up session
+        login_ts = ts()
+        session.clear()
+        session.permanent = True
+        session["user_id"] = uid
+        session["workspace_id"] = ws_id
+        session["role"] = role
+        session["login_at"] = login_ts
+        session_id = secrets.token_hex(16)
+        session["session_id"] = session_id
+        _clear_attempts(f"login:{request.remote_addr}:{email}")
+        _set_logged_out_at(uid, "")
+        ws_row = db.execute("SELECT name FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+        ws_name = ws_row["name"] if ws_row else ""
+        slug = "".join(c2 for c2 in ws_name.lower().replace(" ","-") if c2.isalnum() or c2=="-")[:30] or ws_id
+    _register_session(uid, ws_id, session_id)
+    _audit("invite_accepted", email, f"Joined workspace {ws_id} as {role}")
+    return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id}/dashboard"})
+
+@app.route("/api/workspace/invites", methods=["GET"])
+@login_required
+def list_workspace_invites():
+    ws = wid()
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT i.*,u.name as inviter_name FROM workspace_invites i LEFT JOIN users u ON i.invited_by=u.id WHERE i.workspace_id=? ORDER BY i.created DESC LIMIT 50",
+            (ws,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/workspace/invites/<inv_id>", methods=["DELETE"])
+@login_required
+def revoke_workspace_invite(inv_id):
+    ws = wid()
+    uid = session.get("user_id")
+    with get_db() as db:
+        me = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+        if not me or me["role"] not in ("owner","admin"):
+            return jsonify({"error": "Not authorized"}), 403
+        db.execute("DELETE FROM workspace_invites WHERE id=? AND workspace_id=?", (inv_id, ws))
+    return jsonify({"ok": True})
+
+# ── Domain Auto-Join ──────────────────────────────────────────────────────────
+
+@app.route("/api/workspace/domain-settings", methods=["GET", "POST"])
+@login_required
+def workspace_domain_settings():
+    ws = wid()
+    uid = session.get("user_id")
+    with get_db() as db:
+        me = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+        if not me or me["role"] not in ("owner","admin"):
+            return jsonify({"error": "Not authorized"}), 403
+        ws_row = db.execute("SELECT allowed_domains,domain_join_requires_approval FROM workspaces WHERE id=?", (ws,)).fetchone()
+        if request.method == "GET":
+            import json as _json
+            try:
+                domains = _json.loads(ws_row["allowed_domains"] or "[]")
+            except Exception:
+                domains = []
+            return jsonify({
+                "allowed_domains": domains,
+                "requires_approval": bool(ws_row["domain_join_requires_approval"])
+            })
+        # POST — update
+        d = request.json or {}
+        import json as _json
+        domains = d.get("allowed_domains", [])
+        # Sanitize domains
+        clean_domains = []
+        for dom in domains:
+            dom = dom.strip().lower().lstrip("@")
+            if dom and "." in dom:
+                clean_domains.append(dom)
+        requires_approval = d.get("requires_approval", True)
+        db.execute(
+            "UPDATE workspaces SET allowed_domains=?, domain_join_requires_approval=? WHERE id=?",
+            (_json.dumps(clean_domains), 1 if requires_approval else 0, ws)
+        )
+    return jsonify({"ok": True, "allowed_domains": clean_domains})
+
+@app.route("/api/auth/domain-join-check", methods=["POST"])
+def domain_join_check():
+    """Check if an email's domain allows auto-join to any workspace."""
+    d = request.json or {}
+    email = d.get("email","").strip().lower()
+    if not email or "@" not in email:
+        return jsonify({"workspaces": []})
+    domain = email.split("@")[1]
+    import json as _json
+    with get_db() as db:
+        workspaces = db.execute("SELECT id,name,allowed_domains,domain_join_requires_approval FROM workspaces WHERE suspended=0").fetchall()
+    matches = []
+    for ws in workspaces:
+        try:
+            allowed = _json.loads(ws["allowed_domains"] or "[]")
+        except Exception:
+            allowed = []
+        if domain in allowed:
+            matches.append({
+                "workspace_id": ws["id"],
+                "workspace_name": ws["name"],
+                "requires_approval": bool(ws["domain_join_requires_approval"])
+            })
+    return jsonify({"workspaces": matches})
+
+@app.route("/api/auth/domain-join-request", methods=["POST"])
+def domain_join_request():
+    """User requests to join a workspace via domain match."""
+    d = request.json or {}
+    email     = d.get("email","").strip().lower()
+    ws_id_req = d.get("workspace_id","").strip()
+    name      = d.get("name","").strip()
+    password  = d.get("password","")
+    if not email or not ws_id_req or not name or not password:
+        return jsonify({"error": "All fields required"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    if "@" not in email:
+        return jsonify({"error": "Invalid email"}), 400
+    domain = email.split("@")[1]
+    import json as _json
+    with get_db() as db:
+        ws = db.execute("SELECT * FROM workspaces WHERE id=? AND suspended=0", (ws_id_req,)).fetchone()
+        if not ws:
+            return jsonify({"error": "Workspace not found"}), 404
+        try:
+            allowed = _json.loads(ws["allowed_domains"] or "[]")
+        except Exception:
+            allowed = []
+        if domain not in allowed:
+            return jsonify({"error": "Your email domain is not allowed for this workspace"}), 403
+        existing = db.execute("SELECT id FROM users WHERE email=? AND workspace_id=?", (email, ws_id_req)).fetchone()
+        if existing:
+            return jsonify({"error": "You already have an account in this workspace"}), 409
+        requires_approval = bool(ws["domain_join_requires_approval"])
+        new_uid = f"u{secrets.token_hex(8)}"
+        av = "".join(c2 for c2 in name.split())
+        av = "".join(w[0] for w in name.split())[:2].upper() or "?"
+        import random
+        c = random.choice(CLRS)
+        now_str = ts()
+        # If requires approval, create as pending; otherwise create as viewer immediately
+        role = "viewer"
+        db.execute(
+            "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified) VALUES(?,?,?,?,?,?,?,?,?,1)",
+            (new_uid, ws_id_req, name, email, hash_pw(password), role, av, c, now_str)
+        )
+        ws_name = ws["name"]
+        slug = "".join(c2 for c2 in ws_name.lower().replace(" ","-") if c2.isalnum() or c2=="-")[:30] or ws_id_req
+        if not requires_approval:
+            login_ts = ts()
+            session.clear()
+            session.permanent = True
+            session["user_id"] = new_uid
+            session["workspace_id"] = ws_id_req
+            session["role"] = role
+            session["login_at"] = login_ts
+            session_id = secrets.token_hex(16)
+            session["session_id"] = session_id
+            _set_logged_out_at(new_uid, "")
+            _register_session(new_uid, ws_id_req, session_id)
+            _audit("domain_join", email, f"Auto-joined {ws_id_req} via domain {domain}")
+            return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id_req}/dashboard"})
+        else:
+            # Notify admins
+            _audit("domain_join_request", email, f"Requested access to {ws_id_req} via domain {domain}")
+            return jsonify({"ok": True, "pending_approval": True})
+
+
+
+
 @app.route("/api/auth/register",methods=["POST"])
 def register():
     d=request.json or {}
@@ -2415,16 +2952,38 @@ def register():
         return jsonify({"error":"Invalid mode"}),400
     try:
         with get_db() as db:
-            db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)",
-                       (uid,ws_id,d["name"],d["email"],hash_pw(d["password"]),
-                        d.get("role","Developer"),av,c,ts(),None))
-            session.permanent=True
-            session["user_id"]=uid
-            session["workspace_id"]=ws_id
-            session["role"]=d.get("role","Developer")  # cache role
+            # Send email verification token
+            verify_token = secrets.token_urlsafe(32)
+            from datetime import timedelta
+            verify_expires = (now_ist() + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
+            login_ts = ts()
+            db.execute(
+                "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified,email_verify_token,email_verify_expires) VALUES(?,?,?,?,?,?,?,?,?,0,?,?)",
+                (uid, ws_id, d["name"], d["email"], hash_pw(d["password"]),
+                 d.get("role","Developer"), av, c, login_ts, verify_token, verify_expires))
+            session.permanent = True
+            session["user_id"] = uid
+            session["workspace_id"] = ws_id
+            session["role"] = d.get("role","Developer")
+            session["login_at"] = login_ts
+            session_id = secrets.token_hex(16)
+            session["session_id"] = session_id
+            _set_logged_out_at(uid, "")
+            # Send verification email (non-blocking)
+            _send_verification_email(d["email"], d["name"], verify_token)
+            _register_session(uid, ws_id, session_id)
             _audit("user_register", uid, f"{d['name']} ({d['email']}) registered via {mode}")
-            return jsonify({"id":uid,"workspace_id":ws_id,"name":d["name"],"email":d["email"],
-                            "role":d.get("role","Developer"),"avatar":av,"color":c})
+            # Build workspace dashboard URL
+            ws_row = db.execute("SELECT name,workspace_slug FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+            slug = ""
+            if ws_row:
+                import re as _re
+                slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", (ws_row["name"] or "").lower().strip()).strip("-") or "workspace"
+            result = {"id":uid,"workspace_id":ws_id,"name":d["name"],"email":d["email"],
+                      "role":d.get("role","Developer"),"avatar":av,"color":c}
+            if slug:
+                result["workspace_dashboard_url"] = f"/{slug}/{ws_id}/dashboard"
+            return jsonify(result)
     except Exception as e:
         if "UNIQUE" in str(e): return jsonify({"error":"Email already registered"}),400
         return jsonify({"error":str(e)}),500
