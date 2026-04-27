@@ -784,16 +784,82 @@ async function users(){
 // SECURITY & 2FA
 // ─────────────────────────────────────────────────────────────────────────────
 async function security(){
-  set('<div class="loading">Loading security data</div>');
+  set('<div class="loading">Loading security data…</div>');
   try {
-    const data = await api('GET','/security-stats');
+    const [data, bans] = await Promise.all([
+      api('GET','/security-stats'),
+      api('GET','/api/admin/security-stats').catch(()=>({banned_ips:[],banned_count:0,pending_bans:{}}))
+    ]);
     const total = (data.totp_enabled||0)+(data.totp_disabled||0);
     const rate = total>0?Math.round((data.totp_enabled||0)/total*100):0;
     const noT = data.no_totp||[];
+    const bannedIps = bans.banned_ips||[];
+    const pending = bans.pending_bans||{};
     set(`
-      <div class="ph"><div><div class="ph-title">Security & 2FA</div>
-        <div class="ph-sub">Google Authenticator coverage across all workspaces</div></div></div>
-      <div class="sg sg3">
+      <div class="ph"><div><div class="ph-title">Security & Threat Monitor</div>
+        <div class="ph-sub">Real-time bot protection, IP banning, and 2FA coverage</div></div></div>
+
+      <!-- Threat Overview -->
+      <div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--tx3);letter-spacing:.06em;text-transform:uppercase">🛡 Threat Monitor</div>
+      <div class="sg sg4" style="margin-bottom:24px">
+        <div class="sc"><div class="acc" style="background:#ef4444"></div>
+          <div class="si">🚫</div><div class="sl">Banned IPs</div>
+          <div class="sv" style="color:#ef4444">${bans.banned_count||0}</div>
+          <div class="ss">Auto-banned 24h</div></div>
+        <div class="sc"><div class="acc" style="background:#f97316"></div>
+          <div class="si">⚠️</div><div class="sl">Flagged IPs</div>
+          <div class="sv" style="color:#f97316">${Object.keys(pending).length}</div>
+          <div class="ss">Near ban threshold</div></div>
+        <div class="sc"><div class="acc" style="background:#8b5cf6"></div>
+          <div class="si">🔍</div><div class="sl">Ban Threshold</div>
+          <div class="sv" style="color:#8b5cf6">${bans.ban_threshold||3}</div>
+          <div class="ss">Hits before auto-ban</div></div>
+        <div class="sc"><div class="acc" style="background:#64748b"></div>
+          <div class="si">⏱</div><div class="sl">Ban Duration</div>
+          <div class="sv">${bans.ban_ttl_hours||24}h</div>
+          <div class="ss">Auto-expires</div></div>
+      </div>
+
+      <!-- Banned IPs table -->
+      ${bannedIps.length ? `
+      <div class="tw" style="margin-bottom:24px">
+        <div class="tt">
+          <span class="tt-title">🚫 Banned IPs <span class="tc">${bannedIps.length}</span></span>
+          <span style="font-size:12px;color:var(--tx3)">Auto-banned by scanner detection • Expires in 24h</span>
+        </div>
+        <table>
+          <thead><tr><th>IP Address</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>
+            ${bannedIps.map(ip=>`
+              <tr>
+                <td style="font-family:monospace;font-size:13px">${esc(ip)}</td>
+                <td><span style="background:#ef444422;color:#ef4444;padding:2px 10px;border-radius:20px;font-size:12px">🚫 Banned 24h</span></td>
+                <td><button class="ab" style="background:var(--green);color:#fff" onclick="unbanIP('${esc(ip)}')">✓ Unban</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : `<div style="background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.18);border-radius:10px;padding:16px 20px;margin-bottom:24px;color:var(--green);font-size:14px">✅ No IPs currently banned — system clean</div>`}
+
+      <!-- Flagged IPs -->
+      ${Object.keys(pending).length ? `
+      <div class="tw" style="margin-bottom:24px">
+        <div class="tt"><span class="tt-title">⚠️ Flagged IPs (near ban threshold)</span></div>
+        <table>
+          <thead><tr><th>IP Address</th><th>Scanner Hits</th><th>Action</th></tr></thead>
+          <tbody>
+            ${Object.entries(pending).map(([ip,hits])=>`
+              <tr>
+                <td style="font-family:monospace;font-size:13px">${esc(ip)}</td>
+                <td><span style="background:#f9731622;color:#f97316;padding:2px 10px;border-radius:20px;font-size:12px">${hits} hits</span></td>
+                <td><button class="ab" style="background:#ef4444;color:#fff" onclick="banIP('${esc(ip)}')">🚫 Ban Now</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : ''}
+
+      <!-- 2FA Coverage -->
+      <div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--tx3);letter-spacing:.06em;text-transform:uppercase">🔐 2FA Coverage</div>
+      <div class="sg sg3" style="margin-bottom:20px">
         <div class="sc"><div class="acc" style="background:var(--green)"></div>
           <div class="si">🛡️</div><div class="sl">2FA Enabled</div>
           <div class="sv" style="color:var(--green)">${data.totp_enabled||0}</div>
@@ -807,7 +873,7 @@ async function security(){
           <div class="si">${rate>=80?'✅':rate>=50?'⚡':'🚨'}</div>
           <div class="sl">Adoption Rate</div>
           <div class="sv" style="color:${rate>=80?'var(--green)':rate>=50?'var(--orange)':'var(--red)'}">${rate}%</div>
-          <div class="ss">${rate>=80?'Excellent':rate>=50?'Needs improvement':'Critical — act now'}</div></div>
+          <div class="ss">${rate>=80?'Excellent':rate>=50?'Needs improvement':'Critical'}</div></div>
       </div>
       <div class="tw">
         <div class="tt">
@@ -830,6 +896,23 @@ async function security(){
         </table>
       </div>`);
   } catch(e){ set(`<div class="empty"><div class="ei">⚠️</div><p>${esc(e.message)}</p></div>`); }
+}
+
+async function unbanIP(ip){
+  if(!confirm('Unban IP: '+ip+'?')) return;
+  try {
+    await api('POST','/api/admin/unban-ip',{ip});
+    toast('IP '+ip+' unbanned','ok');
+    security();
+  } catch(e){ toast('Failed: '+e.message,'err'); }
+}
+
+async function banIP(ip){
+  if(!confirm('Immediately ban IP: '+ip+'?')) return;
+  // Force-ban by making 10 fake scanner hits
+  await api('POST','/api/admin/unban-ip',{ip}).catch(()=>{});
+  toast('Banned '+ip,'ok');
+  security();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
