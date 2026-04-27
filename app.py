@@ -351,6 +351,7 @@ _SCANNER_EXTS = (
 )
 _SCANNER_PREFIXES = (
     '/wp-', '/wordpress/', '/wordpress-', '/joomla/', '/drupal/',
+    '/.aws/', '/.gcp/', '/.azure/', '/.ssh/', '/.docker/', '/.kube/',
     '/phpMyAdmin', '/phpmyadmin', '/pma/', '/myadmin/', '/mysql/',
     '/admin.php', '/shell.php', '/config.php', '/setup.php',
     '/xmlrpc.php', '/install.php', '/upgrade.php', '/update.php',
@@ -4847,7 +4848,26 @@ def index():
         return "", 200
 
     if "user_id" in session and session.get("workspace_id"):
+        uid = session["user_id"]
         ws_id = session["workspace_id"]
+        login_at = session.get("login_at", "")
+        # CRITICAL: Verify the session is not invalidated (post-logout)
+        # Without this check, a race between logout + redirect causes ghost dashboard:
+        # logout fires (async), browser navigates to /, old session cookie still sent,
+        # server sees user_id in session → 302 to dashboard → user sees dashboard flash.
+        if login_at:
+            cached_logout = _get_logged_out_at(uid)
+            if cached_logout is None:
+                try:
+                    rows2 = _raw_pg("SELECT logged_out_at FROM users WHERE id=?", (uid,), fetch=True)
+                    cached_logout = rows2[0].get("logged_out_at","") if rows2 else ""
+                    _set_logged_out_at(uid, cached_logout)
+                except Exception:
+                    cached_logout = ""
+            if cached_logout and login_at < cached_logout:
+                # Session was invalidated — clear it and show login
+                session.clear()
+                return _serve_html()
         # Use slug cached in session — avoids a DB query on every / visit
         cached_slug = session.get("_ws_slug")
         if cached_slug:
@@ -5747,15 +5767,23 @@ def catch_all(path):
 
     # Block sensitive paths — never serve .git, .env, config files, etc.
     _lower = path.lower()
-    _BLOCKED_PREFIXES = (".git", ".env", ".htaccess", ".DS_Store", "wp-admin", "wp-login")
-    _BLOCKED_EXTENSIONS = (".env", ".config", ".cfg", ".bak", ".sql", ".log", ".key", ".pem")
-    if any(_lower == p or _lower.startswith(p + "/") for p in _BLOCKED_PREFIXES):
+    _segments = [s for s in _lower.split("/") if s]
+    _BLOCKED_PREFIXES = (
+        ".git", ".env", ".htaccess", ".DS_Store", "wp-admin", "wp-login",
+        ".aws", ".gcp", ".azure", ".ssh", ".docker", ".kube",   # cloud credential dirs
+    )
+    _BLOCKED_EXTENSIONS = (
+        ".env", ".config", ".cfg", ".bak", ".sql", ".log", ".key",
+        ".pem", ".crt", ".cer", ".p12", ".pfx",  # cert/key files
+    )
+    # Block if ANY segment is a known sensitive prefix
+    if any(_lower == p or _lower.startswith(p + "/") or any(seg == p.lstrip(".") or seg.startswith(p.lstrip(".")) for seg in _segments) for p in _BLOCKED_PREFIXES):
         return "", 404
-    _last = path.split("/")[-1]
+    _last = _segments[-1] if _segments else ""
     if any(_last.endswith(ext) for ext in _BLOCKED_EXTENSIONS):
         return "", 404
-    # Also block bare dotfiles
-    if _last.startswith("."):
+    # Block any path where ANY segment starts with a dot (e.g. .aws/credentials)
+    if any(seg.startswith(".") for seg in _segments):
         return "", 404
 
     # Reject file requests (have an extension) that weren't caught above

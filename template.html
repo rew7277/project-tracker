@@ -2839,13 +2839,19 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
       r=await api.put('/api/tasks/'+p.id,p);
     } else {
       // CREATE: post then show immediately
+      // Pre-optimistic: show task immediately before API responds
+      const tempId2='tmp_'+Date.now();
+      const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
+      setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
       r=await api.post('/api/tasks',{...p,project:project.id});
       if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...r,_localTs:Date.now()}:t)}));
+      } else {
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
       }
     }
-    // Background bust-reload: fresh DB read bypasses stale worker cache
-    setTimeout(()=>onReload(undefined,true),1500);
+    // Background reload uses normal cache (server already injected new item)
+    setTimeout(()=>onReload(),2000);
     return r;
   };
   const delTask=async id=>{
@@ -3072,16 +3078,39 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
           teamMids.forEach(mid=>{if(!mems.includes(mid))mems.push(mid);});
         }
       }
-      const newProj=await api.post('/api/projects',{name:name.trim(),description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
-      if(newProj&&newProj.error){setErr(newProj.error);return;}
-      if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
-      // ✅ Optimistic update: show project instantly with _localTs for grace period guard
-      const optProj={...newProj,_localTs:Date.now()};
-      setData&&setData(prev=>({...prev,projects:[optProj,...(prev.projects||[])]}));
+      // ✅ TRUE PRE-OPTIMISTIC: show project IMMEDIATELY before API call returns.
+      // User sees the card appear the instant they click Create (no 3s wait).
+      const tempId='tmp_'+Date.now();
+      const tempProj={
+        id:tempId,name:name.trim(),description:desc,color,
+        members:mems,team_id:projTeam||'',
+        created:new Date().toISOString(),progress:0,
+        _localTs:Date.now(),_pending:true   // _pending flag shows a subtle spinner
+      };
+      setData&&setData(prev=>({...prev,projects:[tempProj,...(prev.projects||[])]}));
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Background bust-reload: forces fresh DB read on server (non-blocking, 1.5s delay)
-      setTimeout(()=>reload(undefined,true),1500);
-    }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
+
+      // API call runs in background — UI is already updated
+      const newProj=await api.post('/api/projects',{name:tempProj.name,description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
+      if(newProj&&newProj.error){
+        // Rollback: remove temp item, restore form, show error
+        setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>p.id!==tempId)}));
+        setShowNew(true);setName(tempProj.name);setDesc(tempProj.description||'');setErr(newProj.error);
+        return;
+      }
+      if(!newProj||!newProj.id){
+        setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>p.id!==tempId)}));
+        setErr('Failed to create project. Please try again.');return;
+      }
+      // Replace temp with real project from server (has real ID, created_at, etc.)
+      const realProj={...newProj,_localTs:Date.now()};
+      setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
+      // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
+      setTimeout(()=>reload(),2000);
+    }catch(e){
+      setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>!p._pending)}));
+      setErr('Error creating project: '+(e.message||'Unknown error'));
+    }
   };
 
   const filteredProjects=useMemo(()=>{
@@ -3416,10 +3445,22 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
       r=await api.put('/api/tasks/'+p.id,p);
     } else {
-      // CREATE: post then prepend to state instantly with _localTs grace marker
+      // CREATE: pre-optimistic — show task card INSTANTLY before API returns
+      const tempTaskId='tmp_'+Date.now();
+      const tempTask={
+        ...p, id:tempTaskId,
+        created:new Date().toISOString(),
+        _localTs:Date.now(),_pending:true
+      };
+      setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
+      // API call in background
       r=await api.post('/api/tasks',p);
       if(r&&r.id){
-        setData&&setData(prev=>({...prev,tasks:[{...r,_localTs:Date.now()},...(prev.tasks||[])]}));
+        // Replace temp with real task from server
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
+      } else {
+        // Rollback temp task on error
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
       }
     }
     // Trigger celebration if task just completed
@@ -3427,8 +3468,8 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background bust-reload: fresh DB read bypasses stale worker cache
-    setTimeout(()=>reload(undefined,true),1500);
+    // Background reload uses normal cache (server already injected new item)
+    setTimeout(()=>reload(),2000);
     return r;
   };
   const delT=async id=>{
@@ -8985,27 +9026,34 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
+    // 1. Abort all in-flight API requests FIRST — stops polls, cancels app-data
     api._abort();
-    // 2. Unsubscribe from push notifications
+    // 2. Clear state immediately so UI shows nothing (prevents flash of dashboard)
+    window._pfCurrentUser=null;
+    setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
+    // 3. Unsubscribe from push notifications (best-effort)
     if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Call logout endpoint (best-effort, don't await — we're leaving anyway)
-    fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-    // 4. Clear ALL localStorage keys so next user (or same user) starts fresh
-    // This prevents stale workspace data from persisting between sessions
+    // 4. AWAIT logout endpoint — critical: do NOT fire-and-forget.
+    // Without await, the browser navigates to / BEFORE the server clears the
+    // session cookie. The index route sees user_id still in session → 302 to
+    // dashboard → user sees a ghost dashboard flash before 401s kick in.
+    try{
+      await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)});
+    }catch(e){
+      // Timeout or network error — server may have already cleared the session.
+      // Proceed with client-side cleanup anyway.
+    }
+    // 5. Clear ALL localStorage only AFTER server confirms logout
     try{
       const keysToRemove=['pf_had_session','pf_dark','pf_col','pf_perms','pf_accent','pfLastSeen'];
       keysToRemove.forEach(k=>{try{localStorage.removeItem(k);}catch{}});
-      // Also remove any user-keyed keys (recents, etc.)
       Object.keys(localStorage).forEach(k=>{
         if(k.startsWith('vw_ai_recents_')||k.startsWith('pf_')){
           try{localStorage.removeItem(k);}catch{}
         }
       });
     }catch{}
-    window._pfCurrentUser=null;
-    setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 5. Hard redirect to clean login URL (no workspace ID in URL)
+    // 6. Hard redirect — session is now cleared on server, index won't redirect to dashboard
     window.location.href='/?action=login';
   };
 
