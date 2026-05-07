@@ -2795,6 +2795,8 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
   const [members,setMembers]=useState(safe(project.members));const [saving,setSaving]=useState(false);
+  // Sync local members state whenever the parent reloads and passes fresh project.members
+  useEffect(()=>{if(!edit)setMembers(safe(project.members));},[project.members,edit]);
   const [showNew,setShowNew]=useState(false);const [editTask,setEditTask]=useState(null);
   const [projTeamId,setProjTeamId]=useState((project.team_id)||'');
 
