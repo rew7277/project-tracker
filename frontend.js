@@ -1288,9 +1288,54 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
     {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, ];
   const devNav=[
     {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, ];
-  const navItems=(isAdminManager?adminNav:devNav).filter(it=>
+  const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>
     it.id!=='dm'||(wsDmEnabled||isAdminManager)
   );
+
+  // ── Drag-to-reorder sidebar nav ──────────────────────────────────────────
+  const NAV_ORDER_KEY='pf_nav_order_'+(cu&&cu.id||'x');
+  const [navOrder,setNavOrder]=useState(()=>{
+    try{const s=localStorage.getItem(NAV_ORDER_KEY);if(s){const ids=JSON.parse(s);return ids;}
+    }catch{}return null;
+  });
+  const navItems=useMemo(()=>{
+    if(!navOrder)return baseNavItems;
+    const ordered=[];
+    navOrder.forEach(id=>{const it=baseNavItems.find(x=>x.id===id);if(it)ordered.push(it);});
+    baseNavItems.forEach(it=>{if(!ordered.find(x=>x.id===it.id))ordered.push(it);});
+    return ordered;
+  },[baseNavItems,navOrder]);
+
+  const dragItem=useRef(null);
+  const dragOver=useRef(null);
+  const [dragOverId,setDragOverId]=useState(null);
+
+  const handleDragStart=(e,id)=>{
+    dragItem.current=id;
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain',id);
+  };
+  const handleDragEnter=(e,id)=>{
+    dragOver.current=id;
+    setDragOverId(id);
+    e.preventDefault();
+  };
+  const handleDragOver=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';};
+  const handleDrop=(e,id)=>{
+    e.preventDefault();
+    if(dragItem.current===id){setDragOverId(null);return;}
+    const newOrder=[...navItems.map(x=>x.id)];
+    const fromIdx=newOrder.indexOf(dragItem.current);
+    const toIdx=newOrder.indexOf(id);
+    newOrder.splice(fromIdx,1);
+    newOrder.splice(toIdx,0,dragItem.current);
+    setNavOrder(newOrder);
+    try{localStorage.setItem(NAV_ORDER_KEY,JSON.stringify(newOrder));}catch{}
+    dragItem.current=null;dragOver.current=null;setDragOverId(null);
+  };
+  const handleDragEnd=()=>{dragItem.current=null;dragOver.current=null;setDragOverId(null);};
+  const resetNavOrder=()=>{setNavOrder(null);try{localStorage.removeItem(NAV_ORDER_KEY);}catch{}};
+  // ────────────────────────────────────────────────────────────────────────
 
   const themeIcon=dark
     ?html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`
@@ -1327,24 +1372,40 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
       </div>
 
             <nav style=${{flex:1,overflowY:'auto',padding:'8px 6px',display:'flex',flexDirection:'column',gap:2}}>
+        ${navOrder&&!col?html`<div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',paddingBottom:2}}>
+          <button title="Reset sidebar order" onClick=${resetNavOrder}
+            style=${{fontSize:9,color:'var(--tx3)',background:'transparent',border:'none',cursor:'pointer',padding:'1px 4px',borderRadius:4}}
+            onMouseEnter=${e=>e.currentTarget.style.color='#a5b4fc'}
+            onMouseLeave=${e=>e.currentTarget.style.color='var(--tx3)'}>↺ reset</button>
+        </div>`:null}
         ${navItems.map(it=>html`
           <button key=${it.id}
-            title=${col?it.label:''}
+            title=${col?it.label:'Drag to reorder'}
+            draggable="true"
+            onDragStart=${e=>handleDragStart(e,it.id)}
+            onDragEnter=${e=>handleDragEnter(e,it.id)}
+            onDragOver=${handleDragOver}
+            onDrop=${e=>handleDrop(e,it.id)}
+            onDragEnd=${handleDragEnd}
             onClick=${()=>setView(it.id)}
             style=${{
               display:'flex',alignItems:'center', gap:col?0:10, width:'100%', padding:col?'10px 0':'9px 10px', borderRadius:9,border:'none',cursor:'pointer',
-              background:baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
+              background:dragOverId===it.id?'rgba(129,140,248,0.22)':baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
               color:baseView===it.id?'#a5b4fc':'rgba(200,195,240,0.65)',
               fontSize:12,fontWeight:baseView===it.id?700:500,
               transition:'all .12s',textAlign:'left',
-              borderLeft:baseView===it.id&&!col?'2px solid #818cf8':'2px solid transparent',
+              borderLeft:baseView===it.id&&!col?'2px solid #818cf8':dragOverId===it.id&&!col?'2px solid rgba(129,140,248,0.6)':'2px solid transparent',
               justifyContent:col?'center':'flex-start', position:'relative',
-              boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none'
+              boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none',
+              outline:dragOverId===it.id?'1px dashed rgba(129,140,248,0.4)':'none',
             }}
-            onMouseEnter=${e=>{if(baseView!==it.id){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
-            onMouseLeave=${e=>{if(baseView!==it.id){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
+            onMouseEnter=${e=>{if(baseView!==it.id&&dragOverId!==it.id){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
+            onMouseLeave=${e=>{if(baseView!==it.id&&dragOverId!==it.id){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
             <span style=${{flexShrink:0,width:col?'auto':18,display:'flex',alignItems:'center',justifyContent:'center',opacity:baseView===it.id?1:.8}}>${NAV_ICONS[it.id]||null}</span>
             ${!col?html`<span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:12,flex:1}}>${it.label}</span>`:null}
+            ${!col?html`<span title="Drag to reorder" style=${{flexShrink:0,opacity:0.3,display:'flex',alignItems:'center',padding:'0 2px'}}>
+              <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="6" r="1.2"/><circle cx="6" cy="6" r="1.2"/><circle cx="2" cy="10" r="1.2"/><circle cx="6" cy="10" r="1.2"/></svg>
+            </span>`:null}
             ${it.badge&&!col?html`<span style=${{fontSize:8,fontWeight:800,padding:'1px 5px',borderRadius:4,background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',letterSpacing:'.04em',flexShrink:0}}>${it.badge}</span>`:null}
             ${it.id==='notifs'&&unread>0?html`<span style=${{
               position:'absolute',top:6,right:col?6:10, minWidth:16,height:16,borderRadius:8, background:'var(--rd)',color:'#fff', fontSize:9,fontWeight:700, display:'flex',alignItems:'center',justifyContent:'center', padding:'0 4px'
@@ -2037,7 +2098,12 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   },[teams]);
 
   const projTasks=useMemo(()=>safe(allTasks).filter(t=>t.project===project.id),[allTasks,project.id]);
-  const projUsers=useMemo(()=>safe(members).map(id=>safe(allUsers).find(u=>u.id===id)).filter(Boolean),[members,allUsers]);
+  // Fix: dynamically include ALL current team members (not just the snapshot stored in project.members)
+  const projUsers=useMemo(()=>{
+    const teamMids=projTeamId?JSON.parse((safe(teams).find(t=>t.id===projTeamId)||{}).member_ids||'[]'):[];
+    const allMids=[...new Set([...safe(members),...teamMids])];
+    return allMids.map(id=>safe(allUsers).find(u=>u.id===id)).filter(Boolean);
+  },[members,allUsers,projTeamId,teams]);
   const done=projTasks.filter(t=>t.stage==='completed').length;
   const pc=projTasks.length?Math.round(projTasks.reduce((a,t)=>a+(t.pct||0),0)/projTasks.length):(project.progress||0);
   const stageGroups=KCOLS.map(s=>({s,tasks:projTasks.filter(t=>t.stage===s)})).filter(g=>g.tasks.length>0);
@@ -2219,8 +2285,8 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
         </div>
       </div>
 
-      ${showNew?html`<${TaskModal} task=${null} onClose=${()=>setShowNew(false)} onSave=${saveTask} projects=${[project]} users=${projUsers.length?projUsers:allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]} activeTeam=${activeTeam}/>`:null}
-      ${editTask?html`<${TaskModal} task=${editTask} onClose=${()=>setEditTask(null)} onSave=${saveTask} onDel=${delTask} projects=${[project]} users=${projUsers.length?projUsers:allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]}/>`:null}
+      ${showNew?html`<${TaskModal} task=${null} onClose=${()=>setShowNew(false)} onSave=${saveTask} projects=${[project]} users=${allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]} activeTeam=${activeTeam}/>`:null}
+      ${editTask?html`<${TaskModal} task=${editTask} onClose=${()=>setEditTask(null)} onSave=${saveTask} onDel=${delTask} projects=${[project]} users=${allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]}/>`:null}
     </div>`;
 }
 
@@ -4335,9 +4401,9 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     </tr>`;
 }
 
-function TeamView({users,cu,reload}){
+function TeamView({users,cu,reload,projects}){
   const [tab,setTab]=useState('teams');
-  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [newMemberTeam,setNewMemberTeam]=useState('');const [err,setErr]=useState('');
+  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [newMemberTeam,setNewMemberTeam]=useState('');const [newMemberProject,setNewMemberProject]=useState('');const [err,setErr]=useState('');
   const [teams,setTeams]=useState([]);const [showNewTeam,setShowNewTeam]=useState(false);
   const [editTeam,setEditTeam]=useState(null);
   const [tName,setTName]=useState('');const [tLead,setTLead]=useState('');const [tMembers,setTMembers]=useState([]);
@@ -4364,8 +4430,18 @@ function TeamView({users,cu,reload}){
         }
       }
     }
+    // If a project was selected, add the new user to that project immediately
+    if(newMemberProject&&r.id){
+      const proj=safe(projects).find(p=>p.id===newMemberProject);
+      if(proj){
+        const existingMems=JSON.parse(proj.members||'[]');
+        if(!existingMems.includes(r.id)){
+          await api.put('/api/projects/'+proj.id,{name:proj.name,members:[...existingMems,r.id]});
+        }
+      }
+    }
     await reload();
-    setShowNew(false);setName('');setEmail('');setPw('');setNewMemberTeam('');
+    setShowNew(false);setName('');setEmail('');setPw('');setNewMemberTeam('');setNewMemberProject('');
   };
 
   const openNewTeam=()=>{setEditTeam(null);setTName('');setTLead('');setTMembers([]);setShowNewTeam(true);};
@@ -4497,9 +4573,20 @@ function TeamView({users,cu,reload}){
               <span>✓</span><span>Will be added to <strong>${(teams.find(t=>t.id===newMemberTeam)||{}).name||''}</strong> on creation</span>
             </div>`:null}
           </div>
+          <div>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO PROJECT <span style=${{color:'var(--tx3)',fontWeight:400}}>(optional)</span></label>
+            <select class="sel" value=${newMemberProject} onChange=${e=>setNewMemberProject(e.target.value)}
+              style=${{background:newMemberProject?'rgba(90,140,255,.07)':'var(--sf)',borderColor:newMemberProject?'var(--ac)':'var(--bd)'}}>
+              <option value="">— No project —</option>
+              ${safe(projects).map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+            </select>
+            ${newMemberProject?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:5,display:'flex',alignItems:'center',gap:4}}>
+              <span>✓</span><span>Will be added to <strong>${(safe(projects).find(p=>p.id===newMemberProject)||{}).name||''}</strong></span>
+            </div>`:null}
+          </div>
           ${err?html`<div style=${{color:'var(--rd)',fontSize:12,padding:'7px 11px',background:'rgba(248,113,113,.07)',borderRadius:7}}>${err}</div>`:null}
           <div style=${{display:'flex',gap:9,justifyContent:'flex-end'}}>
-            <button class="btn bg" onClick=${()=>{setShowNew(false);setNewMemberTeam('');}}>Cancel</button>
+            <button class="btn bg" onClick=${()=>{setShowNew(false);setNewMemberTeam('');setNewMemberProject('');}}>Cancel</button>
             <button class="btn bp" onClick=${add}>Add Member</button>
           </div>
         </div>
@@ -7721,7 +7808,7 @@ function App(){
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} onNavigate=${setView}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
-            ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load}/>`:null}
+            ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
