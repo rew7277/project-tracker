@@ -2044,8 +2044,11 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 
   const saveEdit=async()=>{
     setSaving(true);
-    await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
-    await onReload();setSaving(false);setEdit(false);
+    const r=await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
+    // Optimistic: reflect member/name changes in local state immediately so they don't vanish
+    if(r&&r.id)setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===r.id?{...p,...r}:p)}));
+    setSaving(false);setEdit(false);
+    onReload(); // fire-and-forget sync — UI already updated above
   };
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
@@ -4334,7 +4337,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
 
 function TeamView({users,cu,reload}){
   const [tab,setTab]=useState('teams');
-  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [err,setErr]=useState('');
+  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [newMemberTeam,setNewMemberTeam]=useState('');const [err,setErr]=useState('');
   const [teams,setTeams]=useState([]);const [showNewTeam,setShowNewTeam]=useState(false);
   const [editTeam,setEditTeam]=useState(null);
   const [tName,setTName]=useState('');const [tLead,setTLead]=useState('');const [tMembers,setTMembers]=useState([]);
@@ -4345,7 +4348,25 @@ function TeamView({users,cu,reload}){
   const loadTeams=useCallback(async()=>{const d=await api.get('/api/teams');setTeams(Array.isArray(d)?d:[]);},[]);
   useEffect(()=>{loadTeams();},[loadTeams]);
 
-  const add=async()=>{if(!name||!email||!pw){setErr('All fields required.');return;}setErr('');const r=await api.post('/api/users',{name,email,password:pw,role});if(r.error)setErr(r.error);else{await reload();setShowNew(false);setName('');setEmail('');setPw('');}};
+  const add=async()=>{
+    if(!name||!email||!pw){setErr('All fields required.');return;}
+    setErr('');
+    const r=await api.post('/api/users',{name,email,password:pw,role});
+    if(r.error){setErr(r.error);return;}
+    // If a team was selected, add the new user to that team immediately
+    if(newMemberTeam&&r.id){
+      const team=teams.find(t=>t.id===newMemberTeam);
+      if(team){
+        const existing=JSON.parse(team.member_ids||'[]');
+        if(!existing.includes(r.id)){
+          await api.put('/api/teams/'+newMemberTeam,{name:team.name,lead_id:team.lead_id||'',member_ids:[...existing,r.id]});
+          loadTeams();
+        }
+      }
+    }
+    await reload();
+    setShowNew(false);setName('');setEmail('');setPw('');setNewMemberTeam('');
+  };
 
   const openNewTeam=()=>{setEditTeam(null);setTName('');setTLead('');setTMembers([]);setShowNewTeam(true);};
   const openEditTeam=t=>{setEditTeam(t);setTName(t.name);setTLead(t.lead_id||'');setTMembers(JSON.parse(t.member_ids||'[]'));setShowNewTeam(true);};
@@ -4458,16 +4479,27 @@ function TeamView({users,cu,reload}){
       </div>`:null}
 
         ${showNew?html`<div class="ov" onClick=${e=>e.target===e.currentTarget&&setShowNew(false)}>
-      <div class="mo fi" style=${{maxWidth:400}}>
+      <div class="mo fi" style=${{maxWidth:420}}>
         <div style=${{display:'flex',justifyContent:'space-between',marginBottom:18}}><h2 style=${{fontSize:17,fontWeight:700,color:'var(--tx)'}}>👤 Add Member</h2><button class="btn bg" style=${{padding:'7px 10px'}} onClick=${()=>setShowNew(false)}>✕</button></div>
         <div style=${{display:'flex',flexDirection:'column',gap:11}}>
           <input class="inp" placeholder="Full Name" value=${name} onInput=${e=>setName(e.target.value)}/>
           <input class="inp" type="email" placeholder="Email" value=${email} onInput=${e=>setEmail(e.target.value)}/>
           <input class="inp" type="password" placeholder="Password" value=${pw} onInput=${e=>setPw(e.target.value)}/>
           <select class="sel" value=${role} onChange=${e=>setRole(e.target.value)}>${ROLES.map(r=>html`<option key=${r}>${r}</option>`)}</select>
+          <div>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO TEAM <span style=${{color:'var(--tx3)',fontWeight:400}}>(optional)</span></label>
+            <select class="sel" value=${newMemberTeam} onChange=${e=>setNewMemberTeam(e.target.value)}
+              style=${{background:newMemberTeam?'rgba(90,140,255,.07)':'var(--sf)',borderColor:newMemberTeam?'var(--ac)':'var(--bd)'}}>
+              <option value="">— No team —</option>
+              ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
+            </select>
+            ${newMemberTeam?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:5,display:'flex',alignItems:'center',gap:4}}>
+              <span>✓</span><span>Will be added to <strong>${(teams.find(t=>t.id===newMemberTeam)||{}).name||''}</strong> on creation</span>
+            </div>`:null}
+          </div>
           ${err?html`<div style=${{color:'var(--rd)',fontSize:12,padding:'7px 11px',background:'rgba(248,113,113,.07)',borderRadius:7}}>${err}</div>`:null}
           <div style=${{display:'flex',gap:9,justifyContent:'flex-end'}}>
-            <button class="btn bg" onClick=${()=>setShowNew(false)}>Cancel</button>
+            <button class="btn bg" onClick=${()=>{setShowNew(false);setNewMemberTeam('');}}>Cancel</button>
             <button class="btn bp" onClick=${add}>Add Member</button>
           </div>
         </div>

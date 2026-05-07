@@ -1324,6 +1324,8 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_timelogs_date ON time_logs(workspace_id, date)",
             "CREATE TABLE IF NOT EXISTS task_events (id TEXT PRIMARY KEY, workspace_id TEXT, task_id TEXT, user_id TEXT, event_type TEXT, old_val TEXT DEFAULT \'\', new_val TEXT DEFAULT \'\', ts TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_proj_stage ON tasks(workspace_id, project, stage)",
             "ALTER TABLE time_logs ADD COLUMN project_id TEXT DEFAULT ''",
             "ALTER TABLE time_logs ADD COLUMN task_id TEXT DEFAULT ''",
             "ALTER TABLE workspaces ADD COLUMN required_hours_per_day REAL DEFAULT 8",
@@ -3602,30 +3604,38 @@ def update_project(pid):
         p=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?",(pid,wid())).fetchone()
         if not p: return jsonify({"error":"Not found"}),404
         p_team = p["team_id"] if "team_id" in p.keys() else ""
+        try: old_mems=set(json.loads(p["members"] or "[]"))
+        except: old_mems=set()
+        new_mems=d.get("members", list(old_mems))
         db.execute("""UPDATE projects SET name=?,description=?,start_date=?,target_date=?,color=?,members=?,team_id=?
                       WHERE id=? AND workspace_id=?""",
                    (d.get("name",p["name"]),d.get("description",p["description"]),
                     d.get("start_date",p["start_date"]),d.get("target_date",p["target_date"]),
                     d.get("color",p["color"]),
-                    json.dumps(d.get("members",json.loads(p["members"]))),
+                    json.dumps(new_mems),
                     d.get("team_id",p_team),pid,wid()))
         updated=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?",(pid,wid())).fetchone()
         actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
         aname=actor["name"] if actor else "Someone"
-        try: mems=json.loads(updated["members"] or "[]")
-        except: mems=[]
+        # Only notify NEWLY ADDED members — not all members on every save (was slow + spammy)
+        newly_added=[uid for uid in new_mems if uid not in old_mems and uid!=session["user_id"]]
         base_ts=int(datetime.now().timestamp()*1000)
-        for i,uid in enumerate(mems):
-            if uid==session["user_id"]: continue
-            nid=f"n{base_ts+i}"
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                       (nid,wid(),"project_added",f"{aname} updated project '{updated['name']}'",uid,0,ts()))
-            threading.Thread(target=push_notification_to_user,
-                args=(db,uid,f"📁 Project updated: {updated['name']}",
-                      f"{aname} made changes to '{updated['name']}'","/"),daemon=True).start()
-        _cache_bust(wid(), "projects")
-        return jsonify(dict(updated))
-
+        if newly_added:
+            # Batch all notification inserts in ONE round-trip instead of N separate queries
+            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(newly_added))
+            flat=[v for i,uid in enumerate(newly_added)
+                  for v in (f"n{base_ts+i}",wid(),"project_added",
+                            f"{aname} added you to project '{updated['name']}'",uid,0,ts())]
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
+            for uid in newly_added:
+                threading.Thread(target=push_notification_to_user,
+                    args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
+                          f"{aname} added you to '{updated['name']}'","/"),daemon=True).start()
+    # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
+    # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
+    # that's why added members weren't visible until cache expired.
+    _cache_bust_ws(wid())
+    return jsonify(dict(updated))
 @app.route("/api/projects/<pid>",methods=["DELETE"])
 @login_required
 def del_project(pid):
@@ -3720,51 +3730,58 @@ def create_task():
                     d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
                     ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
                     d.get("team_id","")))
+        # Batch: fetch creator + assignee info + project members in ONE round-trip each
         creator=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
         cname=creator["name"] if creator else "Someone"
         base_ts=int(datetime.now().timestamp()*1000)
+        assignee_user=None
         if d.get("assignee") and d["assignee"]!=session["user_id"]:
-            nid=f"n{base_ts}"
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                       (nid,wid(),"task_assigned",f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
-            _cache_bust(wid(), "notifs")  # new notification — bust cache
             assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
-            if assignee_user and assignee_user["email"]:
+        proj=None
+        proj_members=[]
+        if d.get("project"):
+            proj=db.execute("SELECT name,members FROM projects WHERE id=? AND workspace_id=?",(d["project"],wid())).fetchone()
+            if proj:
+                try: proj_members=json.loads(proj["members"] or "[]")
+                except: proj_members=[]
+        # Build ALL notification rows first, then batch-insert in ONE query
+        notif_rows=[]
+        if assignee_user:
+            notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
+                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
+        for i,uid in enumerate(proj_members):
+            if uid==session["user_id"] or uid==d.get("assignee"): continue
+            proj_name=proj["name"] if proj else ""
+            notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
+                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts()))
+        if notif_rows:
+            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(notif_rows))
+            flat=[v for row in notif_rows for v in row]
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
+        # Send emails + push notifications in background threads (non-blocking)
+        if assignee_user:
+            if assignee_user["email"]:
                 threading.Thread(target=send_task_assigned_email,
                     args=(assignee_user["email"],assignee_user["name"],d["title"],cname,tid,wid()),
                     daemon=True).start()
             threading.Thread(target=push_notification_to_user,
-                args=(db, d["assignee"], f"✅ New task assigned: {d['title']}",
-                      f"{cname} assigned you this task [{d.get('priority','medium')}]", "/"),
+                args=(db,d["assignee"],f"✅ New task assigned: {d['title']}",
+                      f"{cname} assigned you this task [{d.get('priority','medium')}]","/"),
                 daemon=True).start()
-        if d.get("project"):
-            proj=db.execute("SELECT name,members FROM projects WHERE id=? AND workspace_id=?",(d["project"],wid())).fetchone()
-            if proj:
-                try:
-                    members=json.loads(proj["members"] or "[]")
-                except: members=[]
-                for i,uid in enumerate(members):
-                    if uid==session["user_id"] or uid==d.get("assignee"): continue
-                    nid2=f"n{base_ts+10+i}"
-                    db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                               (nid2,wid(),"task_assigned",f"{cname} created task '{d['title']}' in {proj['name']}",uid,0,ts()))
-                    threading.Thread(target=push_notification_to_user,
-                        args=(db, uid, f"📋 New task in {proj['name']}",
-                              f"{cname} created '{d['title']}'", "/"),
-                        daemon=True).start()
+        for uid in proj_members:
+            if uid==session["user_id"] or uid==d.get("assignee"): continue
+            threading.Thread(target=push_notification_to_user,
+                args=(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
+                      f"{cname} created '{d['title']}'","/"),daemon=True).start()
         t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
-        if d.get("project"):
-            assignee_name=""
-            if d.get("assignee"):
-                au=db.execute("SELECT name FROM users WHERE id=?",(d["assignee"],)).fetchone()
-                if au: assignee_name=f" → assigned to {au['name']}"
+        if d.get("project") and proj:
+            assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
             sysmid=f"m{base_ts+1}"
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
-        # Inject into appdata cache FIRST, then only bust standalone task cache
         _cache_inject_item(wid(), "tasks", dict(t))
-        _cache_bust(wid(), "notifs")   # new notifs may have been created
+        if notif_rows: _cache_bust(wid(), "notifs")
         return jsonify(dict(t))
 
 
