@@ -3604,13 +3604,13 @@ def create_project():
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
-        # Inject into appdata cache FIRST (before busting) so existing
-        # cache entries are updated in-place with the new project.
-        # This prevents multi-worker stale reads — workers that still have
-        # their old cache now have the new project injected.
+        # Inject into appdata cache FIRST so workers with stale cache get the new project immediately.
         _cache_inject_item(wid(), "projects", dict(p))
-        # Only bust the notifs sub-key (not projects — we just injected it)
-        _cache_bust(wid(), "notifs")
+        # Bust the FULL workspace cache — this forces the next /api/app-data background
+        # refresh to re-fetch from DB with the new project included.
+        # Previously only busting 'notifs' left the appdata cache stale, causing the
+        # background SWR refresh to overwrite state and make the new project disappear.
+        _cache_bust_ws(wid())
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
