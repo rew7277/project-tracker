@@ -2059,12 +2059,23 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   };
   const saveTask=async p=>{
     let r;
-    if(p.id&&allTasks.find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
-    else r=await api.post('/api/tasks',{...p,project:project.id});
-    await onReload();
+    if(p.id&&allTasks.find(t=>t.id===p.id)){
+      r=await api.put('/api/tasks/'+p.id,p);
+      // Optimistic update for existing task — no vanish during reload
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+    } else {
+      r=await api.post('/api/tasks',{...p,project:project.id});
+      // Optimistic insert for new task so it doesn't vanish while reload is in-flight
+      if(r&&r.id)setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
+    }
+    onReload();
     return r;
   };
-  const delTask=async id=>{await api.del('/api/tasks/'+id);await onReload();};
+  const delTask=async id=>{
+    // Optimistic: remove from UI immediately, reload confirms in background
+    setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
+    api.del('/api/tasks/'+id).then(()=>onReload()).catch(()=>onReload());
+  };
 
   return html`
     <div class="ov" onClick=${e=>e.target===e.currentTarget&&onClose()}>
@@ -2301,7 +2312,8 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(newProj&&newProj.error){setErr(newProj.error);return;}
       if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Optimistic: inject new project immediately, then sync once in background
+      // Optimistic: inject new project immediately so it doesn't vanish while reload is in-flight
+      setData&&setData(prev=>({...prev,projects:[newProj,...prev.projects]}));
       reload();
     }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
   };
@@ -2643,6 +2655,9 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     // Optimistic: reflect change immediately, server will confirm
     if(p.id){
       setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+    } else if(r&&r.id){
+      // NEW task: inject immediately so it doesn't vanish while reload is in-flight
+      setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
     }
     reload();return r;
   };
@@ -4558,8 +4573,15 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     if(!nTitle.trim())return;
     setSaving(true);
     const payload={title:nTitle,description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);}
-    else{await api.post('/api/tickets',payload);}
+    if(editTicket){
+      const r=await api.put('/api/tickets/'+editTicket.id,payload);
+      // Optimistic update so edited ticket doesn't flicker back to old values
+      if(r&&r.id)setTickets(prev=>prev.map(t=>t.id===editTicket.id?{...t,...payload}:t));
+    } else {
+      const r=await api.post('/api/tickets',payload);
+      // Optimistic insert so new ticket doesn't vanish while load() is in-flight
+      if(r&&r.id)setTickets(prev=>[r,...prev]);
+    }
     setSaving(false);setShowNew(false);setEditTicket(null);
     setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
     load();
