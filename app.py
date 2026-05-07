@@ -1559,16 +1559,25 @@ def _get_logged_out_at(uid):
         return _logout_cache[uid]  # "" or timestamp
 
 def _set_logged_out_at(uid, ts_val):
-    """Store logged_out_at in cache (all workers via Redis, or local dict)."""
+    """Store logged_out_at in cache (all workers via Redis, or local dict).
+    Also evicts the per-user 'me' cache so /api/auth/me re-checks DB on next call."""
     cache_key = f"ptcache:logout_ts:{uid}"
+    me_key    = f"ptcache:me:{uid}"
     if _redis_client is not None:
         try:
             _redis_client.set(cache_key, ts_val or "", ex=86400*30)
+            _redis_client.delete(me_key)   # evict stale me-cache on login/logout
             return
         except Exception:
             pass
     with _logout_cache_lock:
         _logout_cache[uid] = ts_val or ""
+    # Evict from in-process cache dict too
+    try:
+        with _CACHE_LOCK:
+            _CACHE.pop(f"me:{uid}", None)
+    except Exception:
+        pass
 
 def login_required(f):
     @wraps(f)
@@ -3543,14 +3552,20 @@ def _appdata_cache_get(ws, uid, key):
 def get_projects():
     ws, uid = wid(), session["user_id"]
     team_id = request.args.get("team_id", "")
-    data, found = _appdata_cache_get(ws, uid, "projects")
-    if found:
-        if team_id:
-            return jsonify([p for p in data if p.get("team_id") == team_id])
-        return jsonify(data)
-    cache_key = f"projects:{ws}:{team_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
+    bust    = request.args.get("bust", "0") == "1"   # bust=1 skips ALL caches (called after delete)
+
+    if not bust:
+        data, found = _appdata_cache_get(ws, uid, "projects")
+        if found:
+            if team_id:
+                return jsonify([p for p in data if p.get("team_id") == team_id])
+            return jsonify(data)
+        cache_key = f"projects:{ws}:{team_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    # bust=1 OR cache cold — always hit DB
     with get_db() as db:
         if team_id:
             rows = db.execute(
@@ -3560,7 +3575,9 @@ def get_projects():
             rows = db.execute(
                 "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (ws,)).fetchall()
         result = [dict(r) for r in rows]
-        _cache_set(cache_key, result)
+        if not bust:
+            cache_key = f"projects:{ws}:{team_id}"
+            _cache_set(cache_key, result)
         return jsonify(result)
 
 @app.route("/api/projects",methods=["POST"])
@@ -4204,10 +4221,28 @@ def update_team(tid):
     with get_db() as db:
         t=db.execute("SELECT * FROM teams WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
         if not t: return jsonify({"error":"not found"}),404
+        new_member_ids = d.get("member_ids", json.loads(t["member_ids"] or "[]"))
         db.execute("UPDATE teams SET name=?,lead_id=?,member_ids=? WHERE id=?",
                    (d.get("name",t["name"]),d.get("lead_id",t["lead_id"]),
-                    json.dumps(d.get("member_ids",json.loads(t["member_ids"] or "[]"))),tid))
-        return jsonify(dict(db.execute("SELECT * FROM teams WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
+                    json.dumps(new_member_ids),tid))
+        # ── Auto-sync: merge team members into all projects linked to this team ──
+        # This ensures the Members tab in a project always reflects team membership.
+        if new_member_ids:
+            linked = db.execute(
+                "SELECT id, members FROM projects WHERE workspace_id=? AND team_id=?",
+                (wid(), tid)).fetchall()
+            for proj in linked:
+                try:
+                    existing = set(json.loads(proj["members"] or "[]"))
+                    merged   = list(existing | set(new_member_ids))
+                    db.execute("UPDATE projects SET members=? WHERE id=? AND workspace_id=?",
+                               (json.dumps(merged), proj["id"], wid()))
+                except Exception:
+                    pass
+        updated = db.execute("SELECT * FROM teams WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
+    # Bust full workspace cache so project members reflect immediately on next poll
+    _cache_bust_ws(wid())
+    return jsonify(dict(updated))
 
 @app.route("/api/teams/<tid>", methods=["DELETE"])
 @login_required

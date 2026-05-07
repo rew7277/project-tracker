@@ -2119,12 +2119,24 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
     onClose(); // close modal immediately for snappy feel
+    const pid=project.id;
     // Optimistic: remove project + its tasks from UI right away
     setData&&setData(prev=>({...prev,
-      projects:prev.projects.filter(p=>p.id!==project.id),
-      tasks:prev.tasks.filter(t=>t.project!==project.id)
+      projects:prev.projects.filter(p=>p.id!==pid),
+      tasks:prev.tasks.filter(t=>t.project!==pid)
     }));
-    api.del('/api/projects/'+project.id).then(()=>onReload()).catch(()=>onReload());
+    try{
+      await api.del('/api/projects/'+pid);
+    }catch(_){}
+    // bust=1 forces a fresh DB read, bypassing stale multi-worker cache
+    // so the deleted project does NOT reappear on next reload
+    try{
+      const fresh=await api.get('/api/projects?bust=1');
+      if(Array.isArray(fresh)){
+        setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid)}));
+      }
+    }catch(_){}
+    onReload();
   };
   const saveTask=async p=>{
     let r;
@@ -4419,7 +4431,9 @@ function TeamView({users,cu,reload,projects}){
     setErr('');
     const r=await api.post('/api/users',{name,email,password:pw,role});
     if(r.error){setErr(r.error);return;}
-    // If a team was selected, add the new user to that team immediately
+    // If a team was selected, add the new user to that team immediately.
+    // The backend PUT /api/teams/:id now also auto-syncs the new member
+    // into all projects linked to that team (so Members tab updates instantly).
     if(newMemberTeam&&r.id){
       const team=teams.find(t=>t.id===newMemberTeam);
       if(team){
