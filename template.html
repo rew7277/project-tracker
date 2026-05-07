@@ -2794,9 +2794,10 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
-  const [members,setMembers]=useState(safe(project.members));const [saving,setSaving]=useState(false);
+  const parseMems=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m);return Array.isArray(p)?p:[];}catch{return [];}};
+  const [members,setMembers]=useState(parseMems(project.members));const [saving,setSaving]=useState(false);
   // Sync local members state whenever the parent reloads and passes fresh project.members
-  useEffect(()=>{if(!edit)setMembers(safe(project.members));},[project.members,edit]);
+  useEffect(()=>{if(!edit)setMembers(parseMems(project.members));},[project.members,edit]);
   const [showNew,setShowNew]=useState(false);const [editTask,setEditTask]=useState(null);
   const [projTeamId,setProjTeamId]=useState((project.team_id)||'');
 
@@ -2821,7 +2822,14 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 
   const saveEdit=async()=>{
     setSaving(true);
-    await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
+    const saved=await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
+    // Optimistically patch the project in global state RIGHT NOW so the Members tab
+    // never reads stale data — even if app-data poll fires before onReload() completes
+    if(saved&&!saved.error){
+      setData&&setData(prev=>({...prev,
+        projects:prev.projects.map(p=>p.id===project.id?{...p,...saved}:p)
+      }));
+    }
     await onReload();setSaving(false);setEdit(false);
   };
   const delProject=async()=>{
