@@ -3346,8 +3346,9 @@ def add_user():
             db.execute("INSERT INTO users (id,workspace_id,name,email,password,role,avatar,color,created,avatar_data) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (uid,wid(),d["name"],d["email"],hash_pw(d["password"]),
                         d.get("role","Developer"),av,c,ts(),None))
-            return jsonify({"id":uid,"workspace_id":wid(),"name":d["name"],
-                            "email":d["email"],"role":d.get("role","Developer"),"avatar":av,"color":c})
+        _cache_bust_ws(wid())
+        return jsonify({"id":uid,"workspace_id":wid(),"name":d["name"],
+                        "email":d["email"],"role":d.get("role","Developer"),"avatar":av,"color":c})
     except Exception as e:
         if "UNIQUE" in str(e): return jsonify({"error":"Email already in use"}),400
         return jsonify({"error":str(e)}),500
@@ -3371,6 +3372,7 @@ def update_user(uid):
             result=dict(u)
             result.pop("password",None)
             result.pop("plain_password",None)  # never expose plaintext passwords
+            _cache_bust_ws(wid())
             return jsonify(result)
         return jsonify({})
 
@@ -3382,7 +3384,8 @@ def del_user(uid):
         db.execute("DELETE FROM users WHERE id=? AND workspace_id=?",(uid,wid()))
         name_str = f"{u['name']} ({u['email']})" if u else uid
         _audit("user_deleted", uid, f"{name_str} removed from workspace {wid()}")
-        return jsonify({"ok":True})
+    _cache_bust_ws(wid())
+    return jsonify({"ok":True})
 
 # ── Projects ──────────────────────────────────────────────────────────────────
 @app.route("/api/projects/all")
@@ -3798,7 +3801,9 @@ def create_task():
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
         _cache_inject_item(wid(), "tasks", dict(t))
-        if notif_rows: _cache_bust(wid(), "notifs")
+        # Bust full workspace cache so app-data background refresh picks up the new task.
+        # Previously only busting 'notifs' left app-data stale, causing new tasks to vanish.
+        _cache_bust_ws(wid())
         return jsonify(dict(t))
 
 
@@ -3941,7 +3946,7 @@ def update_task(tid):
                     args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
                           f"{cname}: {latest.get('text','')[:80]}", "/"),
                     daemon=True).start()
-        _cache_bust(wid(), "tasks")
+        _cache_bust_ws(wid())
         return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
 
 
@@ -4008,8 +4013,8 @@ def del_task(tid):
         if cu_role not in ("Admin","Manager","TeamLead"):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
         db.execute("DELETE FROM tasks WHERE id=? AND workspace_id=?",(tid,wid()))
-        _cache_bust(wid(), "tasks")
-        return jsonify({"ok":True})
+    _cache_bust_ws(wid())
+    return jsonify({"ok":True})
 
 # ── Files ─────────────────────────────────────────────────────────────────────
 @app.route("/api/files")
@@ -4212,7 +4217,9 @@ def create_team():
     with get_db() as db:
         db.execute("INSERT INTO teams VALUES (?,?,?,?,?,?)",
                    (tid,wid(),d["name"],d.get("lead_id",""),json.dumps(d.get("member_ids",[])),ts()))
-        return jsonify(dict(db.execute("SELECT * FROM teams WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
+        result=dict(db.execute("SELECT * FROM teams WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+    _cache_bust_ws(wid())
+    return jsonify(result)
 
 @app.route("/api/teams/<tid>", methods=["PUT"])
 @login_required
@@ -4249,7 +4256,8 @@ def update_team(tid):
 def delete_team(tid):
     with get_db() as db:
         db.execute("DELETE FROM teams WHERE id=? AND workspace_id=?",(tid,wid()))
-        return jsonify({"ok":True})
+    _cache_bust_ws(wid())
+    return jsonify({"ok":True})
 
 @app.route("/api/teams/<tid>/dashboard")
 @login_required
@@ -4344,7 +4352,9 @@ def create_ticket():
             rname=reporter["name"] if reporter else "Someone"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now))
-        return jsonify(dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
+        result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+    _cache_bust_ws(wid())
+    return jsonify(result)
 
 @app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
@@ -4367,7 +4377,9 @@ def update_ticket(tid):
                     d.get("status",t["status"]),d.get("assignee",t["assignee"]),
                     d.get("project",t["project"]),json.dumps(d.get("tags",json.loads(t["tags"] or "[]"))),now,
                     d.get("team_id",cur_team_id),tid))
-        return jsonify(dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
+        result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+    _cache_bust_ws(wid())
+    return jsonify(result)
 
 @app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
@@ -4379,7 +4391,8 @@ def delete_ticket(tid):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tickets."}),403
         db.execute("DELETE FROM tickets WHERE id=? AND workspace_id=?",(tid,wid()))
         db.execute("DELETE FROM ticket_comments WHERE ticket_id=? AND workspace_id=?",(tid,wid()))
-        return jsonify({"ok":True})
+    _cache_bust_ws(wid())
+    return jsonify({"ok":True})
 
 @app.route("/api/tickets/<tid>/comments", methods=["GET"])
 @login_required
