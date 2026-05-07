@@ -2825,11 +2825,17 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
     onClose();
+    const pid=project.id;
     setData&&setData(prev=>({...prev,
-      projects:prev.projects.filter(p=>p.id!==project.id),
-      tasks:prev.tasks.filter(t=>t.project!==project.id)
+      projects:prev.projects.filter(p=>p.id!==pid),
+      tasks:prev.tasks.filter(t=>t.project!==pid)
     }));
-    api.del('/api/projects/'+project.id).then(()=>onReload()).catch(()=>onReload());
+    try{await api.del('/api/projects/'+pid);}catch(_){}
+    try{
+      const fresh=await api.get('/api/projects?bust=1');
+      if(Array.isArray(fresh))setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid)}));
+    }catch(_){}
+    onReload();
   };
   const saveTask=async p=>{
     let r;
@@ -5137,9 +5143,10 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     </tr>`;
 }
 
-function TeamView({users,cu,reload}){
+function TeamView({users,cu,reload,projects}){
   const [tab,setTab]=useState('teams');
   const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [err,setErr]=useState('');
+  const [newMemberTeam,setNewMemberTeam]=useState('');const [newMemberProject,setNewMemberProject]=useState('');
   const [teams,setTeams]=useState([]);const [showNewTeam,setShowNewTeam]=useState(false);
   const [editTeam,setEditTeam]=useState(null);
   const [tName,setTName]=useState('');const [tLead,setTLead]=useState('');const [tMembers,setTMembers]=useState([]);
@@ -5150,7 +5157,35 @@ function TeamView({users,cu,reload}){
   const loadTeams=useCallback(async()=>{const d=await api.get('/api/teams');setTeams(Array.isArray(d)?d:[]);},[]);
   useEffect(()=>{loadTeams();},[loadTeams]);
 
-  const add=async()=>{if(!name||!email||!pw){setErr('All fields required.');return;}setErr('');const r=await api.post('/api/users',{name,email,password:pw,role});if(r.error)setErr(r.error);else{await reload();setShowNew(false);setName('');setEmail('');setPw('');}};
+  const add=async()=>{
+    if(!name||!email||!pw){setErr('All fields required.');return;}
+    setErr('');
+    const r=await api.post('/api/users',{name,email,password:pw,role});
+    if(r.error){setErr(r.error);return;}
+    // Add to team — backend PUT now auto-syncs member into all linked projects too
+    if(newMemberTeam&&r.id){
+      const team=teams.find(t=>t.id===newMemberTeam);
+      if(team){
+        const existing=JSON.parse(team.member_ids||'[]');
+        if(!existing.includes(r.id)){
+          await api.put('/api/teams/'+newMemberTeam,{name:team.name,lead_id:team.lead_id||'',member_ids:[...existing,r.id]});
+          loadTeams();
+        }
+      }
+    }
+    // Also add to a specific project if selected
+    if(newMemberProject&&r.id){
+      const proj=safe(projects).find(p=>p.id===newMemberProject);
+      if(proj){
+        const existingMems=JSON.parse(proj.members||'[]');
+        if(!existingMems.includes(r.id)){
+          await api.put('/api/projects/'+proj.id,{name:proj.name,members:[...existingMems,r.id]});
+        }
+      }
+    }
+    await reload();
+    setShowNew(false);setName('');setEmail('');setPw('');setNewMemberTeam('');setNewMemberProject('');
+  };
 
   const openNewTeam=()=>{setEditTeam(null);setTName('');setTLead('');setTMembers([]);setShowNewTeam(true);};
   const openEditTeam=t=>{setEditTeam(t);setTName(t.name);setTLead(t.lead_id||'');setTMembers(JSON.parse(t.member_ids||'[]'));setShowNewTeam(true);};
@@ -5278,9 +5313,26 @@ function TeamView({users,cu,reload}){
           <input class="inp" type="email" placeholder="Email" value=${email} onInput=${e=>setEmail(e.target.value)}/>
           <input class="inp" type="password" placeholder="Password" value=${pw} onInput=${e=>setPw(e.target.value)}/>
           <select class="sel" value=${role} onChange=${e=>setRole(e.target.value)}>${ROLES.map(r=>html`<option key=${r}>${r}</option>`)}</select>
+          <div>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO TEAM <span style=${{fontWeight:400}}>(optional)</span></label>
+            <select class="sel" value=${newMemberTeam} onChange=${e=>setNewMemberTeam(e.target.value)}
+              style=${{borderColor:newMemberTeam?'var(--ac)':'var(--bd)'}}>
+              <option value="">— No team —</option>
+              ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
+            </select>
+            ${newMemberTeam?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:4}}>✓ Will be synced to all projects linked to this team</div>`:null}
+          </div>
+          <div>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO PROJECT <span style=${{fontWeight:400}}>(optional)</span></label>
+            <select class="sel" value=${newMemberProject} onChange=${e=>setNewMemberProject(e.target.value)}
+              style=${{borderColor:newMemberProject?'var(--ac)':'var(--bd)'}}>
+              <option value="">— No project —</option>
+              ${safe(projects).map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+            </select>
+          </div>
           ${err?html`<div style=${{color:'var(--rd)',fontSize:12,padding:'7px 11px',background:'rgba(248,113,113,.07)',borderRadius:7}}>${err}</div>`:null}
           <div style=${{display:'flex',gap:9,justifyContent:'flex-end'}}>
-            <button class="btn bg" onClick=${()=>setShowNew(false)}>Cancel</button>
+            <button class="btn bg" onClick=${()=>{setShowNew(false);setNewMemberTeam('');setNewMemberProject('');}}>Cancel</button>
             <button class="btn bp" onClick=${add}>Add Member</button>
           </div>
         </div>
@@ -9243,7 +9295,7 @@ function App(){
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} onNavigate=${setView}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
-            ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load}/>`:null}
+            ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
