@@ -1028,72 +1028,501 @@ def send_email(to_email, subject, body_html, workspace_id=None):
         _tb.print_exc()
         return False
 
-def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    """Send email when a task is assigned"""
-    subject = f"Task Assigned: {task_title}"
-    body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-            <h2 style="color: #6366f1;">New Task Assignment</h2>
-            <p>Hi {user_name},</p>
-            <p><strong>{assigner_name}</strong> has assigned you to a new task:</p>
-            <div style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin: 0 0 10px 0; color: #1f2937;">{task_title}</h3>
-            </div>
-            <p><a href="{APP_URL}" style="display: inline-block; background: #6366f1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
-        </div>
-    </body>
-    </html>
+def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
+    """Shared premium email shell — dark header, white card, branded footer.
+    All child templates call this so visual consistency is guaranteed across
+    every notification type without duplicating the shell HTML.
     """
-    send_email(user_email, subject, body, workspace_id)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light"/>
+<title>Project Tracker</title>
+</head>
+<body style="margin:0;padding:0;background:#0f0f13;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f0f13;min-height:100vh;">
+    <tr><td align="center" style="padding:40px 16px;">
+
+      <!-- Outer card -->
+      <table width="600" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:600px;width:100%;background:#18181f;border-radius:20px;
+                    overflow:hidden;box-shadow:0 32px 80px rgba(0,0,0,.6);">
+
+        <!-- ── HEADER ── -->
+        {header_html}
+
+        <!-- ── BODY ── -->
+        <tr><td style="padding:36px 40px 28px;">
+          {body_html}
+
+          <!-- CTA button -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin:32px 0 8px;">
+            <tr>
+              <td style="border-radius:12px;background:{cta_color};">
+                <a href="{cta_url}"
+                   style="display:inline-block;padding:14px 32px;color:#fff;font-size:15px;
+                          font-weight:700;text-decoration:none;letter-spacing:.3px;
+                          border-radius:12px;">{cta_text}</a>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- ── FOOTER ── -->
+        <tr><td style="background:#111118;padding:20px 40px;border-top:1px solid #2a2a35;">
+          <p style="margin:0;font-size:11px;color:#4a4a5a;text-align:center;letter-spacing:.5px;">
+            PROJECT TRACKER &nbsp;·&nbsp; Notification System &nbsp;·&nbsp;
+            <a href="{cta_url}" style="color:#5a5a7a;text-decoration:none;">Manage preferences</a>
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _header_strip(accent, icon, label):
+    """Thin coloured accent bar + icon + label for the email header."""
+    return f"""
+    <tr><td>
+      <!-- Accent bar -->
+      <div style="height:4px;background:linear-gradient(90deg,{accent},transparent);"></div>
+      <!-- Logo row -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="padding:24px 40px 20px;">
+        <tr>
+          <td style="vertical-align:middle;">
+            <span style="font-size:22px;font-weight:900;color:#fff;
+                         letter-spacing:-1px;">Project<span style="color:{accent};">Tracker</span></span>
+          </td>
+          <td align="right" style="vertical-align:middle;">
+            <span style="font-size:11px;color:#4a4a5a;letter-spacing:1px;text-transform:uppercase;">{label}</span>
+          </td>
+        </tr>
+      </table>
+      <!-- Divider -->
+      <div style="height:1px;background:#2a2a35;margin:0 40px;"></div>
+    </td></tr>"""
+
+
+def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
+    """Premium email: task assigned to user."""
+    accent  = "#6366f1"
+    subject = f"\u2705 New Task: {task_title}"
+    header  = _header_strip(accent, "📋", "Task Assignment")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
+        You've got a new task 📋
+      </p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{assigner_name}</strong> has assigned you to a task.
+      </p>
+
+      <!-- Task card -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
+                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          </td>
+          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
+            <span style="display:inline-block;background:#6366f120;color:{accent};
+                         font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;
+                         letter-spacing:.5px;">NEW</span>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:8px 0 0;font-size:12px;color:#4a4a5a;">
+        Assigned by <strong style="color:#6a6a8a;">{assigner_name}</strong>
+      </p>"""
+    html = _email_base(header, body, APP_URL, "Open Task →", accent)
+    send_email(user_email, subject, html, workspace_id)
+
 
 def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
-    """Send email when task status changes"""
-    subject = f"Task Status Updated: {task_title}"
-    body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-            <h2 style="color: #10b981;">Task Status Changed</h2>
-            <p>Hi {user_name},</p>
-            <p><strong>{changer_name}</strong> has updated the status of your task:</p>
-            <div style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin: 0 0 10px 0; color: #1f2937;">{task_title}</h3>
-                <p style="margin: 0;"><strong>New Status:</strong> <span style="color: #10b981; font-weight: bold;">{new_stage}</span></p>
-            </div>
-            <p><a href="{APP_URL}" style="display: inline-block; background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Task</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
-        </div>
-    </body>
-    </html>
-    """
-    send_email(user_email, subject, body, workspace_id)
+    """Premium email: task stage changed."""
+    stage_meta = {
+        "completed":   ("#10b981", "✅", "Completed"),
+        "production":  ("#10b981", "🚀", "In Production"),
+        "in_progress": ("#f59e0b", "⚡", "In Progress"),
+        "review":      ("#8b5cf6", "👀", "In Review"),
+        "backlog":     ("#6b7280", "📥", "Backlog"),
+        "testing":     ("#06b6d4", "🧪", "Testing"),
+    }
+    accent, icon, label = stage_meta.get(new_stage, ("#6366f1","🔄","Updated"))
+    subject = f"{icon} Task moved to {label}: {task_title}"
+    header  = _header_strip(accent, icon, "Status Update")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
+        {icon} Status changed
+      </p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{changer_name}</strong> updated your task.
+      </p>
+
+      <!-- Task card -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
+                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0 0 16px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <!-- Stage pill -->
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td style="background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:6px 14px;">
+                <span style="font-size:13px;font-weight:700;color:{accent};">{icon} {label}</span>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Task →", accent)
+    send_email(user_email, subject, html, workspace_id)
+
 
 def send_comment_email(user_email, user_name, task_title, commenter_name, comment_text, workspace_id):
-    """Send email when someone comments on a task"""
-    subject = f"New Comment on: {task_title}"
-    body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-            <h2 style="color: #f59e0b;">New Comment</h2>
-            <p>Hi {user_name},</p>
-            <p><strong>{commenter_name}</strong> commented on your task:</p>
-            <div style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin: 0 0 10px 0; color: #1f2937;">{task_title}</h3>
-                <div style="background: white; padding: 10px; border-left: 3px solid #f59e0b; margin-top: 10px;">
-                    <p style="margin: 0;">{comment_text}</p>
+    """Premium email: new comment on task."""
+    accent  = "#f59e0b"
+    subject = f"💬 {commenter_name} commented on: {task_title}"
+    header  = _header_strip(accent, "💬", "New Comment")
+    # Avatar initials circle
+    initials = "".join(p[0].upper() for p in commenter_name.split()[:2])
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
+        New comment 💬
+      </p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        someone left a comment on your task.
+      </p>
+
+      <!-- Task label -->
+      <p style="margin:0 0 8px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">On task</p>
+      <p style="margin:0 0 20px;font-size:16px;font-weight:700;color:#e0e0f0;">{task_title}</p>
+
+      <!-- Comment bubble -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;margin-bottom:8px;">
+        <tr><td style="padding:20px 24px;">
+          <!-- Commenter row -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <div style="width:36px;height:36px;border-radius:50%;background:{accent};
+                             display:inline-flex;align-items:center;justify-content:center;">
+                  <span style="font-size:13px;font-weight:800;color:#fff;">{initials}</span>
                 </div>
-            </div>
-            <p><a href="{APP_URL}" style="display: inline-block; background: #f59e0b; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Comment</a></p>
-            <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">Project Tracker Notification System</p>
-        </div>
-    </body>
-    </html>
-    """
-    send_email(user_email, subject, body, workspace_id)
+              </td>
+              <td style="vertical-align:middle;">
+                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{commenter_name}</p>
+                <p style="margin:0;font-size:11px;color:#5a5a7a;">just now</p>
+              </td>
+            </tr>
+          </table>
+          <!-- Comment text -->
+          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
+            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
+          </div>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Reply →", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+# ── Extended Email Notification Functions ─────────────────────────────────────
+
+def send_task_reassigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
+    """Premium email: task reassigned to a different user."""
+    accent  = "#818cf8"
+    subject = f"\U0001f504 Task reassigned to you: {task_title}"
+    header  = _header_strip(accent, "🔄", "Reassignment")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">You're now on this task 🔄</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{assigner_name}</strong> has reassigned this task to you.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Open Task \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
+    """Premium email: task due in 24 hours."""
+    accent  = "#f59e0b"
+    subject = f"\u23f0 Due Tomorrow: {task_title}"
+    header  = _header_strip(accent, "\u23f0", "Due Reminder")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Due tomorrow \u23f0</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        this task is due <strong style="color:{accent};">tomorrow</strong>. Don't miss it!
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">\U0001f4c5 Due {due_date}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Complete Task \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
+    """Premium email: task overdue."""
+    accent  = "#ef4444"
+    subject = f"\U0001f6a8 Overdue: {task_title}"
+    header  = _header_strip(accent, "\U0001f6a8", "Overdue Alert")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">This task is overdue \U0001f6a8</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        the deadline has passed. Please complete or update this task immediately.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Overdue Task</p>
+          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">Was due {due_date}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Update Task \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_name, ticket_id, priority, workspace_id):
+    """Premium email: support ticket assigned."""
+    priority_meta = {
+        "critical": ("#ef4444", "\U0001f534", "Critical"),
+        "high":     ("#f97316", "\U0001f7e0", "High"),
+        "medium":   ("#f59e0b", "\U0001f7e1", "Medium"),
+        "low":      ("#10b981", "\U0001f7e2", "Low"),
+    }
+    accent, dot, plabel = priority_meta.get(priority, ("#6366f1", "\U0001f535", "Normal"))
+    subject = f"\U0001f3ab Ticket assigned: {ticket_title}"
+    header  = _header_strip(accent, "\U0001f3ab", "Support Ticket")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">New ticket assigned \U0001f3ab</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{reporter_name}</strong> assigned you a support ticket.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
+          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{dot} {plabel} Priority</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_ticket_status_email(user_email, user_name, ticket_title, new_status, changer_name, ticket_id, workspace_id):
+    """Premium email: ticket status updated."""
+    status_meta = {
+        "open":        ("#6366f1", "\U0001f4c2", "Opened"),
+        "in_progress": ("#f59e0b", "\u26a1",      "In Progress"),
+        "resolved":    ("#10b981", "\u2705",       "Resolved"),
+        "closed":      ("#6b7280", "\U0001f512",   "Closed"),
+    }
+    accent, icon, label = status_meta.get(new_status, ("#6366f1", "\U0001f3ab", "Updated"))
+    subject = f"{icon} Ticket {label}: {ticket_title}"
+    header  = _header_strip(accent, icon, "Ticket Update")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Ticket {label.lower()} {icon}</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{changer_name}</strong> updated your ticket status.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
+          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{icon} {label}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
+    """Premium email: @mention in a comment."""
+    accent   = "#a78bfa"
+    initials = "".join(p[0].upper() for p in mentioner_name.split()[:2])
+    subject  = f"\U0001f4ac {mentioner_name} mentioned you in: {context_title}"
+    header   = _header_strip(accent, "\U0001f4ac", "Mention")
+    body     = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Someone mentioned you \U0001f4ac</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        you were mentioned in <strong style="color:#fff;">{context_title}</strong>.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <table cellpadding="0" cellspacing="0" border="0">
+                  <tr><td width="38" height="38" style="width:38px;height:38px;border-radius:50%;background:{accent};text-align:center;vertical-align:middle;">
+                    <span style="font-size:14px;font-weight:800;color:#fff;line-height:38px;">{initials}</span>
+                  </td></tr>
+                </table>
+              </td>
+              <td style="vertical-align:middle;">
+                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{mentioner_name}</p>
+                <p style="margin:0;font-size:11px;color:#5a5a7a;">mentioned you</p>
+              </td>
+            </tr>
+          </table>
+          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
+            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
+          </div>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Thread \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+def send_task_completed_email(user_email, user_name, task_title, completer_name, workspace_id):
+    """Premium completion email with confetti-dot celebration row."""
+    accent = "#10b981"
+    subject = f"\u2705 Done! {task_title}"
+    confetti_colors = ["#10b981","#6366f1","#f59e0b","#ef4444","#8b5cf6",
+                       "#06b6d4","#f97316","#10b981","#818cf8","#10b981"]
+    dots = "".join(
+        f'<td width="12" height="12" style="width:12px;height:12px;border-radius:50%;background:{c};">&nbsp;</td>'
+        f'<td width="5">&nbsp;</td>'
+        for c in confetti_colors
+    )
+    confetti = f'<table cellpadding="0" cellspacing="4" border="0" style="margin-bottom:20px;"><tr>{dots}</tr></table>'
+    header   = _header_strip(accent, "\u2705", "Task Complete")
+    body     = f"""
+      {confetti}
+      <p style="margin:0 0 6px;font-size:30px;font-weight:900;color:#fff;line-height:1.2;">Task complete! \U0001f389</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{completer_name}</strong> just wrapped this one up.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Completed</p>
+            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          </td>
+          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
+            <span style="font-size:28px;">\u2705</span>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:16px 0 0;font-size:13px;color:#4a4a5a;text-align:center;">Great work by the team \U0001f91c</p>"""
+    html = _email_base(header, body, APP_URL, "View Project \u2192", accent)
+    send_email(user_email, subject, html, workspace_id)
+
+
+# ── Due Date Checker (runs as background thread every hour) ───────────────────
+
+def _due_date_email_checker():
+    """Background thread: checks every hour for tasks due in ~24h or overdue.
+    Sends one email per task per day using a simple in-memory dedup set.
+    Resets at midnight UTC so users get re-notified the next day if still open."""
+    import time as _t
+    _notified_due   = set()   # task IDs already sent due-soon email today
+    _notified_over  = set()   # task IDs already sent overdue email today
+    _last_reset_day = None
+
+    while True:
+        try:
+            _t.sleep(3600)  # check every hour
+            now_utc = datetime.utcnow()
+            today   = now_utc.date()
+
+            # Reset dedup sets at midnight UTC
+            if _last_reset_day != today:
+                _notified_due.clear()
+                _notified_over.clear()
+                _last_reset_day = today
+
+            tomorrow_str = (now_utc + timedelta(hours=24)).strftime("%Y-%m-%d")
+            today_str    = today.strftime("%Y-%m-%d")
+
+            # Query all open tasks with due dates
+            try:
+                rows = _raw_pg(
+                    """SELECT t.id, t.title, t.due, t.assignee, t.workspace_id,
+                              u.name, u.email
+                       FROM tasks t
+                       JOIN users u ON u.id = t.assignee
+                       WHERE t.deleted_at = ''
+                         AND t.stage NOT IN ('completed','production')
+                         AND t.assignee != ''
+                         AND t.due != ''
+                         AND u.email != ''""",
+                    fetch=True
+                )
+            except Exception as e:
+                log.warning("[due-checker] DB error: %s", e)
+                continue
+
+            for row in (rows or []):
+                tid   = row[0] if isinstance(row, (list, tuple)) else row["id"]
+                title = row[1] if isinstance(row, (list, tuple)) else row["title"]
+                due   = row[2] if isinstance(row, (list, tuple)) else row["due"]
+                name  = row[5] if isinstance(row, (list, tuple)) else row["name"]
+                email = row[6] if isinstance(row, (list, tuple)) else row["email"]
+                ws    = row[4] if isinstance(row, (list, tuple)) else row["workspace_id"]
+
+                if not due or not email:
+                    continue
+
+                due_day = due[:10]  # "YYYY-MM-DD"
+
+                # Overdue: due date has passed
+                if due_day < today_str and tid not in _notified_over:
+                    _notified_over.add(tid)
+                    threading.Thread(
+                        target=send_task_overdue_email,
+                        args=(email, name, title, due_day, tid, ws),
+                        daemon=True
+                    ).start()
+
+                # Due soon: due date is tomorrow
+                elif due_day == tomorrow_str and tid not in _notified_due:
+                    _notified_due.add(tid)
+                    threading.Thread(
+                        target=send_task_due_soon_email,
+                        args=(email, name, title, due_day, tid, ws),
+                        daemon=True
+                    ).start()
+
+        except Exception as e:
+            log.warning("[due-checker] Unexpected error: %s", e)
+
+
+# Start due-date background checker
+_cthread.Thread(target=_due_date_email_checker, daemon=True).start()
 
 # ── Web Push (VAPID) ──────────────────────────────────────────────────────────
 VAPID_KEY_FILE = os.path.join(DATA_DIR, ".pf_vapid")
@@ -3959,8 +4388,37 @@ def update_task(tid):
         if new_assignee_val != old_assignee and new_assignee_val:
             assignee_name = (db.execute("SELECT name FROM users WHERE id=?", (new_assignee_val,)).fetchone() or {}).get("name","?")
             log_task_event(db, wid(), tid, session["user_id"], "assigned", old_assignee or "", assignee_name)
+            # Email the newly assigned person (skip if assigning to yourself)
+            if new_assignee_val != session["user_id"]:
+                new_assignee_row = db.execute("SELECT name,email FROM users WHERE id=?", (new_assignee_val,)).fetchone()
+                reassigner_row   = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+                reassigner_name  = reassigner_row["name"] if reassigner_row else "Someone"
+                if new_assignee_row and new_assignee_row["email"]:
+                    threading.Thread(target=send_task_reassigned_email,
+                        args=(new_assignee_row["email"], new_assignee_row["name"],
+                              d.get("title", t["title"]), reassigner_name, tid, wid()),
+                        daemon=True).start()
         if d.get("stage") and d["stage"]!=old_stage:
             base_ts2=int(datetime.now().timestamp()*1000)
+            # Notify project members when a task is marked completed
+            if d["stage"] in ("completed","production") and t["project"]:
+                _comp_proj = db.execute("SELECT members,owner FROM projects WHERE id=? AND workspace_id=?",
+                                        (t["project"],wid())).fetchone()
+                _comp_actor = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+                _comp_actor_name = _comp_actor["name"] if _comp_actor else "Someone"
+                if _comp_proj:
+                    try: _comp_members = json.loads(_comp_proj["members"] or "[]")
+                    except: _comp_members = []
+                    _notified_completed = set()
+                    for _cm_uid in _comp_members:
+                        if _cm_uid == session["user_id"] or _cm_uid in _notified_completed:
+                            continue
+                        _cm_user = db.execute("SELECT name,email FROM users WHERE id=?", (_cm_uid,)).fetchone()
+                        if _cm_user and _cm_user["email"]:
+                            _notified_completed.add(_cm_uid)
+                            threading.Thread(target=send_task_completed_email,
+                                args=(_cm_user["email"], _cm_user["name"], t["title"], _comp_actor_name, wid()),
+                                daemon=True).start()
             if t["assignee"] and t["assignee"]!=session["user_id"]:
                 nid=f"n{base_ts2}"
                 db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
@@ -4017,6 +4475,23 @@ def update_task(tid):
                     threading.Thread(target=send_comment_email,
                         args=(assignee_user["email"],assignee_user["name"],t["title"],cname,latest.get('text',''),wid()),
                         daemon=True).start()
+            # @mention detection: notify any @mentioned user who isn't already the assignee
+            import re as _re_mention
+            comment_text_raw = latest.get("text","")
+            mentioned_names = _re_mention.findall(r'@([\w ]+)', comment_text_raw)
+            if mentioned_names:
+                all_users_ws = db.execute("SELECT id,name,email FROM users WHERE workspace_id=?", (wid(),)).fetchall()
+                commenter_row = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+                commenter_name_m = commenter_row["name"] if commenter_row else "Someone"
+                for mu in all_users_ws:
+                    for mn in mentioned_names:
+                        if mu["name"].strip().lower() == mn.strip().lower():
+                            if mu["id"] != session["user_id"] and mu["id"] != t.get("assignee","") and mu["email"]:
+                                threading.Thread(target=send_mention_email,
+                                    args=(mu["email"], mu["name"], commenter_name_m,
+                                          t["title"], comment_text_raw, wid()),
+                                    daemon=True).start()
+                            break
                 threading.Thread(target=push_notification_to_user,
                     args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
                           f"{cname}: {latest.get('text','')[:80]}", "/"),
@@ -4432,6 +4907,13 @@ def create_ticket():
             rname=reporter["name"] if reporter else "Someone"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now))
+            # Email the assigned person
+            assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
+            if assignee_tkt and assignee_tkt["email"]:
+                threading.Thread(target=send_ticket_assigned_email,
+                    args=(assignee_tkt["email"],assignee_tkt["name"],d["title"],
+                          rname,tid,d.get("priority","medium"),wid()),
+                    daemon=True).start()
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     _cache_bust_ws(wid())
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
@@ -4457,6 +4939,21 @@ def update_ticket(tid):
                     d.get("project",t["project"]),json.dumps(d.get("tags",json.loads(t["tags"] or "[]"))),now,
                     d.get("team_id",cur_team_id),tid))
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+        # Email on ticket status change — notify assignee and reporter if different
+        if d.get("status") and d["status"] != t["status"]:
+            _tkt_changer = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            _tkt_changer_name = _tkt_changer["name"] if _tkt_changer else "Someone"
+            _tkt_notified = set()
+            for _tkt_uid in [t["assignee"], t["reporter"]]:
+                if not _tkt_uid or _tkt_uid == session["user_id"] or _tkt_uid in _tkt_notified:
+                    continue
+                _tkt_notified.add(_tkt_uid)
+                _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
+                if _tkt_user and _tkt_user["email"]:
+                    threading.Thread(target=send_ticket_status_email,
+                        args=(_tkt_user["email"], _tkt_user["name"], t["title"],
+                              d["status"], _tkt_changer_name, tid, wid()),
+                        daemon=True).start()
     _cache_bust_ws(wid())
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
