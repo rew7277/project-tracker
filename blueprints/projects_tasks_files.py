@@ -129,48 +129,6 @@ def _fetch_app_data_from_db(ws, team_id, uid):
         _return_pool_conn(conn)
 
 
-def _decorate_dashboard_bootstrap(result):
-    """Attach lightweight dashboard summary fields to the bulk payload.
-
-    The frontend can still use the existing arrays, but this gives the
-    dashboard a single canonical startup response for cards/badges without
-    firing separate /notifications, /reminders, /dm/unread, /timelogs,
-    /projects, /tasks, and /tickets requests.
-    """
-    try:
-        tasks = result.get("tasks") or []
-        projects = result.get("projects") or []
-        tickets = result.get("tickets") or []
-        notifs = result.get("notifications") or []
-        dm_unread = result.get("dm_unread") or []
-        reminders = result.get("reminders") or []
-        completed_stages = {"done", "completed", "complete", "closed", "resolved"}
-        active_tasks = [t for t in tasks if str(t.get("stage", "")).lower() not in completed_stages]
-        completed_tasks = [t for t in tasks if str(t.get("stage", "")).lower() in completed_stages]
-        blocked_tasks = [t for t in tasks if str(t.get("stage", "")).lower() == "blocked" or str(t.get("priority", "")).lower() == "blocked"]
-        open_tickets = [t for t in tickets if str(t.get("status", "")).lower() not in completed_stages]
-        result["summary"] = {
-            "project_count": len(projects),
-            "task_count": len(tasks),
-            "active_task_count": len(active_tasks),
-            "completed_task_count": len(completed_tasks),
-            "blocked_task_count": len(blocked_tasks),
-            "ticket_count": len(tickets),
-            "open_ticket_count": len(open_tickets),
-            "notification_unread_count": len([n for n in notifs if not n.get("read")]),
-            "dm_unread_count": sum(int(x.get("cnt") or 0) for x in dm_unread),
-            "reminder_count": len(reminders),
-        }
-    except Exception as exc:
-        try:
-            log.warning("[dashboard/bootstrap summary] %s", exc)
-        except Exception:
-            pass
-        result.setdefault("summary", {})
-    result["bootstrap"] = True
-    return result
-
-
 def _etag_response(result):
     """Return a jsonify response with ETag header; emit 304 if client has fresh copy."""
     etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
@@ -182,7 +140,6 @@ def _etag_response(result):
 
 
 @bp.route("/api/app-data")
-@bp.route("/api/dashboard/bootstrap")
 @login_required
 def get_app_data():
     """Single endpoint that returns all dashboard data.
@@ -202,7 +159,7 @@ def get_app_data():
     cache_key = f"appdata:{ws}:{uid}:{team_id}"
     # Force-refresh: skip all caches (used right after mutations)
     if request.args.get("bust") == "1":
-        result = _decorate_dashboard_bootstrap(_fetch_app_data_from_db(ws, team_id, uid))
+        result = _fetch_app_data_from_db(ws, team_id, uid)
         _cache_set(cache_key, result)
         etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
         resp = jsonify(result)
@@ -227,7 +184,7 @@ def get_app_data():
                     if acquired:
                         def _bg_refresh_redis():
                             try:
-                                result = _decorate_dashboard_bootstrap(_fetch_app_data_from_db(ws, team_id, uid))
+                                result = _fetch_app_data_from_db(ws, team_id, uid)
                                 _cache_set(cache_key, result)
                             except Exception as _e:
                                 log.warning("[app-data bg-refresh] %s", _e)
@@ -252,7 +209,7 @@ def get_app_data():
                     _CACHE[cache_key]["refreshing"] = True
             def _bg_refresh():
                 try:
-                    result = _decorate_dashboard_bootstrap(_fetch_app_data_from_db(ws, team_id, uid))
+                    result = _fetch_app_data_from_db(ws, team_id, uid)
                     _cache_set(cache_key, result)
                 except Exception as _e:
                     log.warning("[app-data bg-refresh] %s", _e)
@@ -263,7 +220,7 @@ def get_app_data():
             return _etag_response(entry["val"])   # stale but fast
 
     # Cache cold or too stale — block on DB (first load only)
-    result = _decorate_dashboard_bootstrap(_fetch_app_data_from_db(ws, team_id, uid))
+    result = _fetch_app_data_from_db(ws, team_id, uid)
     _cache_set(cache_key, result)
     etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
     if request.headers.get("If-None-Match") == etag:
