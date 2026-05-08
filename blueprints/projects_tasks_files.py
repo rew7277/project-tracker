@@ -517,6 +517,22 @@ def create_task():
         return jsonify(dict(t))
 
 
+@bp.route("/api/tasks/<tid>", methods=["GET"])
+@login_required
+def get_task_by_id(tid):
+    """Return one task for email/deep-link opening.
+
+    The task list endpoint is intentionally capped for performance, so a task
+    opened from an email may not be present in the initial app payload. This
+    route lets the frontend fetch exactly that task and open the modal.
+    """
+    with get_db() as db:
+        row = db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?", (tid, wid())).fetchone()
+        if not row:
+            return jsonify({"error":"Task not found"}), 404
+        return jsonify(dict(row))
+
+
 @bp.route("/api/tasks/<tid>/events", methods=["GET"])
 @login_required
 def get_task_events(tid):

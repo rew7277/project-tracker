@@ -110,7 +110,7 @@ const _apiRequest = async (u, opts = {}) => {
     const data = await _apiRead(r);
     if (!r.ok) {
       const message = data?.error || data?.message || `HTTP ${r.status}`;
-      _apiNotifyError(u, message, r.status);
+      if(!opts.quiet) _apiNotifyError(u, message, r.status);
       return { ok:false, error:message, status:r.status, data };
     }
     const etag = r.headers.get('ETag');
@@ -118,17 +118,17 @@ const _apiRequest = async (u, opts = {}) => {
     return data;
   } catch (e) {
     if (e.name === 'AbortError') return null;
-    _apiNotifyError(u, e.message || 'Network error', 0);
+    if(!opts.quiet) _apiNotifyError(u, e.message || 'Network error', 0);
     return { ok:false, error:e.message || 'Network error', status:0 };
   }
 };
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:u=>_apiRequest(u),
-  post:(u,b)=>_apiRequest(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
-  put:(u,b)=>_apiRequest(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
-  del:u=>_apiRequest(u,{method:'DELETE'}),
-  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
+  get:(u,opts={})=>_apiRequest(u,opts),
+  post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
+  upload:(u,fd,opts={})=>_apiRequest(u,{...opts,method:'POST',body:fd}),
 };
 
 const STAGES={
@@ -2652,15 +2652,27 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   },[]);
 
   useEffect(()=>{
-    if(!initialTaskId||!safe(tasks).length)return;
-    const t=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
-    if(t){
+    if(!initialTaskId)return;
+    let cancelled=false;
+    const openTask=(t)=>{
+      if(!t||cancelled)return;
       setEditT(t);
       if(t.project)setPid(t.project);
       setShowResolved(true);
       onClearInitialTask&&onClearInitialTask();
       try{history.replaceState(null,'','/tasks');}catch(e){}
-    }
+    };
+    const existing=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
+    if(existing){openTask(existing);return;}
+    // Deep links from email can arrive before app-data has this task.
+    // Fetch the exact task by ID, inject it into state, then open the modal.
+    api.get('/api/tasks/'+encodeURIComponent(initialTaskId),{quiet:true}).then(t=>{
+      if(t&&t.id&&!cancelled){
+        setData&&setData(prev=>({ ...prev, tasks:[t,...safe(prev.tasks).filter(x=>String(x.id)!==String(t.id))] }));
+        openTask(t);
+      }
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
   },[initialTaskId,tasks]);
 
   useEffect(()=>{
@@ -2751,15 +2763,18 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         _localTs:Date.now(),_pending:true
       };
       setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
-      // API call in background
-      r=await api.post('/api/tasks',p);
-      if(r&&r.id){
-        // Replace temp with real task from server
-        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
-      } else {
-        // Rollback temp task on error
+      // API call in background. Do not block the modal/button on email/push side effects.
+      api.post('/api/tasks',p,{quiet:true}).then(real=>{
+        if(real&&real.id){
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...real,_localTs:Date.now()}:t)}));
+          setTimeout(()=>reload(),1200);
+        } else {
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
+        }
+      }).catch(()=>{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
-      }
+      });
+      r=tempTask;
     }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
