@@ -6039,7 +6039,16 @@ def public_landing():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     action = (request.args.get("action") or "").strip().lower()
-    if action in {"login", "signin", "sign-in", "signup", "register"}:
+    # Email/deep-link actions must load the SPA, not the public landing page.
+    # The React app reads ?action=task&id=... / ?action=ticket&id=... and opens
+    # the correct authenticated screen after /api/auth/me confirms the session.
+    app_actions = {
+        "login", "signin", "sign-in", "signup", "register",
+        "dashboard", "app", "task", "ticket", "project", "projects",
+        "tasks", "tickets", "reminders", "messages", "dm",
+        "reset-password", "accept-invite"
+    }
+    if action in app_actions:
         return _serve_html()
     return _serve_landing()
 

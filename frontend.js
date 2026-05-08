@@ -1763,6 +1763,14 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
       payload={title:title.trim(),description:desc,project:pid,assignee:ass,priority:pri,stage,due,pct,comments:cmts,team_id:teamId,story_points:storyPoints,task_type:taskType,labels:taskLabels,sprint};
     }
     if(task&&task.id)payload.id=task.id;
+    if(!isEdit&&!rmEnabled){
+      // New task creation is optimistic in the parent view. Close immediately so the
+      // user does not wait for notification/email side effects on the server.
+      Promise.resolve(onSave(payload)).catch(()=>{});
+      setSaving(false);
+      onClose();
+      return payload;
+    }
     const result=await onSave(payload);
     setSaving(false);
     if(result&&result.error){setErr(result.error);return null;}
@@ -2614,7 +2622,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,initialTaskId,onClearInitialTask,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2642,6 +2650,18 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     document.addEventListener('keydown',h);
     return()=>document.removeEventListener('keydown',h);
   },[]);
+
+  useEffect(()=>{
+    if(!initialTaskId||!safe(tasks).length)return;
+    const t=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
+    if(t){
+      setEditT(t);
+      if(t.project)setPid(t.project);
+      setShowResolved(true);
+      onClearInitialTask&&onClearInitialTask();
+      try{history.replaceState(null,'','/tasks');}catch(e){}
+    }
+  },[initialTaskId,tasks]);
 
   useEffect(()=>{
     if(initialStage){setStageF(initialStage);setShowFilters(true);}
@@ -4660,7 +4680,7 @@ function TeamView({users,cu,reload,projects}){
 }
 
 /* ─── TicketsView ────────────────────────────────────────────────────────── */
-function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus}){
+function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus,initialTicketId,onClearInitialTicket}){
   const [tickets,setTickets]=useState([]);
   const [busy,setBusy]=useState(true);
   const [filterStatus,setFilterStatus]=useState(initialStatus||'');
@@ -4694,6 +4714,17 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     setTickets(Array.isArray(d)?d:[]);
     setBusy(false);
   },[activeTeam]);
+
+  useEffect(()=>{
+    if(!initialTicketId||!tickets.length)return;
+    const t=tickets.find(x=>String(x.id)===String(initialTicketId));
+    if(t){
+      setDetailTicket(t);
+      setShowResolved(true);
+      onClearInitialTicket&&onClearInitialTicket();
+      try{history.replaceState(null,'','/tickets');}catch(e){}
+    }
+  },[initialTicketId,tickets]);
   useEffect(()=>{load();},[load]);
 
   const visibleTickets=useMemo(()=>{
@@ -7957,6 +7988,20 @@ function VaultView({cu}){
 
 
 
+
+function deepLinkFromSearch(){
+  try{
+    const sp=new URLSearchParams(window.location.search);
+    const action=(sp.get('action')||'').toLowerCase();
+    const id=sp.get('id')||sp.get('task_id')||sp.get('ticket_id')||sp.get('project_id')||'';
+    if(action==='task')return {view:'tasks',taskId:id};
+    if(action==='ticket')return {view:'tickets',ticketId:id};
+    if(action==='project')return {view:'projects',projectId:id};
+    if(['dashboard','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action};
+  }catch(e){}
+  return {};
+}
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -7965,9 +8010,17 @@ function App(){
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
+  const [initialProjectId,setInitialProjectId]=useState(()=>deepLinkFromSearch().projectId||null);
+  const [initialTaskId,setInitialTaskId]=useState(()=>deepLinkFromSearch().taskId||null);
+  const [initialTicketId,setInitialTicketId]=useState(()=>deepLinkFromSearch().ticketId||null);
   useEffect(()=>{
     try{
       const p=window.location.pathname;
+      const dl=deepLinkFromSearch();
+      if(dl.view)setView(dl.view);
+      if(dl.taskId)setInitialTaskId(dl.taskId);
+      if(dl.ticketId)setInitialTicketId(dl.ticketId);
+      if(dl.projectId)setInitialProjectId(dl.projectId);
       if(p.startsWith('/projects/')&&p.length>10){
         const pid=p.split('/')[2];
         if(pid)setInitialProjectId(pid);
@@ -7986,6 +8039,8 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
+      const dl=deepLinkFromSearch();
+      if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
       const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
@@ -8024,7 +8079,6 @@ function App(){
     return()=>window.removeEventListener('popstate',onPop);
   },[]);
   const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
-  const [initialProjectId,setInitialProjectId]=useState(null);
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -8627,12 +8681,14 @@ function App(){
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
+              initialTaskId=${initialTaskId}
+              onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
             ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} onNavigate=${setView}/>`:null}
-            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
+            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
