@@ -1,31 +1,7 @@
-<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Project Tracker — Sign In</title>
-<link rel="icon" type="image/png" href="/icon-192.png"/>
-<link rel="shortcut icon" href="/favicon.ico"/>
-<meta name="description" content="Sign in to Project Tracker — AI-powered team collaboration platform."/>
-<meta name="robots" content="noindex"/>
-<link rel="canonical" href="https://www.project-tracker.in/"/>
-<link rel="manifest" href="/manifest.json"/>
-<meta name="theme-color" content="#1d4ed8"/>
-<meta name="apple-mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<meta name="apple-mobile-web-app-title" content="Project Tracker"/>
-<meta name="mobile-web-app-capable" content="yes"/>
-<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png"/>
-<link rel="shortcut icon" type="image/png" href="/favicon.ico"/>
-<link rel="apple-touch-icon" href="/icon-192.png"/>
-<script>
-// Favicon is now served as PNG via /favicon.ico — no JS override needed
-</script>
 
-<!-- ═══════════════════════════════════════════════════════
-     SERVICE WORKER + WEB PUSH BOOTSTRAP
-     Registers SW immediately so push works even when app
-     is minimised or the tab is in the background.
-     ═══════════════════════════════════════════════════════ -->
-<script>
+// Favicon is now served as PNG via /favicon.ico — no JS override needed
+
+
 (function(){
 'use strict';
 
@@ -138,48 +114,20 @@ window._pfPushUnsubscribe = async function(){
 };
 
 })();
-</script>
 
-<link rel="dns-prefetch" href="https://fonts.googleapis.com"/>
-<link rel="dns-prefetch" href="https://fonts.gstatic.com"/>
-<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com"/>
-<link rel="dns-prefetch" href="https://unpkg.com"/>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet"/>
 
-<!-- Runtime libraries required by the SPA.
-     These must load before the app bootstrap below; without them /?action=login
-     renders a blank page because waitForLibs() waits forever. -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-<script crossorigin src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
-<script crossorigin src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
-
-<script>
 
 (function(){
 'use strict';
 
 function waitForLibs(cb){
   var needed=['React','ReactDOM','PropTypes','Recharts','htm'];
-  var started=Date.now();
   var interval=setInterval(function(){
-    var missing=needed.filter(function(k){return window[k]==null;});
-    if(!missing.length){
+    var ready=needed.every(function(k){return window[k]!=null;});
+    if(ready){
       clearInterval(interval);
       try{ cb(); }
       catch(e){ console.error('[Project Tracker] App init error:',e); }
-      return;
-    }
-    if(Date.now()-started>8000){
-      clearInterval(interval);
-      console.error('[Project Tracker] Runtime libraries failed to load:', missing.join(', '));
-      var root=document.getElementById('root');
-      if(root){
-        root.innerHTML='<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080716;color:#fff;font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:24px"><div style="max-width:460px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:24px;padding:28px;box-shadow:0 24px 80px rgba(0,0,0,.35)"><h1 style="margin:0 0 10px;font-size:22px">Project Tracker could not start</h1><p style="margin:0 0 16px;color:#c4c7d4;line-height:1.5">Some browser runtime files did not load. Please refresh once, or check if a network/ad blocker is blocking CDN scripts.</p><button onclick="location.reload()" style="border:0;border-radius:14px;padding:11px 18px;background:linear-gradient(135deg,#6366f1,#a855f7);color:white;font-weight:800;cursor:pointer">Refresh</button></div></div>';
-      }
     }
   },30);
 }
@@ -9045,6 +8993,3 @@ if(window._vwHideBoot)window._vwHideBoot();
 waitForLibs(window._pfStartApp);
 })();
 
-</script>
-</body>
-</html>
