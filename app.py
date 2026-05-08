@@ -6025,12 +6025,17 @@ def web_manifest():
 
 @app.route("/sw.js")
 def service_worker():
-    """Safe no-op service worker. Keeps old registrations from failing after static hardening."""
-    js = """self.addEventListener('install', event => self.skipWaiting());
+    """Minimal service worker without a fetch handler.
+
+    Chrome warns when a service worker registers an empty/no-op fetch handler because it
+    slows navigations without adding offline behavior. This script activates immediately
+    and intentionally avoids intercepting network requests.
+    """
+    js = """/* Project Tracker service worker v2: no request interception */
+self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
-self.addEventListener('fetch', event => {});
 """
-    return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache"})
+    return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 
 @app.route("/favicon.ico")
 def favicon():
@@ -6909,6 +6914,21 @@ def admin_api_add_user():
         return jsonify({"ok": True, "id": uid})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/", methods=["GET", "HEAD"])
+@app.route("/dashboard", methods=["GET", "HEAD"])
+@app.route("/login", methods=["GET", "HEAD"])
+@app.route("/app", methods=["GET", "HEAD"])
+def root_app():
+    """Serve the SPA shell for the public root and login/dashboard entry URLs.
+
+    Production was returning Flask's default 404 for `/` and `/?action=login` because
+    the catch-all route only matches non-empty paths. Keep this route lightweight and
+    let the frontend decide whether to show login, signup, or the authenticated app.
+    """
+    if request.method == "HEAD":
+        return Response(status=200, headers={"Cache-Control": "no-store"})
+    return _serve_html()
 
 @app.route("/<path:path>")
 def catch_all(path):
