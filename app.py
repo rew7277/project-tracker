@@ -1167,11 +1167,34 @@ def _email_escape(value):
     return _html.escape(str(value or ""), quote=True)
 
 
+def _email_body_cleanup(body_html):
+    """Keep older notification snippets readable inside the new light email shell.
+
+    Some old templates used white text intended for a black card. Email clients often
+    strip/alter CSS, which made the notification text almost invisible on light
+    backgrounds. This normalizes the common legacy colors without changing CTA links.
+    """
+    body_html = str(body_html or "")
+    replacements = {
+        "color:#fff;": "color:#101828;",
+        "color:#ffffff;": "color:#101828;",
+        "color:#e0e0f0;": "color:#1f2937;",
+        "color:#8888a8;": "color:#667085;",
+        "color:#4a4a5a;": "color:#667085;",
+        "color:#6a6a8a;": "color:#344054;",
+        "background:#111118;": "background:#ffffff;",
+        "border:1px solid #2a2a35;": "border:1px solid #e6eaf2;",
+    }
+    for old, new in replacements.items():
+        body_html = body_html.replace(old, new)
+    return body_html
+
 def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
     """Apple-inspired email shell, designed for real email clients."""
     cta_url = _email_escape(cta_url or APP_URL)
     cta_text = _email_escape(cta_text or "View Dashboard")
     cta_color = _email_escape(cta_color or "#5a8cff")
+    body_html = _email_body_cleanup(body_html)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1247,39 +1270,51 @@ def _header_strip(accent, icon, label):
 def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
     """Premium email: task assigned to user."""
     accent  = "#6366f1"
-    subject = f"\u2705 New Task: {task_title}"
+    subject = f"📋 New Task: {task_title}"
+    safe_user = _email_escape(user_name)
+    safe_assigner = _email_escape(assigner_name)
+    safe_task = _email_escape(task_title)
     header  = _header_strip(accent, "📋", "Task Assignment")
     body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
-        You've got a new task 📋
-      </p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{assigner_name}</strong> has assigned you to a task.
+      <h1 class="pt-title" style="margin:0 0 10px;font-size:32px;line-height:38px;color:#101828;letter-spacing:-1px;font-weight:900;">You’ve got a new task</h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:23px;color:#667085;">
+        Hi <strong style="color:#101828;">{safe_user}</strong>, <strong style="color:#101828;">{safe_assigner}</strong> assigned a new task to you.
       </p>
 
-      <!-- Task card -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
-                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#ffffff,#f7f9ff);border:1px solid #e6eaf2;border-radius:24px;box-shadow:0 18px 42px rgba(31,41,55,.10);overflow:hidden;margin:0 0 16px;">
         <tr>
-          <td style="padding:20px 24px;">
-            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <td style="padding:22px 24px;">
+            <div style="font-size:11px;line-height:14px;color:#667085;letter-spacing:1.1px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">Task</div>
+            <div style="font-size:22px;line-height:28px;font-weight:900;color:#101828;letter-spacing:-.3px;">{safe_task}</div>
+            <div style="margin-top:16px;height:10px;background:#edf2ff;border-radius:999px;overflow:hidden;">
+              <div style="width:12%;height:10px;background:linear-gradient(90deg,#6675ff,#b15cff);border-radius:999px;"></div>
+            </div>
+            <div style="margin-top:10px;font-size:12px;line-height:18px;color:#667085;">Status: <strong style="color:#6366f1;">New</strong> · Assigned by {safe_assigner}</div>
           </td>
-          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
-            <span style="display:inline-block;background:#6366f120;color:{accent};
-                         font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;
-                         letter-spacing:.5px;">NEW</span>
+          <td width="88" align="center" style="padding:22px 24px;vertical-align:top;">
+            <span style="display:inline-block;background:#eef2ff;color:#4f46e5;font-size:11px;font-weight:900;padding:7px 12px;border-radius:999px;letter-spacing:.6px;">NEW</span>
           </td>
         </tr>
       </table>
-      <p style="margin:8px 0 0;font-size:12px;color:#4a4a5a;">
-        Assigned by <strong style="color:#6a6a8a;">{assigner_name}</strong>
-      </p>"""
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">
+        <tr>
+          <td style="width:50%;padding-right:8px;">
+            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
+              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Priority</div>
+              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Normal</div>
+            </div>
+          </td>
+          <td style="width:50%;padding-left:8px;">
+            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
+              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Next step</div>
+              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Review & update</div>
+            </div>
+          </td>
+        </tr>
+      </table>"""
     html = _email_base(header, body, APP_URL, "Open Task →", accent)
     send_email(user_email, subject, html, workspace_id)
-
 
 def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
     """Premium email: task stage changed."""
@@ -6916,16 +6951,25 @@ def admin_api_add_user():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["GET", "HEAD"])
+def public_landing():
+    """Serve the marketing landing page at the bare domain.
+
+    `/` should look like the public landing page, not the authenticated dashboard
+    shell. Query links such as `/?action=login` are kept as app-entry links so old
+    email/CTA URLs continue to open the sign-in screen.
+    """
+    if request.method == "HEAD":
+        return Response(status=200, headers={"Cache-Control": "no-store"})
+    action = (request.args.get("action") or "").strip().lower()
+    if action in {"login", "signin", "sign-in", "signup", "register"}:
+        return _serve_html()
+    return _serve_landing()
+
 @app.route("/dashboard", methods=["GET", "HEAD"])
 @app.route("/login", methods=["GET", "HEAD"])
 @app.route("/app", methods=["GET", "HEAD"])
 def root_app():
-    """Serve the SPA shell for the public root and login/dashboard entry URLs.
-
-    Production was returning Flask's default 404 for `/` and `/?action=login` because
-    the catch-all route only matches non-empty paths. Keep this route lightweight and
-    let the frontend decide whether to show login, signup, or the authenticated app.
-    """
+    """Serve the authenticated SPA shell for app/login/dashboard routes."""
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     return _serve_html()
