@@ -108,7 +108,21 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR   = "/data" if os.path.isdir("/data") else BASE_DIR
 JS_DIR     = os.path.join(BASE_DIR, "pf_static")
 UPLOAD_DIR = os.path.join(DATA_DIR, "pf_uploads")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 KEY_FILE   = os.path.join(DATA_DIR, ".pf_secret")
+
+# Upload safety limits. Override in production with env vars if needed.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+WORKSPACE_UPLOAD_QUOTA_BYTES = int(os.environ.get("WORKSPACE_UPLOAD_QUOTA_BYTES", str(2 * 1024 * 1024 * 1024)))
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".md", ".csv",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip"
+}
+BLOCKED_UPLOAD_EXTENSIONS = {
+    ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".sh", ".py", ".js",
+    ".mjs", ".html", ".htm", ".svg", ".php", ".jar", ".msi", ".apk"
+}
+DANGEROUS_MIME_PREFIXES = ("text/html", "application/x-msdownload", "application/x-sh", "application/javascript")
 
 # ── PostgreSQL via pg8000 (pure Python — no libpq/system deps needed) ────────
 import pg8000.native
@@ -824,6 +838,61 @@ def get_user_role():
         return rows[0]["role"] if rows else ""
     except Exception:
         return ""
+
+def require_role(*roles):
+    """Decorator for server-side RBAC. Never trust localStorage/client UI permissions."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            role = get_user_role()
+            if role not in roles:
+                return jsonify({"error": "Forbidden", "required_roles": list(roles)}), 403
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+def _looks_like_upload_mime(filename, data, browser_mime=""):
+    """Small, dependency-free MIME sniffing. This is not a virus scanner; it rejects common active content."""
+    ext = os.path.splitext((filename or "").lower())[1]
+    head = (data or b"")[:512]
+    if ext in BLOCKED_UPLOAD_EXTENSIONS or ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        return False, "File type is not allowed"
+    if head.lstrip().lower().startswith((b"<html", b"<!doctype html", b"<script", b"<?php")):
+        return False, "Active content is not allowed"
+    guessed = mimetypes.guess_type(filename or "")[0] or "application/octet-stream"
+    browser_mime = (browser_mime or "").lower()
+    if browser_mime.startswith(DANGEROUS_MIME_PREFIXES):
+        return False, "Unsafe MIME type"
+    # Lightweight signature checks for high-risk mismatches.
+    signatures = {
+        ".pdf": b"%PDF", ".png": b"\x89PNG", ".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff",
+        ".gif": (b"GIF87a", b"GIF89a"), ".zip": b"PK\x03\x04"
+    }
+    sig = signatures.get(ext)
+    if sig:
+        choices = sig if isinstance(sig, tuple) else (sig,)
+        if not any(head.startswith(x) for x in choices):
+            return False, f"{ext} content does not match its extension"
+    return True, guessed
+
+def _workspace_upload_bytes(db, workspace_id):
+    row = db.execute("SELECT COALESCE(SUM(size),0) AS total FROM files WHERE workspace_id=?", (workspace_id,)).fetchone()
+    return int((row and row["total"]) or 0)
+
+def scan_upload_for_virus(path, original_name):
+    """Virus-scan hook. Return False to block.
+    Set VIRUS_SCAN_CMD, e.g. 'clamscan --no-summary', and the file path is appended.
+    """
+    cmd = os.environ.get("VIRUS_SCAN_CMD", "").strip()
+    if not cmd:
+        return True, "scan skipped"
+    try:
+        import subprocess, shlex
+        proc = subprocess.run(shlex.split(cmd) + [path], capture_output=True, text=True, timeout=60)
+        return proc.returncode == 0, (proc.stdout or proc.stderr or "scan failed")[:500]
+    except Exception as e:
+        log.error("Virus scan failed for %s: %s", original_name, e)
+        return False, "Virus scan failed"
 
 
 def hash_pw(p):
@@ -1878,6 +1947,12 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(workspace_id, team_id, created DESC)",
             # Added: composite index for tickets ordered by created (used in get_app_data LIMIT query)
             "CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(workspace_id, created DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_files_ws_task_ts ON files(workspace_id, task_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_files_ws_project_ts ON files(workspace_id, project_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_subtasks_ws_task ON subtasks(workspace_id, task_id)",
+            "CREATE INDEX IF NOT EXISTS idx_task_comments_ws_task_ts ON task_comments(workspace_id, task_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_tickets_ws_project_created ON tickets(workspace_id, project_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_time_logs_ws_project_task_date ON time_logs(workspace_id, project_id, task_id, date)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target)",
             # Soft-delete support
@@ -3820,6 +3895,7 @@ def get_users():
 
 @app.route("/api/users",methods=["POST"])
 @login_required
+@require_role("Admin", "Manager")
 def add_user():
     d=request.json or {}
     if not d.get("name") or not d.get("email") or not d.get("password"):
@@ -3841,6 +3917,7 @@ def add_user():
 
 @app.route("/api/users/<uid>",methods=["PUT"])
 @login_required
+@require_role("Admin", "Manager")
 def update_user(uid):
     d=request.json or {}
     with get_db() as db:
@@ -3864,6 +3941,7 @@ def update_user(uid):
 
 @app.route("/api/users/<uid>",methods=["DELETE"])
 @login_required
+@require_role("Admin")
 def del_user(uid):
     with get_db() as db:
         u = db.execute("SELECT name, email FROM users WHERE id=? AND workspace_id=?",(uid,wid())).fetchone()
@@ -4130,6 +4208,7 @@ def get_projects():
 
 @app.route("/api/projects",methods=["POST"])
 @login_required
+@require_role("Admin", "Manager", "TeamLead")
 def create_project():
     d=request.json or {}
     if not d.get("name"): return jsonify({"error":"Name required"}),400
@@ -4207,6 +4286,7 @@ def update_project(pid):
     return jsonify(dict(updated))
 @app.route("/api/projects/<pid>",methods=["DELETE"])
 @login_required
+@require_role("Admin", "Manager")
 def del_project(pid):
     workspace_id = wid()
     with get_db() as db:
@@ -4640,18 +4720,44 @@ def get_files():
 @login_required
 def upload_file():
     f=request.files.get("file")
-    if not f: return jsonify({"error":"No file"}),400
-    fid=f"f{int(datetime.now().timestamp()*1000)}"
+    if not f or not f.filename:
+        return jsonify({"error":"No file"}),400
+
+    original_name = os.path.basename(f.filename).strip()
     data=f.read()
-    if len(data)>150*1024*1024: return jsonify({"error":"File too large (max 150MB)"}),400
-    path=os.path.join(UPLOAD_DIR,fid)
-    with open(path,"wb") as fp: fp.write(data)
+    if not data:
+        return jsonify({"error":"Empty file"}),400
+    if len(data)>MAX_UPLOAD_BYTES:
+        return jsonify({"error":f"File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)"}),400
+
+    ok, mime_or_error = _looks_like_upload_mime(original_name, data, f.content_type)
+    if not ok:
+        return jsonify({"error":mime_or_error}),400
+
     task_id=request.form.get("task_id","")
     project_id=request.form.get("project_id","")
+    ws_id=wid()
+    fid=f"f{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
+    path=os.path.join(UPLOAD_DIR,fid)
+
+    with get_db() as db:
+        used=_workspace_upload_bytes(db, ws_id)
+        if used + len(data) > WORKSPACE_UPLOAD_QUOTA_BYTES:
+            return jsonify({"error":"Workspace upload quota exceeded"}),413
+
+    with open(path,"wb") as fp:
+        fp.write(data)
+
+    clean, scan_msg = scan_upload_for_virus(path, original_name)
+    if not clean:
+        try: os.remove(path)
+        except Exception: pass
+        return jsonify({"error":"Upload rejected by virus scanner", "details": scan_msg}),400
+
     with get_db() as db:
         db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?)",
-                   (fid,wid(),f.filename,len(data),f.content_type,task_id,project_id,session["user_id"],ts()))
-        row=db.execute("SELECT * FROM files WHERE id=? AND workspace_id=?",(fid,wid())).fetchone()
+                   (fid,ws_id,original_name,len(data),mime_or_error,task_id,project_id,session["user_id"],ts()))
+        row=db.execute("SELECT * FROM files WHERE id=? AND workspace_id=?",(fid,ws_id)).fetchone()
         return jsonify(dict(row))
 
 @app.route("/api/files/<fid>")
@@ -4666,6 +4772,7 @@ def download_file(fid):
 
 @app.route("/api/files/<fid>",methods=["DELETE"])
 @login_required
+@require_role("Admin", "Manager", "TeamLead")
 def del_file(fid):
     with get_db() as db:
         db.execute("DELETE FROM files WHERE id=? AND workspace_id=?",(fid,wid()))
@@ -4702,7 +4809,10 @@ def send_message():
             nid=f"n{base_ts+i}"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"message",f"#{proj_name} — {sender_name}: {preview}",m["id"],0,ts()))
-        return jsonify(dict(db.execute("SELECT * FROM messages WHERE id=?",(mid,)).fetchone()))
+        row=dict(db.execute("SELECT * FROM messages WHERE id=?",(mid,)).fetchone())
+    _sse_publish(wid(), "message_created", {"id": mid, "project": d.get("project","")})
+    _sse_publish(wid(), "notification_updated", {"reason": "project_message"})
+    return jsonify(row)
 
 # ── Direct Messages ───────────────────────────────────────────────────────────
 @app.route("/api/dm/<other_id>")
@@ -4736,7 +4846,10 @@ def send_dm():
         except:
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"dm",f"{sender_name}: {preview}",d["recipient"],0,ts()))
-        return jsonify(dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone()))
+        row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone())
+    _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"]})
+    _sse_publish(wid(), "notification_updated", {"reason": "dm"})
+    return jsonify(row)
 
 @app.route("/api/dm/unread")
 @login_required
@@ -4779,7 +4892,9 @@ def create_reminder():
             args=(db, session["user_id"], "⏰ Reminder set",
                   f"'{d.get('task_title','Reminder')}' — you'll be notified before the time.", "/"),
             daemon=True).start()
-        return jsonify(dict(row))
+        result=dict(row)
+    _sse_publish(wid(), "reminder_updated", {"id": rid, "action": "created"})
+    return jsonify(result)
 
 @app.route("/api/reminders/<rid>", methods=["PUT"])
 @login_required
@@ -4817,6 +4932,7 @@ def get_teams():
 
 @app.route("/api/teams", methods=["POST"])
 @login_required
+@require_role("Admin", "Manager")
 def create_team():
     d=request.json or {}
     if not d.get("name"): return jsonify({"error":"name required"}),400
@@ -4830,6 +4946,7 @@ def create_team():
 
 @app.route("/api/teams/<tid>", methods=["PUT"])
 @login_required
+@require_role("Admin", "Manager")
 def update_team(tid):
     d=request.json or {}
     with get_db() as db:
@@ -4860,6 +4977,7 @@ def update_team(tid):
 
 @app.route("/api/teams/<tid>", methods=["DELETE"])
 @login_required
+@require_role("Admin", "Manager")
 def delete_team(tid):
     with get_db() as db:
         db.execute("DELETE FROM teams WHERE id=? AND workspace_id=?",(tid,wid()))
@@ -5871,25 +5989,21 @@ def emergency_reset_2fa():
 
 @app.route("/static/<path:fn>")
 def serve_static(fn):
-    """Serve only approved static assets; never expose BASE_DIR wholesale."""
+    """Serve only approved static assets from static/pf_static. Never expose BASE_DIR."""
     from werkzeug.utils import safe_join
     if not fn or fn.startswith(("/", "\\")) or ".." in fn.split("/"):
         return jsonify({"error": "Invalid static path"}), 400
-    blocked_ext = {".py", ".db", ".sqlite", ".sqlite3", ".env", ".pem", ".key", ".crt", ".json", ".log", ".bak", ".zip"}
+    allowed_ext = {".js", ".css", ".woff", ".woff2", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".ico", ".map"}
     _, ext = os.path.splitext(fn.lower())
-    if ext in blocked_ext:
+    if ext not in allowed_ext:
         return jsonify({"error": "Static file type not allowed"}), 403
-    if fn in {"frontend.js"}:
-        path = safe_join(BASE_DIR, fn)
-        if path and os.path.isfile(path):
-            return send_from_directory(BASE_DIR, fn, max_age=604800)
-    for root in [os.path.join(BASE_DIR, "static"), JS_DIR, os.path.join(BASE_DIR, "pf_static")]:
+    for root in [STATIC_DIR, JS_DIR, os.path.join(BASE_DIR, "pf_static")]:
         path = safe_join(root, fn)
         if path and os.path.isfile(path):
-            return send_from_directory(root, fn, max_age=604800 if ext in (".js", ".css", ".woff2", ".png", ".jpg", ".jpeg", ".svg", ".webp") else 0)
+            return send_from_directory(root, fn, max_age=604800)
     if fn == "frontend.js":
         err_js = """console.error('[Project Tracker] frontend.js not found on server.');
-document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;padding:40px;background:#0a0618;min-height:100vh\"><h2>⚠ frontend.js missing</h2><p>Deploy frontend.js to the same folder as app.py or /static/frontend.js.</p></div>';"""
+document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;padding:40px;background:#0a0618;min-height:100vh\"><h2>⚠ frontend.js missing</h2><p>Deploy frontend.js to /static/frontend.js or /pf_static/frontend.js.</p></div>';"""
         return Response(err_js, mimetype="application/javascript", headers={"Cache-Control": "no-cache"})
     return "", 404
 

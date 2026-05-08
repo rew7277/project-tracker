@@ -1,15 +1,22 @@
-// ── Workspace URL prefix bootstrap ─────────────────────────────────────────
-// Set _pfWsBase immediately from the current URL if it looks ws-scoped.
-// This runs synchronously before React mounts, so _wsPath works from frame 0.
+
 (function(){
-  try{
-    var p=window.location.pathname.split('/');
-    // ws-scoped pattern: /slug/wsXXX/page  → p[2] starts with 'ws'
-    if(p.length>=3&&p[2]&&p[2].startsWith('ws')){
-      window._pfWsBase='/'+p[1]+'/'+p[2]+'/dashboard';
+'use strict';
+
+function waitForLibs(cb){
+  var needed=['React','ReactDOM','PropTypes','Recharts','htm'];
+  var interval=setInterval(function(){
+    var ready=needed.every(function(k){return window[k]!=null;});
+    if(ready){
+      clearInterval(interval);
+      try{ cb(); }
+      catch(e){ console.error('[Project Tracker] App init error:',e); }
     }
-  }catch(e){}
-})();
+  },30);
+}
+
+window._pfStartApp=function(){
+/* ── bind htm to React.createElement so html`...` works throughout ── */
+const html=htm.bind(React.createElement);
 const {useState,useEffect,useRef,useCallback,useMemo}=React;
 const RC=Recharts;
 
@@ -47,39 +54,47 @@ function AppLoader(){
   </div>`;
 }
 
-// Global abort controller — cancelled on logout to stop all in-flight requests
+// Global abort controller — cancelled on logout to kill all in-flight requests
 let _apiAbortCtrl = new AbortController();
-const _apiNotifyError = (url, message, status) => {
-  const detail = { url, message, status };
-  window.dispatchEvent(new CustomEvent('pt:api-error', { detail }));
-  if (typeof showToast === 'function') showToast(message || 'Request failed', 'error');
-  console.warn('[API]', status || 'network', url, message);
-};
-
-const _apiRead = async (response) => {
-  const text = await response.text();
+const _apiEtagCache = {}; // url → { etag, data }
+const _apiErrorSeen = new Map();
+const _apiRead = async (r) => {
+  const text = await r.text();
   if (!text) return {};
   try { return JSON.parse(text); }
   catch { return { error: text.slice(0, 240) }; }
 };
-
-const _apiRequest = async (url, options = {}) => {
+const _apiNotifyError = (url, message, status) => {
+  const key = `${status || 0}:${url}:${message || ''}`;
+  const now = Date.now();
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
+  _apiErrorSeen.set(key, now);
+  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
+  console.warn('[API]', status || 'network', url, message);
+};
+const _apiRequest = async (u, opts = {}) => {
   try {
-    const response = await fetch(url, { credentials: 'include', signal: _apiAbortCtrl.signal, ...options });
-    const data = await _apiRead(response);
-    if (!response.ok) {
-      const message = data?.error || data?.message || `HTTP ${response.status}`;
-      _apiNotifyError(url, message, response.status);
-      return { ok: false, error: message, status: response.status, data };
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = { ...(opts.headers || {}) };
+    const cached = method === 'GET' ? _apiEtagCache[u] : null;
+    if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
+    const r = await fetch(u, { credentials: 'include', signal: _apiAbortCtrl.signal, ...opts, headers });
+    if (r.status === 304 && cached) return cached.data;
+    const data = await _apiRead(r);
+    if (!r.ok) {
+      const message = data?.error || data?.message || `HTTP ${r.status}`;
+      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
+      return { ok:false, error:message, status:r.status, data };
     }
+    const etag = r.headers.get('ETag');
+    if (method === 'GET' && etag) _apiEtagCache[u] = { etag, data };
     return data;
   } catch (e) {
     if (e.name === 'AbortError') return null;
-    _apiNotifyError(url, e.message || 'Network error', 0);
-    return { ok: false, error: e.message || 'Network error', status: 0 };
+    _apiNotifyError(u, e.message || 'Network error', 0);
+    return { ok:false, error:e.message || 'Network error', status:0 };
   }
 };
-
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get:u=>_apiRequest(u),
@@ -100,6 +115,8 @@ const PAL=['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#ec4899','#0891b2'
 const fmtD=d=>{if(!d)return'—';try{return new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}catch(e){return d;}};
 const ago=iso=>{const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)return'just now';if(m<60)return m+'m ago';if(m<1440)return Math.floor(m/60)+'h ago';return Math.floor(m/1440)+'d ago';};
 const safe=a=>(Array.isArray(a)?a:[]);
+// Normalize project.members: DB stores it as a JSON string, UI needs a real array
+const parseMembers=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
 
 function Av({u,size=32}){
   const imgSrc=(u&&u.avatar_data&&u.avatar_data.startsWith('data:image'))?u.avatar_data:
@@ -152,8 +169,6 @@ class ErrorBoundary extends React.Component{
 /* ─── AuthScreen — Apple iPhone 17 Pro Design Language ──────────────────── */
 function AuthScreen({onLogin}){
   const _initTab=(()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='register'?'register':'login';}catch{return 'login';}})();
-  const _initWsId=(()=>{try{return new URLSearchParams(window.location.search).get('ws')||'';}catch{return '';}})();
-  const _initWsName=(()=>{try{return decodeURIComponent(new URLSearchParams(window.location.search).get('ws_name')||'');}catch{return '';}})();
   const [tab,setTabRaw]=useState(_initTab);
   const [regMode,setRegMode]=useState('create');
   const [wsName,setWsName]=useState('');
@@ -170,25 +185,51 @@ function AuthScreen({onLogin}){
   const [totpUserId,setTotpUserId]=useState('');
   const [totpUserName,setTotpUserName]=useState('');
   const [totpToken,setTotpToken]=useState('');
-  // Forgot / reset password states
-  const [forgotMode,setForgotMode]=useState(false);
-  const [forgotEmail,setForgotEmail]=useState('');
-  const [forgotSent,setForgotSent]=useState(false);
-  const [resetToken,setResetToken]=useState((()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='reset-password'?p.get('token')||'':'';}catch{return '';}})());
-  const [resetPw,setResetPw]=useState('');
-  const [resetPw2,setResetPw2]=useState('');
-  const [resetDone,setResetDone]=useState(false);
-  const [verifiedMsg,setVerifiedMsg]=useState((()=>{try{return new URLSearchParams(window.location.search).get('verified')==='1';}catch{return false;}})());
-  const [acceptInviteToken,setAcceptInviteToken]=useState((()=>{try{const p=new URLSearchParams(window.location.search);return p.get('action')==='accept-invite'?p.get('token')||'':'';}catch{return '';}})());
-  const [acceptInviteName,setAcceptInviteName]=useState('');
-  const [acceptInvitePw,setAcceptInvitePw]=useState('');
   const canvasRef=useRef(null);
   const formRef=useRef(null);
+  const [googleEnabled,setGoogleEnabled]=useState(false);
+
+  // Check if Google OAuth is configured on the server
+  useEffect(()=>{
+    fetch('/api/auth/google/config')
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{if(d&&d.enabled)setGoogleEnabled(true);})
+      .catch(()=>{});
+    // Handle post-OAuth redirect: google_auth=1 in URL means just logged in via Google
+    try{
+      const p=new URLSearchParams(window.location.search);
+      if(p.get('google_auth')==='1'){
+        fetch('/api/auth/me').then(r=>r.ok?r.json():null).then(u=>{
+          if(u&&u.id){history.replaceState(null,'','/');onLogin(u);}
+        }).catch(()=>{});
+      }
+    }catch(e){}
+  },[]);
 
   const setTab=(t)=>{
     setTabRaw(t);setEmail('');setPw('');setErr('');setName('');setWsName('');setInviteCode('');setPhase('idle');
     try{history.replaceState(null,'','/?action='+t);}catch{}
   };
+
+  // Show server-side OAuth errors (e.g. ?error=email_not_verified)
+  useEffect(()=>{
+    try{
+      const p=new URLSearchParams(window.location.search);
+      const oauthErr=p.get('error');
+      if(oauthErr){
+        const msgs={
+          email_not_verified:'Google account email is not verified. Please verify your Google email first.',
+          state_mismatch:'Sign-in was interrupted. Please try again.',
+          token_exchange_failed:'Could not connect to Google. Please try again.',
+          userinfo_failed:'Could not retrieve your Google profile. Please try again.',
+          user_creation_failed:'Account creation failed. Please contact support.',
+          access_denied:'Google sign-in was cancelled.',
+        };
+        setErr(msgs[oauthErr]||('Google sign-in error: '+oauthErr));
+        history.replaceState(null,'','/'+window.location.hash);
+      }
+    }catch(e){}
+  },[]);
 
   /* ── Inject CSS ── */
   useEffect(()=>{
@@ -197,7 +238,7 @@ function AuthScreen({onLogin}){
     const s=document.createElement('style');
     s.id=id;
     s.textContent=`
-      @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,300;400;700;800&family=Inter:wght@300;400;500;600&display=swap');
+      /* fonts loaded in <head> */
 
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
@@ -438,38 +479,11 @@ function AuthScreen({onLogin}){
     return()=>{ro.disconnect();cancelAnimationFrame(raf);};
   },[]);
 
-  const sendForgot=async()=>{
-    if(!forgotEmail){setErr('Enter your email address.');return;}
-    setErr('');setPhase('loading');
-    await api.post('/api/auth/forgot-password',{email:forgotEmail});
-    setPhase('idle');setForgotSent(true);
-  };
-
-  const doReset=async()=>{
-    if(!resetPw||!resetPw2){setErr('Enter and confirm your new password.');return;}
-    if(resetPw!==resetPw2){setErr('Passwords do not match.');return;}
-    if(resetPw.length<8){setErr('Password must be at least 8 characters.');return;}
-    setErr('');setPhase('loading');
-    const r=await api.post('/api/auth/reset-password',{token:resetToken,password:resetPw});
-    setPhase('idle');
-    if(r.error){setErr(r.error);}
-    else{setResetDone(true);}
-  };
-
-  const doAcceptInvite=async()=>{
-    if(!acceptInviteName||!acceptInvitePw){setErr('Name and password are required.');return;}
-    if(acceptInvitePw.length<8){setErr('Password must be at least 8 characters.');return;}
-    setErr('');setPhase('loading');
-    const r=await api.post('/api/auth/accept-invite',{token:acceptInviteToken,name:acceptInviteName,password:acceptInvitePw});
-    setPhase('idle');
-    if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
-    else{setSuccessMsg('Welcome! Joining your workspace...');setPhase('success');setTimeout(()=>onLogin(r),1800);}
-  };
-
   const go=async()=>{
     setErr('');setPhase('loading');
     if(tab==='login'){
       const r=await api.post('/api/auth/login',{email,password:pw});
+      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
       else if(r.totp_required){setTotpUserId(r.user_id);setTotpUserName(r.name);setTotpStep(true);setPhase('idle');}
       else{setSuccessMsg('Welcome back, '+r.name);setPhase('success');setTimeout(()=>onLogin(r),1900);}
@@ -478,6 +492,7 @@ function AuthScreen({onLogin}){
       if(regMode==='create'&&!wsName){setErr('Workspace name is required.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(regMode==='join'&&!inviteCode){setErr('Enter the invite code.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       const r=await api.post('/api/auth/register',{mode:regMode,workspace_name:wsName,invite_code:inviteCode,name,email,password:pw,role});
+      if(!r){setErr('Server error. Please try again.');setPhase('error');setTimeout(()=>setPhase('idle'),350);return;}
       if(r.error){setErr(r.error);setPhase('error');setTimeout(()=>setPhase('idle'),350);}
       else{setSuccessMsg('Welcome to Project Tracker, '+r.name+'!');setPhase('success');setTimeout(()=>onLogin(r),1900);}
     }
@@ -597,99 +612,6 @@ function AuthScreen({onLogin}){
         <div style=${{height:2,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',maxWidth:220,margin:'0 auto'}}>
           <div style=${{height:'100%',borderRadius:2,transformOrigin:'left',background:'linear-gradient(90deg,#5a8cff,#a855f7,#ec4899)',animation:'ap-progress 1.8s cubic-bezier(0.4,0,0.2,1) forwards'}}></div>
         </div>
-      </div>
-    `)}
-    </div>`;
-
-  // ── Accept Workspace Invite ──
-  if(acceptInviteToken) return html`
-    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
-    ${RIGHT(html`
-      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
-        <div style=${{width:54,height:54,borderRadius:16,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',marginBottom:24,boxShadow:'0 6px 28px rgba(90,140,255,0.45)'}}>
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        </div>
-        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>You're Invited!</h2>
-        <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Create your account to join the workspace.</p>
-        ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
-        ${phase==='success'?html`<div style=${{color:'#5aff8c',fontWeight:700,fontSize:15,textAlign:'center',padding:'12px 0'}}>${successMsg}</div>`:html`
-          <div style=${{marginBottom:16}}>
-            <${LBL}>Your Name</${LBL}>
-            <input class="ap-input" placeholder="Full name" value=${acceptInviteName} onInput=${e=>setAcceptInviteName(e.target.value)}/>
-          </div>
-          <div style=${{marginBottom:24}}>
-            <${LBL}>Password</${LBL}>
-            <input class="ap-input" type="password" placeholder="Min 8 characters" value=${acceptInvitePw} onInput=${e=>setAcceptInvitePw(e.target.value)}/>
-          </div>
-          <button class="ap-btn-primary" onClick=${doAcceptInvite} disabled=${phase==='loading'}>
-            ${phase==='loading'?html`<span class="spin"></span>`:null} Join Workspace
-          </button>
-        `}
-      </div>
-    `)}
-    </div>`;
-
-  // ── Reset Password ──
-  if(resetToken) return html`
-    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
-    ${RIGHT(html`
-      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
-        <div style=${{width:54,height:54,borderRadius:16,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',marginBottom:24,boxShadow:'0 6px 28px rgba(90,140,255,0.45)'}}>
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-        </div>
-        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>Reset Password</h2>
-        ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
-        ${resetDone?html`
-          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'16px',marginBottom:24}}>
-            <p style=${{color:'#5aff8c',fontWeight:700,margin:0}}>Password reset successfully!</p>
-            <p style=${{color:'rgba(175,170,210,0.7)',fontSize:13,margin:'6px 0 0'}}>You can now sign in with your new password.</p>
-          </div>
-          <button class="ap-btn-primary" onClick=${()=>{setResetToken('');window.history.replaceState({},'','/');}} >Back to Sign In</button>
-        `:html`
-          <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Enter a new password. The reset link expires in 12 minutes.</p>
-          <div style=${{marginBottom:16}}>
-            <${LBL}>New Password</${LBL}>
-            <input class="ap-input" type="password" placeholder="Min 8 characters" value=${resetPw} onInput=${e=>setResetPw(e.target.value)}/>
-          </div>
-          <div style=${{marginBottom:24}}>
-            <${LBL}>Confirm Password</${LBL}>
-            <input class="ap-input" type="password" placeholder="Repeat password" value=${resetPw2} onInput=${e=>setResetPw2(e.target.value)}/>
-          </div>
-          <button class="ap-btn-primary" onClick=${doReset} disabled=${phase==='loading'}>
-            ${phase==='loading'?html`<span class="spin"></span>`:null} Set New Password
-          </button>
-        `}
-      </div>
-    `)}
-    </div>`;
-
-  // ── Forgot Password ──
-  if(forgotMode) return html`
-    <div style=${{display:'flex',width:'100vw',minHeight:'100vh',overflow:'hidden'}}>${LEFT}
-    ${RIGHT(html`
-      <div style=${{animation:'ap-fadeUp 0.55s ease both'}}>
-        <button onClick=${()=>{setForgotMode(false);setForgotSent(false);setErr('');}} style=${{background:'none',border:'none',color:'rgba(175,170,210,0.6)',fontSize:13,cursor:'pointer',padding:'0 0 20px',display:'flex',alignItems:'center',gap:6}}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 5l-7 7 7 7"/></svg> Back to Sign In
-        </button>
-        <h2 style=${{fontFamily:"'Bricolage Grotesque',system-ui",fontSize:26,fontWeight:800,color:'#f5f5f7',letterSpacing:'-1.5px',marginBottom:8}}>Forgot Password</h2>
-        ${forgotSent?html`
-          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'16px',marginBottom:24}}>
-            <p style=${{color:'#5aff8c',fontWeight:700,margin:0}}>Check your inbox!</p>
-            <p style=${{color:'rgba(175,170,210,0.7)',fontSize:13,margin:'6px 0 0'}}>If an account exists for <b>${forgotEmail}</b>, a reset link has been sent. It expires in 12 minutes.</p>
-          </div>
-          <button class="ap-btn-primary" onClick=${()=>{setForgotMode(false);setForgotSent(false);}}>Back to Sign In</button>
-        `:html`
-          <p style=${{fontSize:14,color:'rgba(175,170,210,0.6)',marginBottom:24,lineHeight:1.7}}>Enter your email and we'll send a reset link valid for 12 minutes.</p>
-          ${err?html`<div style=${{background:'rgba(255,80,80,0.12)',border:'1px solid rgba(255,80,80,0.3)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#ff8080',marginBottom:16}}>${err}</div>`:null}
-          <div style=${{marginBottom:24}}>
-            <${LBL}>Email Address</${LBL}>
-            <input class="ap-input" type="email" placeholder="you@company.com" value=${forgotEmail} onInput=${e=>setForgotEmail(e.target.value)}
-              onKeyDown=${e=>{if(e.key==='Enter')sendForgot();}}/>
-          </div>
-          <button class="ap-btn-primary" onClick=${sendForgot} disabled=${phase==='loading'}>
-            ${phase==='loading'?html`<span class="spin"></span>`:null} Send Reset Link
-          </button>
-        `}
       </div>
     `)}
     </div>`;
@@ -837,21 +759,50 @@ function AuthScreen({onLogin}){
               </span>`
               :html`<span>${tab==='login'?'Sign In':regMode==='create'?'Create Workspace':'Join Workspace'} →</span>`}
           </button>
+
+          <!-- Google Sign-In -->
+          ${googleEnabled?html`
+            <div style=${{display:'flex',alignItems:'center',gap:12,margin:'6px 0 2px'}}>
+              <div style=${{flex:1,height:'1px',background:'rgba(255,255,255,0.08)'}}></div>
+              <span style=${{fontSize:11,color:'rgba(175,170,210,0.35)',fontWeight:700,letterSpacing:'.08em',textTransform:'uppercase'}}>or</span>
+              <div style=${{flex:1,height:'1px',background:'rgba(255,255,255,0.08)'}}></div>
+            </div>
+            <a href="/api/auth/google/login"
+              style=${{
+                display:'flex',alignItems:'center',justifyContent:'center',gap:11,
+                height:50,borderRadius:14,
+                border:'1px solid rgba(255,255,255,0.13)',
+                background:'rgba(255,255,255,0.05)',
+                cursor:'pointer',textDecoration:'none',
+                color:'#f5f5f7',fontSize:15,fontWeight:600,
+                fontFamily:"'Inter',system-ui",
+                transition:'all 0.22s cubic-bezier(0.4,0,0.2,1)',
+                backdropFilter:'blur(20px)',
+                WebkitBackdropFilter:'blur(20px)',
+                boxShadow:'0 2px 12px rgba(0,0,0,0.18)',
+                userSelect:'none'
+              }}
+              onMouseEnter=${e=>{
+                e.currentTarget.style.background='rgba(255,255,255,0.11)';
+                e.currentTarget.style.borderColor='rgba(255,255,255,0.26)';
+                e.currentTarget.style.transform='translateY(-2px)';
+                e.currentTarget.style.boxShadow='0 8px 24px rgba(0,0,0,0.28)';
+              }}
+              onMouseLeave=${e=>{
+                e.currentTarget.style.background='rgba(255,255,255,0.05)';
+                e.currentTarget.style.borderColor='rgba(255,255,255,0.13)';
+                e.currentTarget.style.transform='translateY(0)';
+                e.currentTarget.style.boxShadow='0 2px 12px rgba(0,0,0,0.18)';
+              }}>
+              <svg width="20" height="20" viewBox="0 0 48 48" style=${{flexShrink:0}}>
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              </svg>
+              Continue with Google
+            </a>`:null}
         </div>
-
-        <!-- Forgot password link (login tab only) -->
-        ${tab==='login'?html`
-          <div style=${{textAlign:'center',marginTop:14}}>
-            <button class="ap-link" onClick=${()=>{setForgotMode(true);setForgotEmail(email);setErr('');}} style=${{fontSize:12.5,color:'rgba(140,160,255,0.65)'}}>Forgot password?</button>
-          </div>
-        `:null}
-
-        <!-- Email verified success banner -->
-        ${verifiedMsg?html`
-          <div style=${{background:'rgba(90,255,140,0.08)',border:'1px solid rgba(90,255,140,0.25)',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#5aff8c',marginTop:12,textAlign:'center'}}>
-            ✓ Email verified successfully — please sign in.
-          </div>
-        `:null}
 
         <!-- Switch tab -->
         <p style=${{fontSize:13.5,color:'rgba(175,170,210,0.4)',textAlign:'center',marginTop:22,lineHeight:1.7}}>
@@ -1136,76 +1087,6 @@ function QRCodeDisplay({otpauth,size}){
   return html`<div ref=${ref} style=${{width:sz+'px',height:sz+'px',display:'inline-flex',alignItems:'center',justifyContent:'center'}}></div>`;
 }
 
-/* ─── SessionManager — active device/session list ─────────────────────────── */
-function SessionManager({cu}){
-  const [sessions,setSessions]=useState([]);
-  const [loading,setLoading]=useState(false);
-  const [open,setOpen]=useState(false);
-  const [revoking,setRevoking]=useState('');
-
-  const load=async()=>{
-    setLoading(true);
-    const d=await api.get('/api/auth/sessions').catch(()=>null);
-    if(Array.isArray(d))setSessions(d);
-    setLoading(false);
-  };
-
-  useEffect(()=>{if(open)load();},[open]);
-
-  const revoke=async(sid)=>{
-    if(!window.confirm('Log out this device?'))return;
-    setRevoking(sid);
-    await api.del('/api/auth/sessions/'+sid).catch(()=>{});
-    setSessions(prev=>prev.filter(s=>s.id!==sid));
-    setRevoking('');
-  };
-
-  const logoutAll=async()=>{
-    if(!window.confirm('Log out from ALL devices? You will be signed out now.'))return;
-    await api.post('/api/auth/sessions/logout-all',{});
-    window.location.replace('/');
-  };
-
-  const fmtDate=d=>{try{return new Date(d).toLocaleString();}catch{return d||'—';}};
-
-  return html`
-    <div style=${{borderTop:'1px solid var(--bd)',padding:'10px 14px'}}>
-      <button class="btn bg" style=${{width:'100%',justifyContent:'space-between',fontSize:12,display:'flex',alignItems:'center'}}
-        onClick=${()=>setOpen(v=>!v)}>
-        <span style=${{display:'flex',alignItems:'center',gap:6}}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-          Active Sessions
-        </span>
-        <span style=${{fontSize:10,color:'var(--tx3)'}}>${open?'▲':'▼'}</span>
-      </button>
-      ${open?html`
-        <div style=${{marginTop:8}}>
-          ${loading?html`<div style=${{textAlign:'center',padding:'8px',fontSize:11,color:'var(--tx3)'}}>Loading…</div>`:html`
-            ${sessions.map(s=>html`
-              <div key=${s.id} style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px solid var(--bd2)',gap:8}}>
-                <div style=${{minWidth:0}}>
-                  <div style=${{fontSize:12,fontWeight:600,color:s.is_current?'var(--ac)':'var(--tx)',display:'flex',alignItems:'center',gap:4}}>
-                    ${s.device_name}${s.is_current?html` <span style=${{fontSize:9,background:'var(--ac)',color:'#fff',borderRadius:4,padding:'1px 5px',fontWeight:700}}>THIS DEVICE</span>`:''}
-                  </div>
-                  <div style=${{fontSize:10,color:'var(--tx3)',fontFamily:'monospace',marginTop:2}}>${s.ip||'—'}</div>
-                  <div style=${{fontSize:10,color:'var(--tx3)',marginTop:1}}>Last seen: ${fmtDate(s.last_seen)}</div>
-                </div>
-                ${!s.is_current?html`
-                  <button class="btn" style=${{fontSize:10,padding:'3px 8px',flexShrink:0,color:'var(--rd)'}} onClick=${()=>revoke(s.id)} disabled=${revoking===s.id}>
-                    ${revoking===s.id?'…':'Revoke'}
-                  </button>
-                `:null}
-              </div>
-            `)}
-            <button class="btn bg" style=${{width:'100%',justifyContent:'center',fontSize:11,marginTop:8,color:'var(--rd)'}} onClick=${logoutAll}>
-              Logout from All Devices
-            </button>
-          `}
-        </div>
-      `:null}
-    </div>`;
-}
-
 /* ─── PersonalTwoFAToggle — profile panel ─────────────────────────────────── */
 function PersonalTwoFAToggle({cu,setCu}){
   const [configured,setConfigured]=useState(()=>!!(cu&&(cu.totp_configured||cu.totp_verified)));
@@ -1305,7 +1186,7 @@ function PersonalTwoFAToggle({cu,setCu}){
     </div>`;
 }
 
-function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set()}){
+function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set(),offlineMode=false}){
   const fmtTime=s=>{const m=Math.floor(s/60);const sec=s%60;return m+':'+(sec<10?'0':'')+sec;};
   const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   const baseView=(view||'dashboard').split(':')[0];
@@ -1314,59 +1195,77 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
     dashboard:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`, projects:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`, tasks:        html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`, messages:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`, tickets:      html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M2 9a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.5a1.5 1.5 0 0 0 0 3V15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1.5a1.5 1.5 0 0 0 0-3V9z"/><line x1="9" y1="7" x2="9" y2="17" strokeDasharray="2 2"/></svg>`, timeline:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="14" x2="10" y2="14"/><line x1="8" y1="18" x2="14" y2="18"/></svg>`, productivity: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>`, reminders:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`, team:         html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`, dm:           html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
     'ai-docs':    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><circle cx="10" cy="13" r="2"/><path d="M20 21l-4.35-4.35"/></svg>`,
     timesheet:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="4" x2="9" y2="9"/><path d="M7 13h2l1 2 2-4 1 2h2"/></svg>`,
+    'password-generator': html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 1 4 4v1H8V6a4 4 0 0 1 4-4z"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="8" cy="13" r="1.2" fill="currentColor"/><circle cx="12" cy="13" r="1.2" fill="currentColor"/><circle cx="16" cy="13" r="1.2" fill="currentColor"/><line x1="8" y1="14.2" x2="8" y2="16"/><line x1="12" y1="14.2" x2="12" y2="16"/></svg>`,
+    vault: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V6"/><path d="M12 18v-2.5"/><path d="M7.5 12H5"/><path d="M19 12h-2.5"/><path d="M9.2 9.2L7.5 7.5"/><path d="M16.5 16.5l-1.7-1.7"/><path d="M14.8 9.2l1.7-1.7"/><path d="M7.5 16.5l1.7-1.7"/></svg>`,
   };
   const adminNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, ];
-  const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>
-    it.id!=='dm'||(wsDmEnabled||isAdminManager)
-  );
+    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+  const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
 
-  // ── Drag-to-reorder sidebar nav ──────────────────────────────────────────
-  const NAV_ORDER_KEY='pf_nav_order_'+(cu&&cu.id||'x');
-  const [navOrder,setNavOrder]=useState(()=>{
-    try{const s=localStorage.getItem(NAV_ORDER_KEY);if(s){const ids=JSON.parse(s);return ids;}
-    }catch{}return null;
-  });
-  const navItems=useMemo(()=>{
-    if(!navOrder)return baseNavItems;
-    const ordered=[];
-    navOrder.forEach(id=>{const it=baseNavItems.find(x=>x.id===id);if(it)ordered.push(it);});
-    baseNavItems.forEach(it=>{if(!ordered.find(x=>x.id===it.id))ordered.push(it);});
-    return ordered;
-  },[baseNavItems,navOrder]);
+  // ── Sidebar nav reorder + pin ────────────────────────────────────────────
+  const roleKey=isAdminManager?'admin':'dev';
+  const [navOrder,setNavOrder]=useState(()=>{try{const s=localStorage.getItem('pf_nav_order_'+roleKey);return s?JSON.parse(s):null;}catch{return null;}});
+  const [pinnedTop,setPinnedTop]=useState(()=>{try{const s=localStorage.getItem('pf_nav_pin_top_'+roleKey);return new Set(s?JSON.parse(s):[]);}catch{return new Set();}});
+  const [pinnedBottom,setPinnedBottom]=useState(()=>{try{const s=localStorage.getItem('pf_nav_pin_bot_'+roleKey);return new Set(s?JSON.parse(s):[]);}catch{return new Set();}});
+  const [dragOver,setDragOver]=useState(null);
+  const [hoverNav,setHoverNav]=useState(null);
+  const dragSrc=useRef(null);
 
-  const dragItem=useRef(null);
-  const dragOver=useRef(null);
-  const [dragOverId,setDragOverId]=useState(null);
+  const saveNavPrefs=(order,pTop,pBot)=>{
+    try{
+      localStorage.setItem('pf_nav_order_'+roleKey,JSON.stringify(order||[]));
+      localStorage.setItem('pf_nav_pin_top_'+roleKey,JSON.stringify([...pTop]));
+      localStorage.setItem('pf_nav_pin_bot_'+roleKey,JSON.stringify([...pBot]));
+    }catch{}
+  };
+  const togglePin=(id,zone)=>{
+    const npt=new Set(pinnedTop),npb=new Set(pinnedBottom);
+    if(zone==='top'){if(npt.has(id))npt.delete(id);else{npt.add(id);npb.delete(id);}}
+    else{if(npb.has(id))npb.delete(id);else{npb.add(id);npt.delete(id);}}
+    setPinnedTop(npt);setPinnedBottom(npb);
+    saveNavPrefs(navOrder,npt,npb);
+  };
+  const orderedSections=useMemo(()=>{
+    let items=navOrder
+      ?navOrder.map(id=>baseNavItems.find(x=>x.id===id)).filter(Boolean)
+      :[...baseNavItems];
+    // Append any items added after order was saved
+    baseNavItems.forEach(x=>{if(!items.find(i=>i.id===x.id))items.push(x);});
+    return{
+      top:items.filter(x=>pinnedTop.has(x.id)),
+      mid:items.filter(x=>!pinnedTop.has(x.id)&&!pinnedBottom.has(x.id)),
+      bot:items.filter(x=>pinnedBottom.has(x.id)),
+    };
+  },[navOrder,pinnedTop,pinnedBottom,baseNavItems]);
 
-  const handleDragStart=(e,id)=>{
-    dragItem.current=id;
-    e.dataTransfer.effectAllowed='move';
-    e.dataTransfer.setData('text/plain',id);
+  const renderNavBtn=it=>{
+    const isOfflineLocked=offlineMode&&it.id!=='vault'&&it.id!=='password-generator';
+    return html`<button key=${it.id}
+      title=${col?it.label:(isOfflineLocked?it.label+' (requires backend)':'')}
+      onClick=${()=>{if(isOfflineLocked)return;if(it.href){window.open(it.href,'_blank');}else{setView(it.id);}}}
+      style=${{
+        display:'flex',alignItems:'center',gap:col?0:10,width:'100%',
+        padding:col?'10px 0':'9px 10px',borderRadius:9,border:'none',
+        cursor:isOfflineLocked?'not-allowed':'pointer',
+        background:baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
+        color:isOfflineLocked?'rgba(200,195,240,0.25)':(baseView===it.id?'#a5b4fc':'rgba(200,195,240,0.65)'),
+        fontSize:12,fontWeight:baseView===it.id?700:500,transition:'all .12s',textAlign:'left',
+        borderLeft:baseView===it.id&&!col?'2px solid #818cf8':'2px solid transparent',
+        justifyContent:col?'center':'flex-start',position:'relative',
+        opacity:isOfflineLocked?0.35:1,
+        boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none'
+      }}
+      onMouseEnter=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
+      onMouseLeave=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
+      <span style=${{flexShrink:0,width:col?'auto':18,display:'flex',alignItems:'center',justifyContent:'center',opacity:baseView===it.id?1:.8}}>${NAV_ICONS[it.id]||null}</span>
+      ${!col?html`<span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:12,flex:1,paddingRight:hoverNav===it.id&&!col?44:0}}>${it.label}</span>`:null}
+      ${it.badge&&!col&&!isOfflineLocked?html`<span style=${{fontSize:8,fontWeight:800,padding:'1px 5px',borderRadius:4,background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',letterSpacing:'.04em',flexShrink:0}}>${it.badge}</span>`:null}
+      ${it.id==='notifs'&&unread>0&&!isOfflineLocked?html`<span style=${{position:'absolute',top:6,right:col?6:10,minWidth:16,height:16,borderRadius:8,background:'var(--rd)',color:'#fff',fontSize:9,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',padding:'0 4px'}}>${unread>9?'9+':unread}</span>`:null}
+      ${it.id==='dm'&&dmUnread.reduce((a,x)=>a+(x.cnt||0),0)>0&&!isOfflineLocked?html`<span style=${{position:'absolute',top:6,right:col?6:10,minWidth:16,height:16,borderRadius:8,background:'var(--cy)',color:'#fff',fontSize:9,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',padding:'0 4px'}}>${dmUnread.reduce((a,x)=>a+(x.cnt||0),0)}</span>`:null}
+    </button>`;
   };
-  const handleDragEnter=(e,id)=>{
-    dragOver.current=id;
-    setDragOverId(id);
-    e.preventDefault();
-  };
-  const handleDragOver=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';};
-  const handleDrop=(e,id)=>{
-    e.preventDefault();
-    if(dragItem.current===id){setDragOverId(null);return;}
-    const newOrder=[...navItems.map(x=>x.id)];
-    const fromIdx=newOrder.indexOf(dragItem.current);
-    const toIdx=newOrder.indexOf(id);
-    newOrder.splice(fromIdx,1);
-    newOrder.splice(toIdx,0,dragItem.current);
-    setNavOrder(newOrder);
-    try{localStorage.setItem(NAV_ORDER_KEY,JSON.stringify(newOrder));}catch{}
-    dragItem.current=null;dragOver.current=null;setDragOverId(null);
-  };
-  const handleDragEnd=()=>{dragItem.current=null;dragOver.current=null;setDragOverId(null);};
-  const resetNavOrder=()=>{setNavOrder(null);try{localStorage.removeItem(NAV_ORDER_KEY);}catch{}};
-  // ────────────────────────────────────────────────────────────────────────
 
   const themeIcon=dark
     ?html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`
@@ -1403,48 +1302,66 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
       </div>
 
             <nav style=${{flex:1,overflowY:'auto',padding:'8px 6px',display:'flex',flexDirection:'column',gap:2}}>
-        ${navOrder&&!col?html`<div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',paddingBottom:2}}>
-          <button title="Reset sidebar order" onClick=${resetNavOrder}
-            style=${{fontSize:9,color:'var(--tx3)',background:'transparent',border:'none',cursor:'pointer',padding:'1px 4px',borderRadius:4}}
-            onMouseEnter=${e=>e.currentTarget.style.color='#a5b4fc'}
-            onMouseLeave=${e=>e.currentTarget.style.color='var(--tx3)'}>↺ reset</button>
-        </div>`:null}
-        ${navItems.map(it=>html`
-          <button key=${it.id}
-            title=${col?it.label:'Drag to reorder'}
-            draggable="true"
-            onDragStart=${e=>handleDragStart(e,it.id)}
-            onDragEnter=${e=>handleDragEnter(e,it.id)}
-            onDragOver=${handleDragOver}
-            onDrop=${e=>handleDrop(e,it.id)}
-            onDragEnd=${handleDragEnd}
-            onClick=${()=>setView(it.id)}
-            style=${{
-              display:'flex',alignItems:'center', gap:col?0:10, width:'100%', padding:col?'10px 0':'9px 10px', borderRadius:9,border:'none',cursor:'pointer',
-              background:dragOverId===it.id?'rgba(129,140,248,0.22)':baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
-              color:baseView===it.id?'#a5b4fc':'rgba(200,195,240,0.65)',
-              fontSize:12,fontWeight:baseView===it.id?700:500,
-              transition:'all .12s',textAlign:'left',
-              borderLeft:baseView===it.id&&!col?'2px solid #818cf8':dragOverId===it.id&&!col?'2px solid rgba(129,140,248,0.6)':'2px solid transparent',
-              justifyContent:col?'center':'flex-start', position:'relative',
-              boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none',
-              outline:dragOverId===it.id?'1px dashed rgba(129,140,248,0.4)':'none',
+
+        ${orderedSections.top.length>0?html`
+          ${!col?html`<div style=${{fontSize:8,fontWeight:700,color:'rgba(165,180,252,0.35)',textTransform:'uppercase',letterSpacing:'0.08em',padding:'4px 10px 2px'}}>Pinned</div>`:null}
+          ${orderedSections.top.map(it=>html`
+            <div key=${it.id} style=${{position:'relative'}}
+              onMouseEnter=${()=>setHoverNav(it.id)} onMouseLeave=${()=>setHoverNav(null)}>
+              ${renderNavBtn(it)}
+              ${hoverNav===it.id&&!col?html`
+                <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                  <button title="Unpin from top" onClick=${e=>{e.stopPropagation();togglePin(it.id,'top');}}
+                    style=${{background:'rgba(239,68,68,0.25)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#f87171',fontSize:9,lineHeight:'14px'}}>✕</button>
+                </div>`:null}
+            </div>`)}
+          <div style=${{height:1,background:'rgba(90,94,247,0.15)',margin:'3px 8px 3px'}}></div>`:null}
+
+        ${orderedSections.mid.map(it=>html`
+          <div key=${it.id}
+            draggable=${!col}
+            onDragStart=${()=>{dragSrc.current=it.id;}}
+            onDragOver=${e=>{e.preventDefault();setDragOver(it.id);}}
+            onDragLeave=${()=>setDragOver(null)}
+            onDrop=${e=>{
+              e.preventDefault();setDragOver(null);
+              const src=dragSrc.current;if(!src||src===it.id)return;
+              const all=[...orderedSections.top,...orderedSections.mid,...orderedSections.bot];
+              const ids=all.map(x=>x.id);
+              const fi=ids.indexOf(src),ti=ids.indexOf(it.id);
+              if(fi<0||ti<0)return;
+              ids.splice(fi,1);ids.splice(ids.indexOf(it.id)+(fi<ti?1:0),0,src);
+              setNavOrder(ids);saveNavPrefs(ids,pinnedTop,pinnedBottom);
             }}
-            onMouseEnter=${e=>{if(baseView!==it.id&&dragOverId!==it.id){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
-            onMouseLeave=${e=>{if(baseView!==it.id&&dragOverId!==it.id){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
-            <span style=${{flexShrink:0,width:col?'auto':18,display:'flex',alignItems:'center',justifyContent:'center',opacity:baseView===it.id?1:.8}}>${NAV_ICONS[it.id]||null}</span>
-            ${!col?html`<span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:12,flex:1}}>${it.label}</span>`:null}
-            ${!col?html`<span title="Drag to reorder" style=${{flexShrink:0,opacity:0.3,display:'flex',alignItems:'center',padding:'0 2px'}}>
-              <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="6" r="1.2"/><circle cx="6" cy="6" r="1.2"/><circle cx="2" cy="10" r="1.2"/><circle cx="6" cy="10" r="1.2"/></svg>
-            </span>`:null}
-            ${it.badge&&!col?html`<span style=${{fontSize:8,fontWeight:800,padding:'1px 5px',borderRadius:4,background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',letterSpacing:'.04em',flexShrink:0}}>${it.badge}</span>`:null}
-            ${it.id==='notifs'&&unread>0?html`<span style=${{
-              position:'absolute',top:6,right:col?6:10, minWidth:16,height:16,borderRadius:8, background:'var(--rd)',color:'#fff', fontSize:9,fontWeight:700, display:'flex',alignItems:'center',justifyContent:'center', padding:'0 4px'
-            }}>${unread>9?'9+':unread}</span>`:null}
-            ${it.id==='dm'&&dmUnread.reduce((a,x)=>a+(x.cnt||0),0)>0?html`<span style=${{
-              position:'absolute',top:6,right:col?6:10, minWidth:16,height:16,borderRadius:8, background:'var(--cy)',color:'#fff', fontSize:9,fontWeight:700, display:'flex',alignItems:'center',justifyContent:'center', padding:'0 4px'
-            }}>${dmUnread.reduce((a,x)=>a+(x.cnt||0),0)}</span>`:null}
-          </button>`)}
+            style=${{position:'relative',borderRadius:9,
+              outline:dragOver===it.id?'1px dashed rgba(129,140,248,0.5)':'none',
+              background:dragOver===it.id?'rgba(90,94,247,0.07)':'transparent',
+              transition:'background .1s'
+            }}
+            onMouseEnter=${()=>setHoverNav(it.id)}
+            onMouseLeave=${()=>setHoverNav(null)}>
+            ${renderNavBtn(it)}
+            ${hoverNav===it.id&&!col?html`
+              <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                <button title="Pin to top" onClick=${e=>{e.stopPropagation();togglePin(it.id,'top');}}
+                  style=${{background:'rgba(90,94,247,0.3)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#a5b4fc',fontSize:9,lineHeight:'14px'}}>↑</button>
+                <button title="Pin to bottom" onClick=${e=>{e.stopPropagation();togglePin(it.id,'bot');}}
+                  style=${{background:'rgba(90,94,247,0.3)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#a5b4fc',fontSize:9,lineHeight:'14px'}}>↓</button>
+              </div>`:null}
+          </div>`)}
+
+        ${orderedSections.bot.length>0?html`
+          <div style=${{height:1,background:'rgba(90,94,247,0.15)',margin:'3px 8px 3px'}}></div>
+          ${orderedSections.bot.map(it=>html`
+            <div key=${it.id} style=${{position:'relative'}}
+              onMouseEnter=${()=>setHoverNav(it.id)} onMouseLeave=${()=>setHoverNav(null)}>
+              ${renderNavBtn(it)}
+              ${hoverNav===it.id&&!col?html`
+                <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                  <button title="Unpin from bottom" onClick=${e=>{e.stopPropagation();togglePin(it.id,'bot');}}
+                    style=${{background:'rgba(239,68,68,0.25)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#f87171',fontSize:9,lineHeight:'14px'}}>✕</button>
+                </div>`:null}
+            </div>`)}`:null}
 
       </nav>
 
@@ -1642,7 +1559,6 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                 <div style=${{padding:'12px 14px',borderBottom:'1px solid var(--bd)'}}>
                   <${PersonalTwoFAToggle} cu=${cu} setCu=${setCu}/>
                 </div>
-                <${SessionManager} cu=${cu}/>
                 <div style=${{padding:'10px 12px'}}>
                   <p style=${{fontSize:10,color:'var(--tx3)',textAlign:'center',marginBottom:8,fontFamily:'monospace'}}>Click avatar to change profile photo</p>
                   <button class="btn bg" style=${{width:'100%',justifyContent:'center',fontSize:12}} onClick=${()=>setShowProfile(false)}>Close</button>
@@ -2111,7 +2027,10 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
-  const [members,setMembers]=useState(()=>{try{return safe(JSON.parse(project.members||'[]'));}catch{return [];}});const [saving,setSaving]=useState(false);
+  const parseMems=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m);return Array.isArray(p)?p:[];}catch{return [];}};
+  const [members,setMembers]=useState(parseMems(project.members));const [saving,setSaving]=useState(false);
+  // Sync local members state whenever the parent reloads and passes fresh project.members
+  useEffect(()=>{if(!edit)setMembers(parseMems(project.members));},[project.members,edit]);
   const [showNew,setShowNew]=useState(false);const [editTask,setEditTask]=useState(null);
   const [projTeamId,setProjTeamId]=useState((project.team_id)||'');
 
@@ -2129,66 +2048,64 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   },[teams]);
 
   const projTasks=useMemo(()=>safe(allTasks).filter(t=>t.project===project.id),[allTasks,project.id]);
-  // Fix: dynamically include ALL current team members (not just the snapshot stored in project.members)
-  const projUsers=useMemo(()=>{
-    const teamMids=projTeamId?JSON.parse((safe(teams).find(t=>t.id===projTeamId)||{}).member_ids||'[]'):[];
-    const allMids=[...new Set([...safe(members),...teamMids])];
-    return allMids.map(id=>safe(allUsers).find(u=>u.id===id)).filter(Boolean);
-  },[members,allUsers,projTeamId,teams]);
+  const projUsers=useMemo(()=>safe(members).map(id=>safe(allUsers).find(u=>u.id===id)).filter(Boolean),[members,allUsers]);
   const done=projTasks.filter(t=>t.stage==='completed').length;
   const pc=projTasks.length?Math.round(projTasks.reduce((a,t)=>a+(t.pct||0),0)/projTasks.length):(project.progress||0);
   const stageGroups=KCOLS.map(s=>({s,tasks:projTasks.filter(t=>t.stage===s)})).filter(g=>g.tasks.length>0);
 
   const saveEdit=async()=>{
     setSaving(true);
-    const r=await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
-    // Optimistic: reflect member/name changes in local state immediately so they don't vanish
-    if(r&&r.id)setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===r.id?{...p,...r}:p)}));
-    setSaving(false);setEdit(false);
-    onReload(); // fire-and-forget sync — UI already updated above
+    const saved=await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
+    // Optimistically patch the project in global state RIGHT NOW so the Members tab
+    // never reads stale data — even if app-data poll fires before onReload() completes
+    if(saved&&!saved.error){
+      setData&&setData(prev=>({...prev,
+        projects:prev.projects.map(p=>p.id===project.id?{...p,...saved}:p)
+      }));
+    }
+    await onReload();setSaving(false);setEdit(false);
   };
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
-    onClose(); // close modal immediately for snappy feel
+    onClose();
     const pid=project.id;
-    // Optimistic: remove project + its tasks from UI right away
     setData&&setData(prev=>({...prev,
       projects:prev.projects.filter(p=>p.id!==pid),
       tasks:prev.tasks.filter(t=>t.project!==pid)
     }));
-    try{
-      await api.del('/api/projects/'+pid);
-    }catch(_){}
-    // bust=1 forces a fresh DB read, bypassing stale multi-worker cache
-    // so the deleted project does NOT reappear on next reload
+    try{await api.del('/api/projects/'+pid);}catch(_){}
     try{
       const fresh=await api.get('/api/projects?bust=1');
-      if(Array.isArray(fresh)){
-        setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid)}));
-      }
+      if(Array.isArray(fresh))setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid).map(p=>({...p,members:parseMembers(p.members)}))}));
     }catch(_){}
     onReload();
   };
   const saveTask=async p=>{
     let r;
     if(p.id&&allTasks.find(t=>t.id===p.id)){
-      r=await api.put('/api/tasks/'+p.id,p);
-      // Optimistic update for existing task — no vanish during reload
+      // UPDATE: optimistic patch
       setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+      r=await api.put('/api/tasks/'+p.id,p);
     } else {
+      // CREATE: post then show immediately
+      // Pre-optimistic: show task immediately before API responds
+      const tempId2='tmp_'+Date.now();
+      const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
+      setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
       r=await api.post('/api/tasks',{...p,project:project.id});
-      // Optimistic insert for new task so it doesn't vanish while reload is in-flight
-      if(r&&r.id)setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
+      if(r&&r.id){
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...r,_localTs:Date.now()}:t)}));
+      } else {
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
+      }
     }
-    // bust=true on new task creation — bypasses SWR cache so the new task
-    // is fetched fresh from DB and never vanishes on the next reload.
-    onReload(undefined,{bust:!p.id});
+    // Background reload uses normal cache (server already injected new item)
+    setTimeout(()=>onReload(),2000);
     return r;
   };
   const delTask=async id=>{
-    // Optimistic: remove from UI immediately, reload confirms in background
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
-    api.del('/api/tasks/'+id).then(()=>onReload()).catch(()=>onReload());
+    api.del('/api/tasks/'+id).then(()=>setTimeout(()=>onReload(),800)).catch(()=>onReload());
   };
 
   return html`
@@ -2230,7 +2147,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
               <div><label class="lbl">Members</label><${MemberPicker} allUsers=${allUsers} selected=${members} onChange=${setMembers}/></div>
             </div>
             <div style=${{height:1,background:'var(--bd)',marginBottom:12}}></div>`:html`
-            <p style=${{color:project.description?'var(--tx2)':'var(--tx3)',fontSize:13,marginBottom:11,lineHeight:1.55,fontStyle:project.description?'normal':'italic'}}>${project.description||'No description added yet.'}</p>
+            <p style=${{color:'var(--tx2)',fontSize:13,marginBottom:11,lineHeight:1.55}}>${project.description||'No description.'}</p>
             <div style=${{display:'flex',alignItems:'center',gap:18,marginBottom:10}}>
               <div style=${{flex:1}}><${Prog} pct=${pc} color=${project.color}/></div>
               <span style=${{fontSize:11,color:'var(--tx2)',fontFamily:'monospace',fontWeight:700}}>${pc}%</span>
@@ -2330,8 +2247,8 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
         </div>
       </div>
 
-      ${showNew?html`<${TaskModal} task=${null} onClose=${()=>setShowNew(false)} onSave=${saveTask} projects=${[project]} users=${allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]} activeTeam=${activeTeam}/>`:null}
-      ${editTask?html`<${TaskModal} task=${editTask} onClose=${()=>setEditTask(null)} onSave=${saveTask} onDel=${delTask} projects=${[project]} users=${allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]}/>`:null}
+      ${showNew?html`<${TaskModal} task=${null} onClose=${()=>setShowNew(false)} onSave=${saveTask} projects=${[project]} users=${projUsers.length?projUsers:allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]} activeTeam=${activeTeam}/>`:null}
+      ${editTask?html`<${TaskModal} task=${editTask} onClose=${()=>setEditTask(null)} onSave=${saveTask} onDel=${delTask} projects=${[project]} users=${projUsers.length?projUsers:allUsers} cu=${cu} defaultPid=${project.id} onSetReminder=${onSetReminder} teams=${teams||[]}/>`:null}
     </div>`;
 }
 
@@ -2369,24 +2286,14 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      // Build ws-scoped project URL if possible
-      try{
-        const dashUrl=window._pfWsBase||window.location.pathname;
-        const wsParts=dashUrl.split('/');
-        const wsBase=(wsParts.length>=3&&wsParts[2]&&wsParts[2].startsWith('ws'))?'/'+wsParts[1]+'/'+wsParts[2]:'';
-        history.pushState(null,'',wsBase+'/projects/'+slug);
-      }catch(_){history.pushState(null,'','/projects/'+slug);}
+      history.pushState(null,'','/projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      const _cp=window.location.pathname;
-      if(_cp.includes('/projects/')){
-        // Restore to ws-scoped /projects or bare /projects
-        const _wsParts=_cp.split('/');
-        const _wsBase=(_wsParts.length>=3&&_wsParts[2]&&_wsParts[2].startsWith('ws'))?'/'+_wsParts[1]+'/'+_wsParts[2]:'';
-        history.pushState(null,'',_wsBase+'/projects');
+      if(window.location.pathname.startsWith('/projects/')){
+        history.pushState(null,'','/projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2397,15 +2304,13 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
   useEffect(()=>{
     const onPop=()=>{
       const parts=window.location.pathname.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        const p=safe(projects).find(proj=>proj.id===pidSeg);
+      if(parts[1]==='projects'&&parts[2]){
+        const p=safe(projects).find(proj=>proj.id===parts[2]);
         if(p){setDetail(p);return;}
       }
-      if(projSeg==='projects'&&!pidSeg){setDetail(null);}
+      if(window.location.pathname==='/projects'||window.location.pathname==='/projects/'){
+        setDetail(null);
+      }
     };
     window.addEventListener('popstate',onPop);
     return()=>window.removeEventListener('popstate',onPop);
@@ -2422,14 +2327,41 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
           teamMids.forEach(mid=>{if(!mems.includes(mid))mems.push(mid);});
         }
       }
-      const newProj=await api.post('/api/projects',{name:name.trim(),description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
-      if(newProj&&newProj.error){setErr(newProj.error);return;}
-      if(!newProj||!newProj.id){setErr('Failed to create project. Please try again.');return;}
+      // ✅ TRUE PRE-OPTIMISTIC: show project IMMEDIATELY before API call returns.
+      // User sees the card appear the instant they click Create (no 3s wait).
+      const tempId='tmp_'+Date.now();
+      const tempProj={
+        id:tempId,name:name.trim(),description:desc,color,
+        members:mems,team_id:projTeam||'',
+        created:new Date().toISOString(),progress:0,
+        _localTs:Date.now(),_pending:true   // _pending flag shows a subtle spinner
+      };
+      setData&&setData(prev=>({...prev,projects:[tempProj,...(prev.projects||[])]}));
       setShowNew(false);setName('');setDesc('');setSDate('');setTDate('');setColor('#2563eb');setMembers([]);setProjTeam('');
-      // Optimistic: inject new project immediately so it doesn't vanish while reload is in-flight
-      setData&&setData(prev=>({...prev,projects:[newProj,...prev.projects]}));
-      reload();
-    }catch(e){setErr('Error creating project: '+(e.message||'Unknown error'));}
+
+      // API call runs in background — UI is already updated
+      const newProj=await api.post('/api/projects',{name:tempProj.name,description:desc,startDate:sDate,targetDate:tDate,color,members:mems,team_id:projTeam||''});
+      if(newProj&&newProj.error){
+        // Rollback: remove temp item, restore form, show error
+        setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>p.id!==tempId)}));
+        setShowNew(true);setName(tempProj.name);setDesc(tempProj.description||'');setErr(newProj.error);
+        return;
+      }
+      if(!newProj||!newProj.id){
+        setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>p.id!==tempId)}));
+        setErr('Failed to create project. Please try again.');return;
+      }
+      // Replace temp with real project from server (has real ID, created_at, etc.)
+      const realProj={...newProj,_localTs:Date.now()};
+      // Normalize members: DB returns a JSON string, card needs a real array
+      if(!Array.isArray(realProj.members)){try{realProj.members=JSON.parse(realProj.members||'[]');}catch{realProj.members=[];}}
+      setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
+      // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
+      setTimeout(()=>reload(),2000);
+    }catch(e){
+      setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>!p._pending)}));
+      setErr('Error creating project: '+(e.message||'Unknown error'));
+    }
   };
 
   const filteredProjects=useMemo(()=>{
@@ -2499,7 +2431,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
               const pt=safe(tasks).filter(t=>t.project===p.id);
               const done=pt.filter(t=>t.stage==='completed').length;
               const pc=pt.length?Math.round(pt.reduce((a,t)=>a+(t.pct||0),0)/pt.length):(p.progress||0);
-              const mems=safe((()=>{try{return JSON.parse(p.members||'[]');}catch{return[];}})()).map(id=>safe(users).find(u=>u.id===id)).filter(Boolean);
+              const mems=safe(p.members).map(id=>safe(users).find(u=>u.id===id)).filter(Boolean);
               const fmtShort=d=>{if(!d)return '';const dt=new Date(d);return dt.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});};
               const daysWorked=p=>{
                 const s=p.start_date?new Date(p.start_date):null;
@@ -2520,7 +2452,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
                     <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',flex:1,marginRight:6,lineHeight:1.3}}>${p.name}</h3>
                     <span class="badge" style=${{background:p.color+'22',color:p.color,flexShrink:0,fontSize:9}}>${pt.length} tasks</span>
                   </div>
-                  <p style=${{fontSize:11,color:p.description?'var(--tx2)':'var(--tx3)',lineHeight:1.5,marginBottom:9,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden',fontStyle:p.description?'normal':'italic'}}>${p.description||'Add a description…'}</p>
+                  <p style=${{fontSize:11,color:'var(--tx2)',lineHeight:1.5,marginBottom:9,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>${p.description||'No description.'}</p>
                   <div style=${{marginBottom:9}}>
                     <div style=${{display:'flex',justifyContent:'space-between',marginBottom:3}}>
                       <span style=${{fontSize:9,color:'var(--tx3)',fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Progress</span>
@@ -2759,27 +2691,39 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   };
   const saveT=async p=>{
     let r;
-    if(p.id&&safe(tasks).find(t=>t.id===p.id))r=await api.put('/api/tasks/'+p.id,p);
-    else r=await api.post('/api/tasks',p);
+    if(p.id&&safe(tasks).find(t=>t.id===p.id)){
+      // UPDATE: optimistic patch immediately
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
+      r=await api.put('/api/tasks/'+p.id,p);
+    } else {
+      // CREATE: pre-optimistic — show task card INSTANTLY before API returns
+      const tempTaskId='tmp_'+Date.now();
+      const tempTask={
+        ...p, id:tempTaskId,
+        created:new Date().toISOString(),
+        _localTs:Date.now(),_pending:true
+      };
+      setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
+      // API call in background
+      r=await api.post('/api/tasks',p);
+      if(r&&r.id){
+        // Replace temp with real task from server
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
+      } else {
+        // Rollback temp task on error
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
+      }
+    }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Optimistic: reflect change immediately, server will confirm
-    if(p.id){
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-    } else if(r&&r.id){
-      // NEW task: inject immediately so it doesn't vanish while reload is in-flight
-      setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
-    }
-    // bust=true bypasses SWR cache — ensures the fresh task list is fetched
-    // from DB directly, preventing the new task from vanishing when the cache
-    // (TTL up to 60s) overwrites the optimistic insert on the next poll.
-    reload(undefined,{bust:!p.id});return r;
+    // Background reload uses normal cache (server already injected new item)
+    setTimeout(()=>reload(),2000);
+    return r;
   };
   const delT=async id=>{
-    // Optimistic: remove from UI immediately
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
     api.del('/api/tasks/'+id).then(()=>reload()).catch(()=>reload());
   };
@@ -2792,7 +2736,6 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tk=safe(tasks).find(t=>t.id===tid);
       if(tk)triggerTaskCelebration(tk.title,tk.project);
     }
-    // Optimistic: update stage in UI immediately
     setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tid?{...t,...payload}:t)}));
     api.put('/api/tasks/'+tid,payload).then(()=>reload()).catch(()=>reload());
   };
@@ -2960,7 +2903,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       </div>
 
       ${mode==='kanban'?html`
-        <div style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px'}}>
+        <div class="kanban-scroll" style=${{flex:1,overflowX:'auto',overflowY:'hidden',padding:'13px 18px 20px'}}>
           <div style=${{display:'flex',gap:11,height:'100%',minWidth:'fit-content'}}>
             ${KCOLS.map(st=>{
               const col=filtered.filter(t=>t.stage===st);const si=STAGES[st];
@@ -3036,7 +2979,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
           <div class="card" style=${{padding:0,overflow:'hidden'}}>
             <table style=${{width:'100%',borderCollapse:'collapse'}}>
               <thead>
-                <tr style=${{borderBottom:'2px solid var(--bd)',background:'var(--sf2)'}}>
+                <tr style=${{borderBottom:'2px solid var(--bd)',background:'rgba(0,0,0,0.35)'}}>
                   ${[
                     {k:'id', lbl:'ID', s:null}, {k:'type', lbl:'Type', s:null}, {k:'title', lbl:'Title', s:null}, {k:'project', lbl:'Project', s:null}, {k:'assignee',lbl:'Assignee', s:'assignee'}, {k:'priority',lbl:'Priority', s:'priority'}, {k:'stage', lbl:'Stage', s:'stage'}, {k:'due', lbl:'Due', s:'due'}, {k:'pct', lbl:'%', s:'pct'}, {k:'pts', lbl:'Pts', s:null}, ].map(h=>{
                     const isA=sortCol===h.s;const can=!!h.s;
@@ -3107,7 +3050,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
 }
 
 /* ─── Dashboard ───────────────────────────────────────────────────────────── */
-function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx}){
+function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,tickets:propTickets}){
   const t=safe(tasks);const p=safe(projects);const u=safe(users);
   const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   const [teamDropOpen,setTeamDropOpen]=useState(false);
@@ -3125,23 +3068,26 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx}){
   const done=t.filter(x=>x.stage==='completed').length;
   const active=t.filter(x=>x.stage!=='completed').length;
   const blocked=t.filter(x=>x.stage==='blocked').length;
-  const [tickets,setTickets]=useState([]);
+  // Use tickets from app-data — no separate fetch needed
+  const tickets=useMemo(()=>{
+    const all=safe(propTickets);
+    if(!activeTeam)return all;
+    return all.filter(tk=>!tk.team_id||tk.team_id===activeTeam.id||tk.assignee===activeTeam.id);
+  },[propTickets,activeTeam]);
+  // Single timelogs fetch — result shared between today's-hours stat and sparkline chart
+  const [timelogs,setTimelogs]=useState(null);
   useEffect(()=>{
-    const url=activeTeam?'/api/tickets?team_id='+activeTeam.id:'/api/tickets';
-    api.get(url).then(d=>setTickets(Array.isArray(d)?d:[]));
-  },[activeTeam]);
-  // Today's logged hours for current user
-  const [todayHrs,setTodayHrs]=useState('—');
-  useEffect(()=>{
-    api.get('/api/timelogs').then(logs=>{
-      if(!Array.isArray(logs))return;
-      const today=(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
-      const mine=logs.filter(l=>l.user_id===cu.id&&l.date===today);
-      const total=mine.reduce((s,l)=>s+(Number(l.hours||0))+(Number(l.minutes||0)/60),0);
-      const wh=Math.floor(total);const wm=Math.round((total-wh)*60);
-      setTodayHrs(total>0?(wh>0?wh+'h'+(wm>0?' '+wm+'m':''):wm+'m'):'0m');
-    });
+    api.get('/api/timelogs').then(logs=>{if(Array.isArray(logs))setTimelogs(logs);});
   },[cu.id]);
+  // Today's logged hours derived from shared timelogs state
+  const todayHrs=useMemo(()=>{
+    if(!timelogs)return '—';
+    const today=(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
+    const mine=timelogs.filter(l=>l.user_id===cu.id&&l.date===today);
+    const total=mine.reduce((s,l)=>s+(Number(l.hours||0))+(Number(l.minutes||0)/60),0);
+    const wh=Math.floor(total);const wm=Math.round((total-wh)*60);
+    return total>0?(wh>0?wh+'h'+(wm>0?' '+wm+'m':''):wm+'m'):'0m';
+  },[timelogs,cu.id]);
   const openTickets=tickets.filter(x=>x.status==='open').length;
   const inProgressTickets=tickets.filter(x=>x.status==='in-progress').length;
   const myTickets=tickets.filter(x=>x.assignee===cu.id&&x.status!=='closed'&&x.status!=='resolved').length;
@@ -3154,21 +3100,20 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx}){
     {label:'Total Projects',val:p.length,color:'#1d4ed8',bg:'rgba(29,78,216,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,nav:'projects'}, {label:'Active Tasks',val:active,color:'#0e7490',bg:'rgba(14,116,144,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,nav:'tasks'}, {label:'Completed',val:done,color:'var(--gn)',bg:'rgba(21,128,61,0.12)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,nav:'tasks:stage:completed'}, {label:'Blocked',val:blocked,color:'var(--rd)',bg:'rgba(185,28,28,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>`,nav:'tasks:stage:blocked'}, {label:'My Tasks',val:myT.filter(x=>x.stage!=='completed').length,color:'var(--am)',bg:'rgba(180,83,9,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,nav:'tasks:assignee:me'}, {label:'Team Members',val:u.length,color:'var(--pu)',bg:'rgba(109,40,217,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,nav:isAdminManager?'team':'tasks:assignee:me'}, {label:'Open Tickets',val:openTickets,color:'var(--cy)',bg:'rgba(14,116,144,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 9a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.5a1.5 1.5 0 0 0 0 3V15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1.5a1.5 1.5 0 0 0 0-3V9z"/><line x1="9" y1="7" x2="9" y2="17" strokeDasharray="2 2"/></svg>`,nav:'tickets:status:open'}, {label:'In Progress',val:inProgressTickets,color:'var(--am)',bg:'rgba(180,83,9,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,nav:isAdminManager?'tickets':'tasks:assignee:me'}, {label:'My Tickets',val:myTickets,color:'var(--or)',bg:'rgba(194,65,12,0.10)',icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,nav:'tickets:assignee:me'}, {label:"Today's Hours",val:todayHrs,color:'#0891b2',bg:'rgba(8,145,178,0.10)',strVal:true,icon:html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,nav:'timesheet'}, ];
   // ── Last 7 days hours sparkline data ────────────────────────────────────────
   const [hoursChart,setHoursChart]=useState([]);
+  // Sparkline: derived from shared timelogs state — no extra fetch
   useEffect(()=>{
-    api.get('/api/timelogs').then(logs=>{
-      if(!Array.isArray(logs))return;
-      const days=[];
-      for(let i=6;i>=0;i--){
-        const d=new Date();d.setDate(d.getDate()-i);
-        const key=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-        const label=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
-        const myLogs=logs.filter(l=>l.user_id===cu.id&&l.date===key);
-        const hrs=myLogs.reduce((s,l)=>s+(Number(l.hours||0))+(Number(l.minutes||0)/60),0);
-        days.push({day:label,hrs:Math.round(hrs*10)/10,date:key});
-      }
-      setHoursChart(days);
-    });
-  },[cu.id]);
+    if(!timelogs)return;
+    const days=[];
+    for(let i=6;i>=0;i--){
+      const d=new Date();d.setDate(d.getDate()-i);
+      const key=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+      const label=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+      const myLogs=timelogs.filter(l=>l.user_id===cu.id&&l.date===key);
+      const hrs=myLogs.reduce((s,l)=>s+(Number(l.hours||0))+(Number(l.minutes||0)/60),0);
+      days.push({day:label,hrs:Math.round(hrs*10)/10,date:key});
+    }
+    setHoursChart(days);
+  },[timelogs,cu.id]);
 
   return html`
     <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'12px 20px',display:'flex',flexDirection:'column',gap:12}}>
@@ -3809,7 +3754,7 @@ function MessagesView({projects,users,cu,tasks}){
       }
     };
     fetchTs();
-    const id=setInterval(()=>{if(!document.hidden)fetchTs();},45000); // 45s, skip when tab hidden
+    const id=setInterval(fetchTs,60000); // SSE handles message updates; fallback only
     return()=>clearInterval(id);
   },[]);
 
@@ -3863,7 +3808,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },30000); // 30s channel message poll — SSE handles real-time, this is fallback
+    },15000); // reduced 2s->15s: channel message poll
     return()=>clearInterval(id);
   },[pid]);
 
@@ -4151,7 +4096,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },30000); // 30s DM message poll — SSE handles real-time, this is fallback
+    },60000); // SSE handles DM updates; fallback only
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -4349,34 +4294,30 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
             </button>
             <button class="btn bg" style=${{padding:'4px 8px',fontSize:11,flexShrink:0}} onClick=${()=>{setEditPw(false);setNewPw('');}}>✕</button>
           </div>`:html`
-          <div style=${{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-            
-          </div>
+          <div>
+            <!-- Action buttons -->
+            <div style=${{display:'flex',gap:5,flexWrap:'wrap'}}>
+              ${isSelf&&!totpConfigured?html`
+                <button class="btn bg" style=${{padding:'3px 9px',fontSize:10,color:'#4ade80',borderColor:'rgba(74,222,128,0.3)'}}
+                  onClick=${startTotpSetup}>
+                  📱 Setup Authenticator
+                </button>`:null}
+              ${totpConfigured&&isAdminOrSelf?html`
+                <button class="btn brd" style=${{padding:'3px 9px',fontSize:10}}
+                  onClick=${resetTotp} disabled=${twoFaLoading}>
+                  ${twoFaLoading?'…':'↺ Reset 2FA'}
+                </button>`:null}
+              ${!totpConfigured&&(cu.role==='Admin'||cu.role==='Manager')?html`
+                <button class=${'btn bg'} style=${{padding:'3px 9px',fontSize:10,color:u.two_fa_enabled?'var(--rd)':'var(--cy)',borderColor:u.two_fa_enabled?'rgba(255,68,68,0.3)':'rgba(34,211,238,0.3)'}}
+                  onClick=${toggleEmailOtp} disabled=${twoFaLoading}>
+                  ${twoFaLoading?'…':u.two_fa_enabled?'Disable Email 2FA':'Enable Email 2FA'}
+                </button>`:null}
+            </div>
 
-          <!-- Action buttons -->
-          <div style=${{display:'flex',gap:5,flexWrap:'wrap'}}>
-            ${isSelf&&!totpConfigured?html`
-              <button class="btn bg" style=${{padding:'3px 9px',fontSize:10,color:'#4ade80',borderColor:'rgba(74,222,128,0.3)'}}
-                onClick=${startTotpSetup}>
-                📱 Setup Authenticator
-              </button>`:null}
-            ${totpConfigured&&isAdminOrSelf?html`
-              <button class="btn brd" style=${{padding:'3px 9px',fontSize:10}}
-                onClick=${resetTotp} disabled=${twoFaLoading}>
-                ${twoFaLoading?'…':'↺ Reset 2FA'}
-              </button>`:null}
-            ${!totpConfigured&&(cu.role==='Admin'||cu.role==='Manager')?html`
-              <button class=${'btn bg'} style=${{padding:'3px 9px',fontSize:10,color:u.two_fa_enabled?'var(--rd)':'var(--cy)',borderColor:u.two_fa_enabled?'rgba(255,68,68,0.3)':'rgba(34,211,238,0.3)'}}
-                onClick=${toggleEmailOtp} disabled=${twoFaLoading}>
-                ${twoFaLoading?'…':u.two_fa_enabled?'Disable Email 2FA':'Enable Email 2FA'}
-              </button>`:null}
-          </div>
+            ${totpMsg?html`<div style=${{fontSize:10,color:totpMsg.startsWith('✓')?'var(--gn)':'var(--rd)',fontWeight:600}}>${totpMsg}</div>`:null}
 
-          ${totpMsg?html`<div style=${{fontSize:10,color:totpMsg.startsWith('✓')?'var(--gn)':'var(--rd)',fontWeight:600}}>${totpMsg}</div>`:null}
-        </div>
-
-        <!-- TOTP Setup modal inline -->
-        ${showTotpSetup&&totpData?html`
+            <!-- TOTP Setup modal inline -->
+            ${showTotpSetup&&totpData?html`
           <div class="ov" onClick=${e=>e.target===e.currentTarget&&setShowTotpSetup(false)}>
             <div class="mo fi" style=${{maxWidth:480}}>
               <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
@@ -4432,7 +4373,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
               </div>
             </div>
           </div>`:null}
-          `}
+          </div>`}
       </td>
 
       <td style=${{padding:'12px 14px'}}>
@@ -4451,7 +4392,8 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
 
 function TeamView({users,cu,reload,projects}){
   const [tab,setTab]=useState('teams');
-  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [newMemberTeam,setNewMemberTeam]=useState('');const [newMemberProject,setNewMemberProject]=useState('');const [err,setErr]=useState('');
+  const [showNew,setShowNew]=useState(false);const [name,setName]=useState('');const [email,setEmail]=useState('');const [pw,setPw]=useState('');const [role,setRole]=useState('Developer');const [err,setErr]=useState('');
+  const [newMemberTeam,setNewMemberTeam]=useState('');const [newMemberProject,setNewMemberProject]=useState('');
   const [teams,setTeams]=useState([]);const [showNewTeam,setShowNewTeam]=useState(false);
   const [editTeam,setEditTeam]=useState(null);
   const [tName,setTName]=useState('');const [tLead,setTLead]=useState('');const [tMembers,setTMembers]=useState([]);
@@ -4467,9 +4409,7 @@ function TeamView({users,cu,reload,projects}){
     setErr('');
     const r=await api.post('/api/users',{name,email,password:pw,role});
     if(r.error){setErr(r.error);return;}
-    // If a team was selected, add the new user to that team immediately.
-    // The backend PUT /api/teams/:id now also auto-syncs the new member
-    // into all projects linked to that team (so Members tab updates instantly).
+    // Add to team — backend PUT now auto-syncs member into all linked projects too
     if(newMemberTeam&&r.id){
       const team=teams.find(t=>t.id===newMemberTeam);
       if(team){
@@ -4480,7 +4420,7 @@ function TeamView({users,cu,reload,projects}){
         }
       }
     }
-    // If a project was selected, add the new user to that project immediately
+    // Also add to a specific project if selected
     if(newMemberProject&&r.id){
       const proj=safe(projects).find(p=>p.id===newMemberProject);
       if(proj){
@@ -4508,8 +4448,16 @@ function TeamView({users,cu,reload,projects}){
   const delTeam=async id=>{if(!window.confirm('Delete this team?'))return;await api.del('/api/teams/'+id);loadTeams();};
   const toggleMember=id=>{setTMembers(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);};
 
-  const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
-  const filteredMembers=useMemo(()=>safe(users).filter(u=>!memberSearch||u.name.toLowerCase().includes(memberSearch.toLowerCase())||u.email.toLowerCase().includes(memberSearch.toLowerCase())),[users,memberSearch]);
+  const umap=safe(users).filter(u=>u&&u.id).reduce((a,u)=>{a[u.id]=u;return a;},{});
+  const filteredMembers=useMemo(()=>{
+    const userArray=safe(users);
+    // Extra validation to catch non-array edge cases
+    if(!Array.isArray(userArray)){
+      console.error('[TeamView] users is not an array:',typeof users,users);
+      return [];
+    }
+    return userArray.filter(u=>u&&u.id&&u.name&&u.email&&(!memberSearch||u.name.toLowerCase().includes(memberSearch.toLowerCase())||u.email.toLowerCase().includes(memberSearch.toLowerCase())));
+  },[users,memberSearch]);
   const filteredTeams=useMemo(()=>teams.filter(t=>!teamSearch||t.name.toLowerCase().includes(teamSearch.toLowerCase())),[teams,teamSearch]);
   const ROLE_COLORS={Admin:'var(--ac)',Manager:'var(--gn)',TeamLead:'var(--cy)',Developer:'var(--pu)',Tester:'var(--am)',Viewer:'var(--tx3)'};
 
@@ -4538,7 +4486,7 @@ function TeamView({users,cu,reload,projects}){
       <div class="card" style=${{padding:0,overflow:'auto'}}>
         <table style=${{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr style=${{borderBottom:'1px solid var(--bd)',background:'var(--sf2)'}}>
-            ${['Member','Email','Password','2FA / Authenticator','Role',''].map((h,i)=>html`<th key=${i} style=${{padding:'9px 15px',textAlign:'left',fontSize:10,fontFamily:'monospace',color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.5}}>${h}</th>`)}
+            ${['Member','Email','Password & 2FA','Role',''].map((h,i)=>html`<th key=${i} style=${{padding:'9px 15px',textAlign:'left',fontSize:10,fontFamily:'monospace',color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.5}}>${h}</th>`)}
           </tr></thead>
           <tbody>
             ${filteredMembers.length===0?html`<tr><td colspan="5" style=${{padding:'20px',textAlign:'center',color:'var(--tx3)',fontSize:12}}>No members match your search.</td></tr>`:null}
@@ -4605,7 +4553,7 @@ function TeamView({users,cu,reload,projects}){
       </div>`:null}
 
         ${showNew?html`<div class="ov" onClick=${e=>e.target===e.currentTarget&&setShowNew(false)}>
-      <div class="mo fi" style=${{maxWidth:420}}>
+      <div class="mo fi" style=${{maxWidth:400}}>
         <div style=${{display:'flex',justifyContent:'space-between',marginBottom:18}}><h2 style=${{fontSize:17,fontWeight:700,color:'var(--tx)'}}>👤 Add Member</h2><button class="btn bg" style=${{padding:'7px 10px'}} onClick=${()=>setShowNew(false)}>✕</button></div>
         <div style=${{display:'flex',flexDirection:'column',gap:11}}>
           <input class="inp" placeholder="Full Name" value=${name} onInput=${e=>setName(e.target.value)}/>
@@ -4613,26 +4561,21 @@ function TeamView({users,cu,reload,projects}){
           <input class="inp" type="password" placeholder="Password" value=${pw} onInput=${e=>setPw(e.target.value)}/>
           <select class="sel" value=${role} onChange=${e=>setRole(e.target.value)}>${ROLES.map(r=>html`<option key=${r}>${r}</option>`)}</select>
           <div>
-            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO TEAM <span style=${{color:'var(--tx3)',fontWeight:400}}>(optional)</span></label>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO TEAM <span style=${{fontWeight:400}}>(optional)</span></label>
             <select class="sel" value=${newMemberTeam} onChange=${e=>setNewMemberTeam(e.target.value)}
-              style=${{background:newMemberTeam?'rgba(90,140,255,.07)':'var(--sf)',borderColor:newMemberTeam?'var(--ac)':'var(--bd)'}}>
+              style=${{borderColor:newMemberTeam?'var(--ac)':'var(--bd)'}}>
               <option value="">— No team —</option>
               ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
             </select>
-            ${newMemberTeam?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:5,display:'flex',alignItems:'center',gap:4}}>
-              <span>✓</span><span>Will be added to <strong>${(teams.find(t=>t.id===newMemberTeam)||{}).name||''}</strong> on creation</span>
-            </div>`:null}
+            ${newMemberTeam?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:4}}>✓ Will be synced to all projects linked to this team</div>`:null}
           </div>
           <div>
-            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO PROJECT <span style=${{color:'var(--tx3)',fontWeight:400}}>(optional)</span></label>
+            <label class="lbl" style=${{fontSize:11,color:'var(--tx3)',marginBottom:4,display:'block'}}>ADD TO PROJECT <span style=${{fontWeight:400}}>(optional)</span></label>
             <select class="sel" value=${newMemberProject} onChange=${e=>setNewMemberProject(e.target.value)}
-              style=${{background:newMemberProject?'rgba(90,140,255,.07)':'var(--sf)',borderColor:newMemberProject?'var(--ac)':'var(--bd)'}}>
+              style=${{borderColor:newMemberProject?'var(--ac)':'var(--bd)'}}>
               <option value="">— No project —</option>
               ${safe(projects).map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
             </select>
-            ${newMemberProject?html`<div style=${{fontSize:11,color:'var(--ac2)',marginTop:5,display:'flex',alignItems:'center',gap:4}}>
-              <span>✓</span><span>Will be added to <strong>${(safe(projects).find(p=>p.id===newMemberProject)||{}).name||''}</strong></span>
-            </div>`:null}
           </div>
           ${err?html`<div style=${{color:'var(--rd)',fontSize:12,padding:'7px 11px',background:'rgba(248,113,113,.07)',borderRadius:7}}>${err}</div>`:null}
           <div style=${{display:'flex',gap:9,justifyContent:'flex-end'}}>
@@ -4742,15 +4685,8 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     if(!nTitle.trim())return;
     setSaving(true);
     const payload={title:nTitle,description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    if(editTicket){
-      const r=await api.put('/api/tickets/'+editTicket.id,payload);
-      // Optimistic update so edited ticket doesn't flicker back to old values
-      if(r&&r.id)setTickets(prev=>prev.map(t=>t.id===editTicket.id?{...t,...payload}:t));
-    } else {
-      const r=await api.post('/api/tickets',payload);
-      // Optimistic insert so new ticket doesn't vanish while load() is in-flight
-      if(r&&r.id)setTickets(prev=>[r,...prev]);
-    }
+    if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);}
+    else{await api.post('/api/tickets',payload);}
     setSaving(false);setShowNew(false);setEditTicket(null);
     setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
     load();
@@ -5147,53 +5083,6 @@ function WorkspaceSettings({cu,onReload}){
     setTimeout(()=>setTestResult(null),5000);
   };
 
-  // ── Phase 2: Email Invites & Domain Settings ─────────────────────────────
-  const [inviteEmail,setInviteEmail]=useState('');
-  const [inviteRole,setInviteRole]=useState('viewer');
-  const [inviteSending,setInviteSending]=useState(false);
-  const [inviteMsg,setInviteMsg]=useState('');
-  const [pendingInvites,setPendingInvites]=useState([]);
-  const [allowedDomains,setAllowedDomains]=useState([]);
-  const [newDomain,setNewDomain]=useState('');
-  const [domainRequiresApproval,setDomainRequiresApproval]=useState(true);
-  const [domainSaving,setDomainSaving]=useState(false);
-
-  useEffect(()=>{
-    api.get('/api/workspace/invites').then(d=>{if(Array.isArray(d))setPendingInvites(d.filter(i=>!i.accepted));}).catch(()=>{});
-    api.get('/api/workspace/domain-settings').then(d=>{
-      if(d&&!d.error){setAllowedDomains(d.allowed_domains||[]);setDomainRequiresApproval(d.requires_approval!==false);}
-    }).catch(()=>{});
-  },[]);
-
-  const sendInvite=async()=>{
-    if(!inviteEmail){setInviteMsg('Enter an email address.');return;}
-    setInviteSending(true);setInviteMsg('');
-    const r=await api.post('/api/workspace/invite',{email:inviteEmail,role:inviteRole});
-    setInviteSending(false);
-    if(r.error){setInviteMsg('Error: '+r.error);}
-    else{setInviteMsg('Invite sent to '+inviteEmail+'!');setInviteEmail('');
-      const d=await api.get('/api/workspace/invites').catch(()=>null);
-      if(Array.isArray(d))setPendingInvites(d.filter(i=>!i.accepted));
-    }
-  };
-
-  const revokeInvite=async(id)=>{
-    await api.del('/api/workspace/invites/'+id).catch(()=>{});
-    setPendingInvites(prev=>prev.filter(i=>i.id!==id));
-  };
-
-  const saveDomainSettings=async()=>{
-    setDomainSaving(true);
-    await api.post('/api/workspace/domain-settings',{allowed_domains:allowedDomains,requires_approval:domainRequiresApproval});
-    setDomainSaving(false);
-  };
-
-  const addDomain=()=>{
-    const d=newDomain.trim().toLowerCase().replace(/^@/,'');
-    if(d&&d.includes('.')&&!allowedDomains.includes(d)){setAllowedDomains(prev=>[...prev,d]);}
-    setNewDomain('');
-  };
-
   const newInvite=async()=>{
     if(!window.confirm('Generate a new invite code? The old one will stop working.'))return;
     const r=await api.post('/api/workspace/new-invite',{});
@@ -5271,36 +5160,6 @@ function WorkspaceSettings({cu,onReload}){
       </div>
 
       <div class="card" style=${{marginBottom:16}}>
-        <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>💳 Plan & Billing</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Your current subscription plan and member usage.</p>
-        ${(()=>{
-          const plan=(ws.plan||'starter');
-          const limits={starter:5,team:30,enterprise:null};
-          const limit=limits[plan];
-          const planColors={starter:'var(--tx3)',team:'var(--ac)',enterprise:'var(--pu)'};
-          const planLabels={starter:'Starter — Free',team:'Team — ₹999/mo',enterprise:'Enterprise — Custom'};
-          return html\`
-            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--sf2)',borderRadius:10,border:'1px solid var(--bd)',marginBottom:10}}>
-              <div>
-                <div style=${{fontSize:13,fontWeight:700,color:planColors[plan]||'var(--tx)'}}>${planLabels[plan]||plan}</div>
-                <div style=${{fontSize:11,color:'var(--tx3)',marginTop:2}}>
-                  ${limit?html\`Member limit: \${limit} · Contact ceo@project-tracker.in to upgrade\`:html\`Unlimited members\`}
-                </div>
-              </div>
-              <div style=${{fontSize:22,padding:'6px 14px',background:plan==='team'?'rgba(90,140,255,.12)':plan==='enterprise'?'rgba(168,85,247,.12)':'var(--sf2)',borderRadius:8,fontWeight:700,color:planColors[plan]||'var(--tx3)',border:'1px solid var(--bd)'}}>
-                ${plan==='starter'?'FREE':plan==='team'?'TEAM':plan==='enterprise'?'ENT':'—'}
-              </div>
-            </div>
-            ${plan==='starter'?html\`
-              <div style=${{fontSize:12,padding:'9px 12px',background:'rgba(90,140,255,.06)',borderRadius:8,border:'1px solid rgba(90,140,255,.15)',color:'var(--tx2)'}}>
-                🚀 <b>Upgrade to Team</b> — Get up to 30 members, analytics, custom SMTP & more for ₹999/mo. Email <a href="mailto:ceo@project-tracker.in" style=${{color:'var(--ac)'}}>ceo@project-tracker.in</a>
-              </div>
-            \`:null}
-          \`;
-        })()}
-      </div>
-
-      <div class="card" style=${{marginBottom:16}}>
         <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🔗 Invite Code</h3>
         <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Share this code with teammates to join your workspace.</p>
         <div style=${{display:'flex',alignItems:'center',gap:10}}>
@@ -5312,69 +5171,6 @@ function WorkspaceSettings({cu,onReload}){
             <button class="btn bam" style=${{fontSize:12,padding:'8px 14px'}} onClick=${newInvite}>↻ New Code</button>
           </div>
         </div>
-      </div>
-
-      <!-- Email Invite Card -->
-      <div class="card" style=${{marginBottom:16}}>
-        <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>✉️ Invite by Email</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Send a direct invite link to a specific email. They'll be prompted to create an account and join this workspace.</p>
-        <div style=${{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap'}}>
-          <input class="inp" style=${{flex:1,minWidth:180}} placeholder="colleague@company.com" value=${inviteEmail} onInput=${e=>setInviteEmail(e.target.value)}
-            onKeyDown=${e=>{if(e.key==='Enter')sendInvite();}}/>
-          <select class="inp" style=${{width:130}} value=${inviteRole} onChange=${e=>setInviteRole(e.target.value)}>
-            <option value="viewer">Viewer</option>
-            <option value="tester">Tester</option>
-            <option value="developer">Developer</option>
-            <option value="admin">Admin</option>
-          </select>
-          <button class="btn bp" style=${{fontSize:12,padding:'8px 14px',whiteSpace:'nowrap'}} onClick=${sendInvite} disabled=${inviteSending}>
-            ${inviteSending?html`<span class="spin"></span>`:null} Send Invite
-          </button>
-        </div>
-        ${inviteMsg?html`<div style=${{fontSize:12,color:inviteMsg.startsWith('Error')?'var(--rd)':'var(--gn)',marginBottom:8}}>${inviteMsg}</div>`:null}
-        ${pendingInvites.length>0?html`
-          <div style=${{marginTop:12}}>
-            <div style=${{fontSize:11,color:'var(--tx3)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>Pending Invites</div>
-            ${pendingInvites.map(inv=>html`
-              <div key=${inv.id} style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--bd2)'}}>
-                <div>
-                  <span style=${{fontSize:12,color:'var(--tx)'}}>${inv.email}</span>
-                  <span style=${{fontSize:10,color:'var(--tx3)',marginLeft:8,fontFamily:'monospace'}}>${inv.role}</span>
-                </div>
-                <button class="btn" style=${{fontSize:10,padding:'2px 8px',color:'var(--rd)'}} onClick=${()=>revokeInvite(inv.id)}>Revoke</button>
-              </div>
-            `)}
-          </div>
-        `:null}
-      </div>
-
-      <!-- Domain Auto-Join Card -->
-      <div class="card" style=${{marginBottom:16}}>
-        <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🌐 Domain Auto-Join</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:14}}>Allow anyone with a matching email domain to request access. E.g. add <code>company.in</code> to let <code>@company.in</code> emails join.</p>
-        <div style=${{display:'flex',gap:8,marginBottom:12}}>
-          <input class="inp" style=${{flex:1}} placeholder="example.com" value=${newDomain}
-            onInput=${e=>setNewDomain(e.target.value)}
-            onKeyDown=${e=>{if(e.key==='Enter')addDomain();}}/>
-          <button class="btn bp" style=${{fontSize:12,padding:'8px 14px'}} onClick=${addDomain}>+ Add Domain</button>
-        </div>
-        ${allowedDomains.length>0?html`
-          <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
-            ${allowedDomains.map(d=>html`
-              <span key=${d} style=${{display:'inline-flex',alignItems:'center',gap:5,background:'rgba(29,78,216,.1)',border:'1px solid rgba(29,78,216,.2)',borderRadius:6,padding:'3px 10px',fontSize:12,color:'var(--ac)'}}>
-                @${d}
-                <button onClick=${()=>setAllowedDomains(prev=>prev.filter(x=>x!==d))} style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:13,lineHeight:1,padding:0}}>×</button>
-              </span>
-            `)}
-          </div>
-        `:html`<div style=${{fontSize:12,color:'var(--tx3)',marginBottom:12}}>No domains configured.</div>`}
-        <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
-          <input type="checkbox" id="domain-approval" checked=${domainRequiresApproval} onChange=${e=>setDomainRequiresApproval(e.target.checked)}/>
-          <label for="domain-approval" style=${{fontSize:12,color:'var(--tx2)',cursor:'pointer'}}>Require admin approval before domain-matched users can access the workspace</label>
-        </div>
-        <button class="btn bp" style=${{fontSize:12,padding:'8px 14px'}} onClick=${saveDomainSettings} disabled=${domainSaving}>
-          ${domainSaving?html`<span class="spin"></span>`:null} Save Domain Settings
-        </button>
       </div>
 
       <div class="card" style=${{marginBottom:16}}>
@@ -5460,157 +5256,6 @@ function WorkspaceSettings({cu,onReload}){
         </button>
       </div>
     </div>
-    <${SSOSettingsCard} cu=${cu} ws=${ws}/>
-  </div>`;
-}
-
-/* ─── SSO Settings Card ───────────────────────────────────────────────────── */
-function SSOSettingsCard({cu,ws}){
-  const isAdmin=cu&&(cu.role==='Admin'||cu.role==='Owner');
-  const [cfg,setCfg]=useState(null);
-  const [saving,setSaving]=useState(false);
-  const [saved,setSaved]=useState(false);
-  const [testing,setTesting]=useState(false);
-  const [testResult,setTestResult]=useState(null);
-  const [metaUrl,setMetaUrl]=useState('');
-  const [wsUrl,setWsUrl]=useState(null);
-
-  useEffect(()=>{
-    if(!isAdmin)return;
-    api.get('/api/sso/config').then(d=>{if(!d.error)setCfg(d);});
-    api.get('/api/sso/workspace-url').then(d=>{if(!d.error)setWsUrl(d);});
-  },[]);
-
-  const save=async()=>{
-    if(!cfg)return;
-    setSaving(true);
-    await api.put('/api/sso/config',cfg);
-    setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2500);
-  };
-
-  const testMeta=async()=>{
-    if(!metaUrl){alert('Enter a metadata URL first');return;}
-    setTesting(true);setTestResult(null);
-    const r=await api.post('/api/sso/test-metadata',{metadata_url:metaUrl});
-    setTesting(false);
-    if(r.ok){
-      setCfg(prev=>({...prev,sso_idp_url:r.idp_sso_url||prev.sso_idp_url,sso_entity_id:r.entity_id||prev.sso_entity_id}));
-      setTestResult({ok:true,msg:`\u2713 Metadata parsed \u2014 IdP SSO URL: ${r.idp_sso_url||'(not found)'}`});
-    } else {
-      setTestResult({ok:false,msg:`\u2717 ${r.error}`});
-    }
-    setTimeout(()=>setTestResult(null),6000);
-  };
-
-  const copy=t=>navigator.clipboard&&navigator.clipboard.writeText(t);
-
-  const ROW=({label,children,hint})=>html`
-    <div style=${{marginBottom:18}}>
-      <label style=${{display:'block',fontSize:11,fontWeight:700,letterSpacing:'.07em',textTransform:'uppercase',color:'var(--tx3)',marginBottom:6}}>${label}</label>
-      ${children}
-      ${hint&&html`<div style=${{fontSize:11,color:'var(--tx3)',marginTop:4}}>${hint}</div>`}
-    </div>`;
-
-  if(!isAdmin)return null;
-  if(!cfg)return html`<div style=${{padding:'24px',textAlign:'center'}}><span class="spin"></span></div>`;
-
-  return html`
-  <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'24px',marginTop:24}}>
-    <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:20}}>
-      <div style=${{width:38,height:38,borderRadius:11,background:'linear-gradient(135deg,#5a8cff,#a855f7)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>&#128273;</div>
-      <div>
-        <h3 style=${{fontSize:14,fontWeight:700,color:'var(--tx)',margin:0}}>SSO / SAML Authentication</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',margin:0,marginTop:2}}>Let team members sign in via your Identity Provider (Okta, Azure AD, Google Workspace, etc.)</p>
-      </div>
-    </div>
-
-    ${wsUrl&&html`
-    <div style=${{background:'var(--bg)',border:'1px solid var(--bd)',borderRadius:12,padding:'14px 16px',marginBottom:20}}>
-      <div style=${{fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--tx3)',marginBottom:10}}>Your Workspace URLs</div>
-      ${[
-        {label:'Dashboard',val:wsUrl.dashboard_url},
-        {label:'SSO Login',val:wsUrl.sso_login_url},
-        {label:'SSO Callback (ACS)',val:wsUrl.sso_callback_url},
-      ].map(({label,val})=>html`
-        <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-          <span style=${{fontSize:11,fontWeight:600,color:'var(--tx3)',width:100,flexShrink:0}}>${label}</span>
-          <code style=${{flex:1,fontSize:11,background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:7,padding:'5px 10px',color:'var(--ac)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${val}</code>
-          <button class="btn bg" style=${{padding:'5px 10px',fontSize:11}} onClick=${()=>copy(val)}>Copy</button>
-        </div>
-      `)}
-    </div>`}
-
-    <${ROW} label="Enable SSO">
-      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
-        <input type="checkbox" checked=${!!cfg.sso_enabled}
-          onChange=${e=>setCfg(p=>({...p,sso_enabled:e.target.checked?1:0}))}
-          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
-        <span style=${{fontSize:13,color:'var(--tx)'}}>Enable SAML 2.0 SSO for this workspace</span>
-      </label>
-    <//>
-
-    ${cfg.sso_enabled?html`
-    <${ROW} label="Import from IdP Metadata URL" hint="Paste your IdP metadata URL and click Test \u2014 it will auto-fill the fields below.">
-      <div style=${{display:'flex',gap:8}}>
-        <input class="vinp" style=${{flex:1,fontSize:13}} placeholder="https://login.microsoftonline.com/\u2026/federationmetadata/\u2026"
-          value=${metaUrl} onInput=${e=>setMetaUrl(e.target.value)}/>
-        <button class="btn bp" style=${{fontSize:12,padding:'8px 16px',whiteSpace:'nowrap'}} onClick=${testMeta} disabled=${testing}>
-          ${testing?html`<span class="spin"></span>`:'Test & Import'}
-        </button>
-      </div>
-      ${testResult&&html`<div style=${{marginTop:8,fontSize:12,padding:'8px 12px',borderRadius:8,
-        background:testResult.ok?'rgba(48,209,88,.1)':'rgba(255,59,48,.1)',
-        color:testResult.ok?'var(--green)':'var(--red)',border:'1px solid '+(testResult.ok?'rgba(48,209,88,.3)':'rgba(255,59,48,.3)')
-      }}>${testResult.msg}</div>`}
-    <//>
-
-    <${ROW} label="IdP SSO URL" hint="The SAML endpoint where AuthnRequests are sent.">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://idp.example.com/sso/saml"
-        value=${cfg.sso_idp_url||''} onInput=${e=>setCfg(p=>({...p,sso_idp_url:e.target.value}))}/>
-    <//>
-
-    <${ROW} label="Entity ID / Issuer" hint="Your Service Provider entity ID (usually your app URL).">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="https://app.project-tracker.in"
-        value=${cfg.sso_entity_id||''} onInput=${e=>setCfg(p=>({...p,sso_entity_id:e.target.value}))}/>
-    <//>
-
-    <${ROW} label="IdP x.509 Certificate" hint="Paste the raw PEM certificate from your IdP (starts with -----BEGIN CERTIFICATE-----)">
-      <textarea class="vinp" style=${{width:'100%',fontSize:11,fontFamily:'monospace',minHeight:80,resize:'vertical'}}
-        placeholder="-----BEGIN CERTIFICATE-----&#10;MIIxxxxx\u2026&#10;-----END CERTIFICATE-----"
-        value=${cfg.sso_x509_cert||''} onInput=${e=>setCfg(p=>({...p,sso_x509_cert:e.target.value}))}></textarea>
-    <//>
-
-    <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-      <${ROW} label="Email Attribute" hint="SAML attribute name for user email">
-        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="email"
-          value=${cfg.sso_attr_email||'email'} onInput=${e=>setCfg(p=>({...p,sso_attr_email:e.target.value}))}/>
-      <//>
-      <${ROW} label="Name Attribute" hint="SAML attribute name for display name">
-        <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="name"
-          value=${cfg.sso_attr_name||'name'} onInput=${e=>setCfg(p=>({...p,sso_attr_name:e.target.value}))}/>
-      <//>
-    </div>
-
-    <${ROW} label="Workspace URL Slug" hint="Customise the slug in your workspace URL (e.g. 'acme' \u2192 /acme/wsXXX/dashboard)">
-      <input class="vinp" style=${{width:'100%',fontSize:13}} placeholder="my-company"
-        value=${cfg.workspace_slug||''} onInput=${e=>setCfg(p=>({...p,workspace_slug:e.target.value.toLowerCase().replace(/[^a-z0-9-]/g,'-')}))}/>
-    <//>
-
-    <${ROW} label="Allow Password Login">
-      <label style=${{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
-        <input type="checkbox" checked=${cfg.sso_allow_password_login!==0}
-          onChange=${e=>setCfg(p=>({...p,sso_allow_password_login:e.target.checked?1:0}))}
-          style=${{accentColor:'var(--ac)',width:16,height:16}}/>
-        <span style=${{fontSize:13,color:'var(--tx)'}}>Allow members to also use email + password login</span>
-      </label>
-    <//>
-    `:null}
-
-    <div style=${{display:'flex',gap:10,justifyContent:'flex-end',marginTop:8}}>
-      <button class="btn bp" onClick=${save} disabled=${saving}>
-        ${saving?html`<span class="spin"></span>`:saved?'\u2713 Saved!':'Save SSO Settings'}
-      </button>
-    </div>
   </div>`;
 }
 
@@ -5625,9 +5270,11 @@ function AiDocsView({cu,projects,tasks,users}){
   const [sending,setSending]=useState(false);
   const [sideTab,setSideTab]=useState('recents');
   const [copied,setCopied]=useState(null);
+  const [uploadedFiles,setUploadedFiles]=useState([]);
   const bottomRef=useRef(null);
   const inputRef=useRef(null);
   const chatRef=useRef(null);
+  const fileInputRef=useRef(null);
 
   // ── Recents: stored in localStorage, keyed by user ──────────────────────
   const STORAGE_KEY='vw_ai_recents_'+(cu&&cu.id||'x');
@@ -5692,6 +5339,66 @@ function AiDocsView({cu,projects,tasks,users}){
     }catch{return'';}
   };
 
+  // ── File upload handlers ──────────────────────────────────────────────
+  const handleFileSelect=async(e)=>{
+    const files=Array.from(e.target.files||[]);
+    if(!files.length)return;
+    
+    const newFiles=[];
+    for(const file of files.slice(0,3)){
+      if(file.size>10*1024*1024){
+        alert(`File "${file.name}" is too large. Max 10MB per file.`);
+        continue;
+      }
+      const processedFile=await processFile(file);
+      if(processedFile)newFiles.push(processedFile);
+    }
+    setUploadedFiles(prev=>[...prev,...newFiles].slice(0,5));
+    if(fileInputRef.current)fileInputRef.current.value='';
+  };
+
+  const processFile=async(file)=>{
+    return new Promise((resolve)=>{
+      const reader=new FileReader();
+      reader.onload=async(e)=>{
+        const base64=e.target.result.split(',')[1];
+        const type=file.type;
+        
+        let processedData=null;
+        if(type.startsWith('image/')){
+          processedData={type:'image',source:{type:'base64',media_type:type,data:base64}};
+        }else if(type==='application/pdf'){
+          processedData={type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}};
+        }else if(type.startsWith('text/')||type==='application/json'){
+          const text=await file.text();
+          processedData={type:'text',text:text};
+        }else{
+          processedData={type:'document',source:{type:'base64',media_type:type,data:base64}};
+        }
+        
+        resolve({
+          id:'f'+Date.now()+Math.random(),
+          name:file.name,
+          size:file.size,
+          mimeType:type,
+          data:processedData
+        });
+      };
+      reader.onerror=()=>resolve(null);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeFile=(id)=>{
+    setUploadedFiles(prev=>prev.filter(f=>f.id!==id));
+  };
+
+  const formatFileSize=(bytes)=>{
+    if(bytes<1024)return bytes+' B';
+    if(bytes<1024*1024)return(bytes/1024).toFixed(1)+' KB';
+    return(bytes/(1024*1024)).toFixed(1)+' MB';
+  };
+
   useEffect(()=>{
     // Welcome message
     setMessages([{
@@ -5704,22 +5411,41 @@ I'm your AI assistant powered by Claude. I can help you create:
 - **Project documentation** (using your real workspace data)  
 - **Technical specifications** and API references
 - **Sprint reports**, test plans, and security checklists
+- **Diagrams from uploaded files** (PDFs, images, documents)
 
 Your workspace has **${safe(projects).length} projects**, **${safe(tasks).length} tasks**, and **${safe(users).length} team members** — I'll use this context automatically.
 
-**Try a template below**, or just describe what you need in plain English. 💬`,
+**📎 Upload files** to create diagrams from documentation, or **try a template below**, or just describe what you need in plain English. 💬`,
       type:'welcome'
     }]);
   },[]);
 
   const send=async(textOverride)=>{
     const text=(textOverride||input).trim();
-    if(!text||sending)return;
+    if((!text&&!uploadedFiles.length)||sending)return;
     setInput('');setSending(true);
 
-    const userMsg={role:'user',id:'u'+Date.now(),ts:new Date(),content:text};
+    // Build user message content with files
+    let userContent=text;
+    const hasFiles=uploadedFiles.length>0;
+    
+    if(hasFiles){
+      userContent=[{type:'text',text:text||'Please analyze these files and create documentation or diagrams as needed.'}];
+      uploadedFiles.forEach(file=>{
+        if(file.data.type==='image'){
+          userContent.push(file.data);
+        }else if(file.data.type==='document'){
+          userContent.push(file.data);
+        }else if(file.data.type==='text'){
+          userContent.push({type:'text',text:`\n\n[File: ${file.name}]\n${file.data.text}`});
+        }
+      });
+    }
+
+    const userMsg={role:'user',id:'u'+Date.now(),ts:new Date(),content:text,files:uploadedFiles.map(f=>f.name)};
     const thinkingId='t'+Date.now();
     setMessages(m=>[...m,userMsg,{role:'assistant',id:thinkingId,ts:new Date(),content:'',type:'thinking'}]);
+    setUploadedFiles([]);
     scrollToBottom();
 
     // Build workspace context
@@ -5747,24 +5473,35 @@ INSTRUCTIONS:
 - Be specific and use real workspace data when available
 - Format docs professionally — use headers, tables, bullet points
 - For diagrams, explain what the diagram shows after the code block
-- Keep responses rich and actionable`;
+- Keep responses rich and actionable
+${hasFiles?'- The user has attached files. Analyze them and create documentation or diagrams based on their content.':''}`;
 
     const history=messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-12).map(m=>({role:m.role,content:m.content}));
-    history.push({role:'user',content:text});
+    history.push({role:'user',content:userContent});
 
-    // Route ALL AI calls through backend — API key never exposed to browser
+    // Check for API key
+    const ws=await api.get('/api/workspace');
+    if(!ws.ai_api_key){
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.\n\nYou can get a key at [anthropic.com](https://anthropic.com).'}:msg));
+      setSending(false);scrollToBottom();return;
+    }
+
     try{
-      const r=await api.post('/api/ai/chat',{message:text,history:messages.filter(m=>m.role!=='assistant'||m.type!=='thinking').slice(-10).map(m=>({role:m.role,content:m.content}))});
-      if(r.error==='NO_KEY'){
-        setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:'**No AI API Key configured.**\n\nPlease add your Anthropic API key in **Workspace Settings → AI Key** to enable the AI assistant.'}:msg));
-        setSending(false);scrollToBottom();return;
+      const r=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-api-key':ws.ai_api_key,'anthropic-version':'2023-06-01'},
+        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,system:systemPrompt,messages:history})
+      });
+      if(!r.ok){
+        const e=await r.json().catch(()=>({}));
+        throw new Error(e.error?.message||'API error '+r.status);
       }
-      if(r.error){throw new Error(r.message||r.error);}
-      const reply=r.message||'Sorry, I could not generate a response.';
+      const data=await r.json();
+      const reply=data.content?.[0]?.text||'Sorry, I could not generate a response.';
       setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'assistant',content:reply}:msg));
     }catch(e){
       const errMsg=e.message||'Network error';
-      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nCheck your API key in Workspace Settings.`}:msg));
+      setMessages(m=>m.map(msg=>msg.id===thinkingId?{...msg,type:'error',content:`**Error:** ${errMsg}\n\nPlease check your API key in Workspace Settings.`}:msg));
     }
     setSending(false);scrollToBottom();
     // Auto-save to recents after AI responds
@@ -5956,8 +5693,17 @@ INSTRUCTIONS:
                   </div>`:
 
                 msg.role==='user'?html`
-                  <div style=${{padding:'12px 16px',borderRadius:14,borderBottomRightRadius:4,background:'var(--ac)',color:'#fff',fontSize:13.5,lineHeight:1.6,wordBreak:'break-word'}}>
-                    ${msg.content}
+                  <div>
+                    <div style=${{padding:'12px 16px',borderRadius:14,borderBottomRightRadius:4,background:'var(--ac)',color:'#fff',fontSize:13.5,lineHeight:1.6,wordBreak:'break-word'}}>
+                      ${msg.content}
+                    </div>
+                    ${msg.files&&msg.files.length>0?html`
+                      <div style=${{display:'flex',gap:6,marginTop:6,flexWrap:'wrap'}}>
+                        ${msg.files.map(fname=>html`
+                          <span key=${fname} style=${{fontSize:10,padding:'4px 8px',borderRadius:6,background:'var(--sf2)',border:'1px solid var(--bd)',color:'var(--tx3)',display:'flex',alignItems:'center',gap:4}}>
+                            📎 ${fname}
+                          </span>`)}
+                      </div>`:null}
                   </div>`:html`
 
                   <!-- Assistant message -->
@@ -5985,6 +5731,26 @@ INSTRUCTIONS:
 
         <!-- Input bar -->
         <div style=${{padding:'14px 20px',borderTop:'1px solid var(--bd)',background:'var(--sf)',flexShrink:0}}>
+          <!-- Uploaded files preview -->
+          ${uploadedFiles.length>0?html`
+            <div style=${{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap',padding:'10px 12px',background:'var(--sf2)',borderRadius:10,border:'1px solid var(--bd)'}}>
+              ${uploadedFiles.map(file=>html`
+                <div key=${file.id} style=${{display:'flex',alignItems:'center',gap:6,padding:'6px 10px',borderRadius:8,background:'var(--sf)',border:'1px solid var(--bd)',fontSize:11}}>
+                  <span style=${{color:'var(--ac)'}}>
+                    ${file.mimeType.startsWith('image/')?'🖼️':file.mimeType==='application/pdf'?'📄':'📎'}
+                  </span>
+                  <span style=${{color:'var(--tx2)',maxWidth:150,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${file.name}</span>
+                  <span style=${{color:'var(--tx3)',fontSize:9}}>${formatFileSize(file.size)}</span>
+                  <button onClick=${()=>removeFile(file.id)}
+                    style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:14,padding:0,lineHeight:1,transition:'color .15s'}}
+                    onMouseEnter=${e=>e.currentTarget.style.color='var(--rd)'}
+                    onMouseLeave=${e=>e.currentTarget.style.color='var(--tx3)'}>×</button>
+                </div>`)}
+              <div style=${{fontSize:10,color:'var(--tx3)',padding:'6px 8px',display:'flex',alignItems:'center'}}>
+                ${uploadedFiles.length} file${uploadedFiles.length>1?'s':''} attached
+              </div>
+            </div>`:null}
+
           <!-- Quick action chips -->
           <div style=${{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
             ${[
@@ -6003,6 +5769,22 @@ INSTRUCTIONS:
 
           <!-- Text input row -->
           <div style=${{display:'flex',gap:10,alignItems:'flex-end'}}>
+            <!-- Hidden file input -->
+            <input ref=${fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.md,.json,.doc,.docx"
+              onChange=${handleFileSelect}
+              style=${{display:'none'}}/>
+            
+            <!-- File upload button -->
+            <button onClick=${()=>fileInputRef.current?.click()} disabled=${sending||uploadedFiles.length>=5}
+              title=${uploadedFiles.length>=5?'Max 5 files':'Attach files (images, PDFs, documents)'}
+              style=${{height:46,width:46,borderRadius:13,border:'1px solid var(--bd)',cursor:uploadedFiles.length>=5?'not-allowed':'pointer',
+                background:'var(--sf2)',color:uploadedFiles.length>0?'var(--ac)':'var(--tx3)',fontSize:18,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,
+                transition:'all .2s'}}
+              onMouseEnter=${e=>{if(uploadedFiles.length<5){e.currentTarget.style.borderColor='var(--ac)';e.currentTarget.style.background='var(--ac4)';}}}
+              onMouseLeave=${e=>{e.currentTarget.style.borderColor='var(--bd)';e.currentTarget.style.background='var(--sf2)';}}>
+              📎
+            </button>
+
             <div style=${{flex:1,position:'relative'}}>
               <textarea ref=${inputRef} value=${input}
                 onInput=${e=>{setInput(e.target.value);e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,160)+'px';}}
@@ -6014,18 +5796,18 @@ INSTRUCTIONS:
                 onBlur=${e=>e.target.style.borderColor='var(--bd)'}
               ></textarea>
             </div>
-            <button onClick=${()=>send()} disabled=${sending||!input.trim()}
-              style=${{height:46,width:46,borderRadius:13,border:'none',cursor:sending||!input.trim()?'not-allowed':'pointer',
-                background:sending||!input.trim()?'var(--sf3)':'linear-gradient(135deg,#5a5ef7,#a855f7)',
+            <button onClick=${()=>send()} disabled=${sending||(!input.trim()&&!uploadedFiles.length)}
+              style=${{height:46,width:46,borderRadius:13,border:'none',cursor:(sending||(!input.trim()&&!uploadedFiles.length))?'not-allowed':'pointer',
+                background:(sending||(!input.trim()&&!uploadedFiles.length))?'var(--sf3)':'linear-gradient(135deg,#5a5ef7,#a855f7)',
                 color:'#fff',fontSize:18,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,
-                transition:'all .2s',boxShadow:sending||!input.trim()?'none':'0 4px 16px rgba(90,94,247,.45)'}}>
+                transition:'all .2s',boxShadow:(sending||(!input.trim()&&!uploadedFiles.length))?'none':'0 4px 16px rgba(90,94,247,.45)'}}>
               ${sending
                 ?html`<span style=${{width:16,height:16,border:'2px solid rgba(255,255,255,.3)',borderTopColor:'#fff',borderRadius:'50%',animation:'sp .7s linear infinite',display:'block'}}></span>`
                 :'↑'}
             </button>
           </div>
           <div style=${{marginTop:7,fontSize:10.5,color:'var(--tx3)',textAlign:'center'}}>
-            AI uses your workspace data automatically · Diagrams open in mermaid.live · Press Enter to send
+            AI uses your workspace data automatically · Upload files for diagram generation · Press Enter to send
           </div>
         </div>
       </div>
@@ -6118,7 +5900,16 @@ function AIAssistant({cu,projects,tasks,users}){
 
 /* ─── Toast System ────────────────────────────────────────────────────────── */
 const TOAST_CFG={
-  dm:      {icon:'💬', color:'var(--ac)', bg:'var(--ac3)', nav:'dm'}, call:    {icon:'📞', color:'var(--gn)', bg:'rgba(62,207,110,.12)', nav:'dashboard'}, task_assigned:{icon:'✅',color:'var(--cy)', bg:'rgba(34,211,238,.1)', nav:'tasks'}, status_change:{icon:'🔄',color:'var(--pu)', bg:'rgba(167,139,250,.1)',nav:'tasks'}, comment: {icon:'💬', color:'var(--pu)', bg:'rgba(167,139,250,.1)', nav:'tasks'}, deadline:{icon:'⏰', color:'var(--am)', bg:'rgba(245,158,11,.1)', nav:'tasks'}, project_added:{icon:'📁',color:'var(--or)',bg:'rgba(251,146,60,.1)',nav:'projects'}, reminder:{icon:'⏰', color:'var(--rd)', bg:'rgba(255,68,68,.1)', nav:'reminders'}, message: {icon:'#️⃣', color:'#a78bfa', bg:'rgba(167,139,250,.1)', nav:'messages'}, default: {icon:'🔔', color:'var(--ac)', bg:'var(--ac3)', nav:'notifs'},
+  dm:           {icon:'💬',color:'var(--ac)',  bg:'var(--ac3)',              label:'Message',      nav:'dm'},
+  call:         {icon:'📞',color:'var(--gn)',  bg:'rgba(62,207,110,.12)',    label:'Call',         nav:'dashboard'},
+  task_assigned:{icon:'✅',color:'var(--cy)',  bg:'rgba(34,211,238,.1)',     label:'Task assigned',nav:'tasks'},
+  status_change:{icon:'🔄',color:'var(--pu)',  bg:'rgba(167,139,250,.1)',    label:'Status update',nav:'tasks'},
+  comment:      {icon:'💬',color:'var(--pu)',  bg:'rgba(167,139,250,.1)',    label:'Comment',      nav:'tasks'},
+  deadline:     {icon:'⏰',color:'var(--am)',  bg:'rgba(245,158,11,.1)',     label:'Deadline',     nav:'tasks'},
+  project_added:{icon:'📁',color:'var(--or)',  bg:'rgba(251,146,60,.1)',     label:'Project',      nav:'projects'},
+  reminder:     {icon:'🔔',color:'var(--rd)',  bg:'rgba(255,68,68,.1)',      label:'Reminder',     nav:'reminders'},
+  message:      {icon:'#️⃣',color:'#a78bfa',  bg:'rgba(167,139,250,.1)',    label:'Channel',      nav:'messages'},
+  default:      {icon:'🔔',color:'var(--ac)',  bg:'var(--ac3)',              label:'Notification', nav:'notifs'},
 };
 
 function ToastStack({toasts,onDismiss,onNav}){
@@ -6129,12 +5920,20 @@ function ToastStack({toasts,onDismiss,onNav}){
         return html`
           <div key=${t.id} class=${'toast'+(t.leaving?' leaving':'')}
             onClick=${()=>{onDismiss(t.id);onNav&&onNav(cfg.nav);}}>
+            <div class="toast-accent" style=${{background:cfg.color}}></div>
             <div class="toast-bar" style=${{width:t.progress+'%',background:cfg.color}}></div>
             <div class="toast-icon" style=${{background:cfg.bg,color:cfg.color}}>${cfg.icon}</div>
             <div class="toast-body">
+              <div class="toast-hdr">
+                <span class="toast-dot" style=${{background:cfg.color}}></span>
+                <span class="toast-type" style=${{color:cfg.color}}>${cfg.label}</span>
+              </div>
               <div class="toast-title">${t.title}</div>
               <div class="toast-msg">${t.body}</div>
-              <div class="toast-time">${t.timeStr}</div>
+              <div class="toast-time">
+                <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><circle cx="4.5" cy="4.5" r="3.5" stroke="currentColor" stroke-width="1"/><path d="M4.5 2.5V4.5L5.8 5.5" stroke="currentColor" stroke-width="0.9" stroke-linecap="round"/></svg>
+                ${t.timeStr}
+              </div>
             </div>
             <button class="toast-close" onClick=${e=>{e.stopPropagation();onDismiss(t.id);}}>✕</button>
           </div>`;
@@ -6398,7 +6197,7 @@ function RemindersView({cu,tasks,projects,onSetReminder,onReload,initialView}){
           <button class=${'btn '+(showCompleted?'bp':'bg')} style=${{fontSize:12}} onClick=${()=>setShowCompleted(p=>!p)}>
             ${showCompleted?'Hide Completed':'Show Completed ('+completed.length+')'}
           </button>
-          <button class="btn bp" style=${{fontSize:12}} onClick=${()=>setShowAdd(true)}>+ Add Reminder</button>
+          <button class="btn bp" style=${{fontSize:12}} onClick=${()=>{const now=new Date();setAddDate(now.toISOString().split('T')[0]);setAddTime(now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0'));setShowAdd(true);}}>+ Add Reminder</button>
         </div>
       </div>
 
@@ -6492,7 +6291,7 @@ function RemindersView({cu,tasks,projects,onSetReminder,onReload,initialView}){
               <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
                 <div>
                   <label class="lbl">Date <span style=${{color:'var(--rd)',fontWeight:600}}>*</span></label>
-                  <input class="inp" type="date" value=${addDate} onChange=${e=>setAddDate(e.target.value)} min=${new Date().toISOString().split('T')[0]} onFocus=${e=>{if(!e.target.value)e.target.value=new Date().toISOString().split('T')[0];}}/>
+                  <input class="inp" type="date" value=${addDate} onChange=${e=>setAddDate(e.target.value)} min=${new Date().toISOString().split('T')[0]}/>
                 </div>
                 <div>
                   <label class="lbl">Time <span style=${{color:'var(--rd)',fontWeight:600}}>*</span></label>
@@ -6681,6 +6480,7 @@ function RemindersPanel({onClose,onReload}){
 
 
 /* ─── TimesheetView ─────────────────────────────────────────────────────────── */
+let _timesheetSetupDone = false; // module-level: survives view switches, cleared on logout
 function TimesheetView({cu,teams,users,projects,tasks}){
   const isAdmin=cu&&(cu.role==='Admin'||cu.role==='Manager');
   const [logs,setLogs]=useState([]);
@@ -6746,23 +6546,28 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     setRequiredHrs(hrs);setAdminHrsInput(String(hrs));
   },[]);
 
-  // Mount: setup schema → then load immediately, also check for prefill from TaskModal
+  // Mount: setup schema (once per session) → then load immediately
   useEffect(()=>{
-    api.post('/api/timelogs/setup',{}).finally(()=>{
+    if(_timesheetSetupDone){
       load();
-      // Check if TaskModal sent a prefill via sessionStorage
-      try{
-        const raw=sessionStorage.getItem('ts_prefill');
-        if(raw){
-          const pf=JSON.parse(raw);
-          sessionStorage.removeItem('ts_prefill');
-          if(pf.project_id||pf.task_id){
-            setForm(f=>({...f,tab:'project',project_id:pf.project_id||'',task_id:pf.task_id||''}));
-            setShowForm(true);
-          }
+    } else {
+      api.post('/api/timelogs/setup',{}).finally(()=>{
+        _timesheetSetupDone=true;
+        load();
+      });
+    }
+    // Check if TaskModal sent a prefill via sessionStorage
+    try{
+      const raw=sessionStorage.getItem('ts_prefill');
+      if(raw){
+        const pf=JSON.parse(raw);
+        sessionStorage.removeItem('ts_prefill');
+        if(pf.project_id||pf.task_id){
+          setForm(f=>({...f,tab:'project',project_id:pf.project_id||'',task_id:pf.task_id||''}));
+          setShowForm(true);
         }
-      }catch{}
-    });
+      }
+    }catch{}
   },[]);
 
   // Refresh when user returns to tab (focus event)
@@ -7234,25 +7039,911 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     </div>
   </div>`;
 }
+// ── Inline Password Generator ─────────────────────────────────────────────────
+function PasswordGeneratorView(){
+  const [len,setLen]=useState(20);
+  const [upper,setUpper]=useState(true);
+  const [lower,setLower]=useState(true);
+  const [nums,setNums]=useState(true);
+  const [syms,setSyms]=useState(true);
+  const [exclude,setExclude]=useState('');
+  const [pw,setPw]=useState('');
+  const [copied,setCopied]=useState(false);
+  const [history,setHistory]=useState([]);
+
+  function generate(){
+    let chars='';
+    if(upper) chars+='ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    if(lower) chars+='abcdefghijklmnopqrstuvwxyz';
+    if(nums)  chars+='0123456789';
+    if(syms)  chars+='!@#$%^&*()-_=+[]{}|;:,.<>?';
+    if(exclude){const ex=new Set(exclude.split(''));chars=[...chars].filter(c=>!ex.has(c)).join('');}
+    if(!chars){setPw('⚠ Select at least one character type');return;}
+    const arr=new Uint32Array(len);
+    crypto.getRandomValues(arr);
+    const result=Array.from(arr).map(v=>chars[v%chars.length]).join('');
+    setPw(result);
+    setCopied(false);
+    setHistory(h=>[result,...h].slice(0,10));
+  }
+
+  async function copy(val){
+    try{await navigator.clipboard.writeText(val||pw);}catch(e){const ta=document.createElement('textarea');ta.value=val||pw;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);}
+    setCopied(true);setTimeout(()=>setCopied(false),2000);
+  }
+
+  useEffect(()=>{generate();},[]);
+
+  const strength=(()=>{
+    if(!pw||pw.startsWith('⚠'))return{label:'',color:'#636366',w:0};
+    let s=0;
+    if(pw.length>=12)s++;if(pw.length>=18)s++;if(pw.length>=24)s++;
+    if(/[A-Z]/.test(pw))s++;if(/[a-z]/.test(pw))s++;
+    if(/[0-9]/.test(pw))s++;if(/[^A-Za-z0-9]/.test(pw))s++;
+    if(s<=2)return{label:'Weak',color:'#ff453a',w:25};
+    if(s<=4)return{label:'Fair',color:'#ff9f0a',w:55};
+    if(s<=5)return{label:'Good',color:'#30d158',w:78};
+    return{label:'Strong',color:'#30d158',w:100};
+  })();
+
+  const S={
+    wrap:{padding:'28px 32px',maxWidth:680,margin:'0 auto'},
+    card:{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'28px',marginBottom:20},
+    label:{fontSize:12,fontWeight:700,color:'var(--tx2)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8,display:'block'},
+    row:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16},
+    toggle:{display:'flex',alignItems:'center',gap:10,fontSize:14,color:'var(--tx)',cursor:'pointer'},
+    pwBox:{background:'var(--bg)',border:'1px solid var(--bd)',borderRadius:10,padding:'16px 18px',fontFamily:'monospace',fontSize:18,letterSpacing:'0.08em',color:'var(--tx)',wordBreak:'break-all',minHeight:60,lineHeight:1.5},
+    btn:{padding:'11px 22px',borderRadius:9,border:'none',cursor:'pointer',fontWeight:700,fontSize:13,fontFamily:'inherit'},
+  };
+
+  function Toggle({label,val,set}){
+    return html`<label style=${S.toggle}>
+      <div style=${{width:36,height:20,borderRadius:20,background:val?'var(--ac)':'var(--bd)',position:'relative',flexShrink:0,transition:'background .2s',cursor:'pointer'}}
+        onClick=${()=>set(!val)}>
+        <div style=${{position:'absolute',top:3,left:val?17:3,width:14,height:14,borderRadius:'50%',background:'#fff',transition:'left .2s'}}></div>
+      </div>
+      ${label}
+    </label>`;
+  }
+
+  return html`<div style=${S.wrap}>
+    <div style=${{marginBottom:24}}>
+      <div style=${{fontSize:22,fontWeight:800,letterSpacing:'-0.5px',marginBottom:4}}>🔐 Password Generator</div>
+      <div style=${{fontSize:14,color:'var(--tx2)'}}>Generate cryptographically secure passwords — all generation happens locally in your browser.</div>
+    </div>
+
+    <div style=${S.card}>
+      <div style=${{...S.pwBox,marginBottom:12}}>${pw||'Click Generate'}</div>
+      ${strength.w>0?html`<div style=${{marginBottom:14}}>
+        <div style=${{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+          <span style=${{fontSize:12,color:'var(--tx2)'}}>Strength</span>
+          <span style=${{fontSize:12,fontWeight:700,color:strength.color}}>${strength.label}</span>
+        </div>
+        <div style=${{height:5,borderRadius:4,background:'var(--bd)'}}>
+          <div style=${{height:'100%',borderRadius:4,width:strength.w+'%',background:strength.color,transition:'width .4s'}}></div>
+        </div>
+      </div>`:null}
+      <div style=${{display:'flex',gap:10}}>
+        <button style=${{...S.btn,background:'var(--ac)',color:'#fff',flex:1}} onClick=${generate}>⟳ Generate</button>
+        <button style=${{...S.btn,background:copied?'rgba(48,209,88,.15)':'var(--sf2)',color:copied?'#30d158':'var(--tx)',border:'1px solid var(--bd)'}} onClick=${()=>copy()}>
+          ${copied?'✓ Copied!':'⎘ Copy'}
+        </button>
+      </div>
+    </div>
+
+    <div style=${S.card}>
+      <div style=${S.row}>
+        <span style=${{fontSize:14,fontWeight:600}}>Length: ${len}</span>
+        <input type="range" min="8" max="64" value=${len} onInput=${e=>setLen(+e.target.value)}
+          style=${{flex:1,marginLeft:16,accentColor:'var(--ac)'}}/>
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px 24px',marginBottom:16}}>
+        <${Toggle} label="Uppercase A–Z" val=${upper} set=${setUpper}/>
+        <${Toggle} label="Lowercase a–z" val=${lower} set=${setLower}/>
+        <${Toggle} label="Numbers 0–9"   val=${nums}  set=${setNums}/>
+        <${Toggle} label="Symbols !@#…"  val=${syms}  set=${setSyms}/>
+      </div>
+      <label style=${S.label}>Exclude characters</label>
+      <input class="inp" style=${{width:'100%',background:'var(--bg)',border:'1px solid var(--bd)',borderRadius:8,padding:'9px 12px',fontSize:13,color:'var(--tx)',fontFamily:'monospace'}}
+        placeholder="e.g.  0 O l 1 I"
+        value=${exclude}
+        onInput=${e=>setExclude(e.target.value)}/>
+    </div>
+
+    ${history.length>1?html`<div style=${S.card}>
+      <label style=${S.label}>Recent passwords</label>
+      ${history.slice(1).map((h,i)=>html`<div key=${i} style=${{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid rgba(255,255,255,.04)',gap:12}}>
+        <span style=${{fontFamily:'monospace',fontSize:13,color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>${h}</span>
+        <button style=${{...S.btn,padding:'4px 12px',background:'var(--sf2)',color:'var(--tx2)',border:'1px solid var(--bd)',fontSize:11,flexShrink:0}}
+          onClick=${()=>copy(h)}>Copy</button>
+      </div>`)}
+    </div>`:null}
+  </div>`;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── VAULT VIEW — Spreadsheet-style credential store ───────────────────────────
+
+// ── Storage helpers ───────────────────────────────────────────────────────────
+function vaultStorageKey(cu){
+  if(cu && cu.id && cu.id !== 'offline'){
+    try{ localStorage.setItem('project-tracker_last_uid', cu.id); }catch(_){}
+    return 'project-tracker_vault_v2_'+cu.id;
+  }
+  try{ const lastUid = localStorage.getItem('project-tracker_last_uid'); if(lastUid) return 'project-tracker_vault_v2_'+lastUid; }catch(_){}
+  return 'project-tracker_vault_v2_guest';
+}
+function vaultLoad(key){ try{ return JSON.parse(localStorage.getItem(key)||'[]'); }catch(_){ return []; } }
+function vaultPersist(key,cards){ try{ localStorage.setItem(key,JSON.stringify(cards)); }catch(_){} }
+function vaultNewId(){ return 'c'+Date.now()+Math.random().toString(36).slice(2,6); }
+async function vaultHashPw(pw){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('project-tracker::'+pw));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+// ── Icon map ──────────────────────────────────────────────────────────────────
+const VAULT_ICON_MAP = [
+  { keys:['aws','amazon','s3','ec2','lambda'],         icon:'☁️',  bg:'rgba(255,153,0,.18)',   border:'rgba(255,153,0,1)'    },
+  { keys:['gcp','google','firebase','bigquery'],       icon:'🌐',  bg:'rgba(66,133,244,.18)',  border:'rgba(66,133,244,1)'   },
+  { keys:['azure','microsoft','office365'],            icon:'🔷',  bg:'rgba(0,120,212,.18)',   border:'rgba(0,120,212,1)'    },
+  { keys:['github','gitlab','bitbucket','git'],        icon:'🐙',  bg:'rgba(180,180,180,.14)', border:'rgba(200,200,200,1)'  },
+  { keys:['database','db','mysql','postgres','mongo','redis','sqlite'], icon:'🗃️', bg:'rgba(6,182,212,.18)', border:'rgba(6,182,212,1)' },
+  { keys:['slack','discord','telegram','chat'],        icon:'💬',  bg:'rgba(99,91,255,.18)',   border:'rgba(99,91,255,1)'    },
+  { keys:['stripe','payment','billing','razorpay'],    icon:'💳',  bg:'rgba(99,91,255,.16)',   border:'rgba(99,91,255,1)'    },
+  { keys:['email','smtp','sendgrid','mailgun','mail'],  icon:'📧',  bg:'rgba(90,94,247,.18)',   border:'rgba(90,94,247,1)'    },
+  { keys:['ssh','server','vps','nginx','linux'],        icon:'🖥️',  bg:'rgba(16,185,129,.16)',  border:'rgba(16,185,129,1)'   },
+  { keys:['docker','kubernetes','k8s','container'],    icon:'🐳',  bg:'rgba(9,150,224,.18)',   border:'rgba(9,150,224,1)'    },
+  { keys:['api','token','key','secret','oauth','jwt'],  icon:'🔑',  bg:'rgba(245,158,11,.18)',  border:'rgba(245,158,11,1)'   },
+  { keys:['wallet','crypto','btc','eth','web3'],       icon:'🪙',  bg:'rgba(255,184,0,.18)',   border:'rgba(255,184,0,1)'    },
+  { keys:['openai','claude','gemini','llm','ai','ml'], icon:'🤖',  bg:'rgba(16,163,127,.18)',  border:'rgba(16,163,127,1)'   },
+  { keys:['vpn','sophos','wireguard','openvpn'],       icon:'🛡️',  bg:'rgba(168,85,247,.18)',  border:'rgba(168,85,247,1)'   },
+  { keys:['note','memo','personal','misc'],            icon:'📝',  bg:'rgba(148,163,184,.14)', border:'rgba(148,163,184,1)'  },
+];
+const VAULT_ICON_DEFAULT = { icon:'🗂️', bg:'rgba(90,94,247,.18)', border:'rgba(90,94,247,1)' };
+function vaultGetIcon(title, tags){
+  const hay = ((title||'')+(tags||'')).toLowerCase();
+  for(const e of VAULT_ICON_MAP){ if(e.keys.some(k=>hay.includes(k))) return e; }
+  return VAULT_ICON_DEFAULT;
+}
+
+// ── Shared styles ─────────────────────────────────────────────────────────────
+const VS = {
+  wrap:   { flex:1, display:'flex', flexDirection:'column', height:'100%', overflowY:'auto', overflowX:'hidden', width:'100%', boxSizing:'border-box', scrollbarWidth:'thin', scrollbarColor:'#5a5ef7 rgba(90,94,247,0.08)' },
+  wrapInner: { padding:'24px 28px', maxWidth:1100, width:'100%' },
+  ph:     { display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,gap:12 },
+  btnPri: { background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',border:'none',padding:'8px 18px',borderRadius:100,fontSize:13,fontWeight:700,cursor:'pointer',fontFamily:'inherit',display:'flex',alignItems:'center',gap:6,transition:'opacity .15s' },
+  btnCan: { background:'none',border:'1px solid var(--bd)',color:'var(--tx2)',fontSize:13,padding:'7px 16px',borderRadius:100,cursor:'pointer',fontFamily:'inherit' },
+  moBack: { position:'fixed',inset:0,background:'rgba(0,0,0,.82)',zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',backdropFilter:'blur(8px)' },
+};
+
+// ── Password modal ────────────────────────────────────────────────────────────
+function VaultPwModal({title, mode, onConfirm, onClose}){
+  // mode: 'set' | 'verify'
+  const [pw1,setPw1]=useState('');
+  const [pw2,setPw2]=useState('');
+  const [err,setErr]=useState('');
+
+  function submit(){
+    if(!pw1){ setErr('Enter a password'); return; }
+    if(mode==='set' && pw1!==pw2){ setErr('Passwords do not match'); return; }
+    vaultHashPw(pw1).then(h=>onConfirm(h)).catch(()=>setErr('Error hashing password'));
+  }
+  const inp = {
+    width:'100%',background:'var(--sf2)',border:'1px solid var(--bd)',borderRadius:8,
+    padding:'9px 12px',fontSize:13,color:'var(--tx)',fontFamily:'inherit',
+    outline:'none',boxSizing:'border-box',
+  };
+  return html`
+    <div style=${VS.moBack} onClick=${e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'26px',width:380,maxWidth:'calc(100vw - 32px)',boxShadow:'0 32px 80px rgba(0,0,0,.5)'}}>
+        <div style=${{fontSize:15,fontWeight:800,color:'var(--tx)',marginBottom:4}}>${mode==='set' ? '🔒 Lock Card' : '🔓 Unlock Card'}</div>
+        <div style=${{fontSize:12,color:'var(--tx2)',marginBottom:18}}>${mode==='set' ? 'Set a password to protect "'+title+'"' : 'Enter password for "'+title+'"'}</div>
+        <div style=${{marginBottom:12}}>
+          <input style=${inp} type="password" placeholder="Password" value=${pw1}
+            autoComplete="new-password"
+            onInput=${e=>{setPw1(e.target.value);setErr('');}}
+            onKeyDown=${e=>{if(e.key==='Enter'){ mode==='set' ? document.querySelector('#vlt-pw2')&&document.querySelector('#vlt-pw2').focus() : submit(); }}}/>
+        </div>
+        ${mode==='set' && html`
+          <div style=${{marginBottom:12}}>
+            <input id="vlt-pw2" style=${inp} type="password" placeholder="Confirm password" value=${pw2}
+              autoComplete="new-password"
+              onInput=${e=>{setPw2(e.target.value);setErr('');}}
+              onKeyDown=${e=>{if(e.key==='Enter')submit();}}/>
+          </div>`}
+        ${err && html`<div style=${{fontSize:12,color:'#f87171',marginBottom:10}}>${err}</div>`}
+        ${mode==='set' && html`<div style=${{fontSize:11,color:'var(--tx2)',background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.15)',borderRadius:7,padding:'7px 10px',marginBottom:14}}>⚠️ Cannot be recovered if forgotten.</div>`}
+        <div style=${{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button style=${VS.btnCan} onClick=${onClose}>Cancel</button>
+          <button style=${{...VS.btnPri, background: mode==='set' ? 'linear-gradient(135deg,#f59e0b,#d97706)' : 'linear-gradient(135deg,#5a5ef7,#a855f7)'}} onClick=${submit}>${mode==='set'?'Lock Card':'Unlock'}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Delete confirm modal ──────────────────────────────────────────────────────
+function VaultDelModal({title, onConfirm, onClose}){
+  return html`
+    <div style=${VS.moBack} onClick=${e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'26px',width:360,maxWidth:'calc(100vw - 32px)',boxShadow:'0 32px 80px rgba(0,0,0,.5)',textAlign:'center'}}>
+        <div style=${{fontSize:36,marginBottom:10}}>🗑️</div>
+        <div style=${{fontSize:15,fontWeight:800,color:'var(--tx)',marginBottom:6}}>Delete "${title}"?</div>
+        <div style=${{fontSize:13,color:'var(--tx2)',marginBottom:20,lineHeight:1.6}}>All credentials in this card will be permanently deleted. This cannot be undone.</div>
+        <div style=${{display:'flex',gap:8,justifyContent:'center'}}>
+          <button style=${VS.btnCan} onClick=${onClose}>Cancel</button>
+          <button style=${{...VS.btnPri,background:'linear-gradient(135deg,#ef4444,#b91c1c)'}} onClick=${onConfirm}>Delete Forever</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Spreadsheet card ──────────────────────────────────────────────────────────
+function VaultSpreadCard({card, isUnlocked, onUnlock, onLock, onDelete, onUpdate}){
+  const isLocked = !!card.lockHash;
+  const canSee = !isLocked || isUnlocked;
+  const iconInfo = vaultGetIcon(card.title, card.tags);
+
+  // Local editable state — synced up via onUpdate
+  const [title,    setTitle]    = useState(card.title||'');
+  const [tags,     setTags]     = useState(card.tags||'');
+  const [cols,     setCols]     = useState(()=>{
+    // cols: array of {id, label}
+    if(card.cols && card.cols.length) return card.cols;
+    // Migrate from old rows format: derive cols from first row keys
+    const rows = card.rows||[];
+    if(!rows.length) return [{id:'c1',label:'Key'},{id:'c2',label:'Value'}];
+    return rows[0] ? Object.keys(rows[0]).filter(k=>k!=='secret').map((k,i)=>({id:'col_'+i,label:k})) : [{id:'c1',label:'Key'},{id:'c2',label:'Value'}];
+  });
+  const [rows,     setRows]     = useState(()=>{
+    // Migrate old {k,v,secret} rows to new {colId: val, _secret} format
+    const raw = card.rows||[];
+    if(!raw.length) return [];
+    if(raw[0] && ('k' in raw[0] || 'v' in raw[0])){
+      // old format
+      return raw.map(r=>({ _id: vaultNewId(), _secret: !!r.secret, col_0: r.k||'', col_1: r.v||'' }));
+    }
+    return raw.map(r=>({...r, _id: r._id||vaultNewId()}));
+  });
+  const [editing,  setEditing]  = useState(false); // title edit mode
+  const [showPwMo, setShowPwMo] = useState(null);  // 'set'|'verify'|null
+  const [showDel,  setShowDel]  = useState(false);
+  const [showSecretCells, setShowSecretCells] = useState({});
+  const [copyFlash,setCopyFlash]= useState(null);
+  const [saving, setSaving] = useState(false);
+
+  // Push local changes up
+  function push(nextCols, nextRows, nextTitle, nextTags){
+    const c = nextCols  !== undefined ? nextCols  : cols;
+    const r = nextRows  !== undefined ? nextRows  : rows;
+    const t = nextTitle !== undefined ? nextTitle : title;
+    const tg= nextTags  !== undefined ? nextTags  : tags;
+    setSaving(true);
+    onUpdate({...card, title:t, tags:tg, cols:c, rows:r});
+    setTimeout(() => setSaving(false), 800);
+  }
+
+  function addCol(){
+    const id='col_'+Date.now();
+    const next=[...cols,{id,label:'Column '+(cols.length+1)}];
+    setCols(next); push(next,undefined,undefined,undefined);
+  }
+  function addRow(){
+    const obj={_id:vaultNewId(),_secret:false};
+    cols.forEach(c=>{obj[c.id]='';});
+    const next=[...rows,obj];
+    setRows(next); push(undefined,next,undefined,undefined);
+  }
+  function updateColLabel(cid,val){
+    const next=cols.map(c=>c.id===cid?{...c,label:val}:c);
+    setCols(next); push(next,undefined,undefined,undefined);
+  }
+  function removeCol(cid){
+    if(cols.length<=1) return;
+    const next=cols.filter(c=>c.id!==cid);
+    setCols(next); push(next,undefined,undefined,undefined);
+  }
+  function updateCell(rid,cid,val){
+    const next=rows.map(r=>r._id===rid?{...r,[cid]:val}:r);
+    setRows(next); push(undefined,next,undefined,undefined);
+  }
+  function toggleRowSecret(rid){
+    const next=rows.map(r=>r._id===rid?{...r,_secret:!r._secret}:r);
+    setRows(next); push(undefined,next,undefined,undefined);
+  }
+  function removeRow(rid){
+    const next=rows.filter(r=>r._id!==rid);
+    setRows(next); push(undefined,next,undefined,undefined);
+  }
+  function copyCell(val, colLabel){
+    navigator.clipboard.writeText(val||'').catch(()=>{});
+    setCopyFlash(val);
+    setTimeout(()=>setCopyFlash(null),1200);
+    // Audit log — fire-and-forget
+    try { api.post('/api/vault/'+card.id+'/audit', {action:'copy', detail: colLabel||'value'}); } catch(_){}
+  }
+
+  function revealCell(cellKey, colLabel){
+    setShowSecretCells(s=>({...s,[cellKey]:true}));
+    // Audit log — fire-and-forget
+    try { api.post('/api/vault/'+card.id+'/audit', {action:'reveal', detail: colLabel||'secret'}); } catch(_){}
+  }
+
+  const accentColor = iconInfo.border;
+  const stripeColor = iconInfo.border.replace(/[\d.]+\)$/,'1)');
+
+  return html`
+    <div class="vault-card" style=${{
+      border:'1px solid '+accentColor.replace(/[\d.]+\)$/,'.25)'),
+      borderLeft:'4px solid '+stripeColor,
+      boxShadow:'0 4px 28px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.03)',
+    }}>
+      <div style=${{height:3,background:'linear-gradient(90deg,'+stripeColor+' 0%,'+accentColor.replace(/[\d.]+\)$/,'.6)')+' 60%,transparent 100%)'}}></div>
+      <div class="vault-card-header" style=${{
+        background:'linear-gradient(135deg,'+iconInfo.bg.replace(/[\d.]+\)$/,'0.22)')+' 0%,transparent 65%)',
+        borderBottom:'1px solid '+accentColor.replace(/[\d.]+\)$/,'.15)'),
+      }}>
+        <div class="vault-card-icon" style=${{
+          background:iconInfo.bg.replace(/[\d.]+\)$/,'0.3)'),
+          border:'1.5px solid '+stripeColor,
+          boxShadow:'0 0 16px '+accentColor.replace(/[\d.]+\)$/,'.35)'),
+        }}>${iconInfo.icon}</div>
+        ${editing && html`
+          <input style=${{flex:1,background:'var(--sf2)',border:'1px solid '+stripeColor,borderRadius:9,padding:'6px 11px',fontSize:14,fontWeight:800,color:'var(--tx)',fontFamily:'inherit',outline:'none'}}
+            value=${title} autoFocus
+            onInput=${e=>setTitle(e.target.value)}
+            onBlur=${()=>{setEditing(false);push(undefined,undefined,title,undefined);}}
+            onKeyDown=${e=>{if(e.key==='Enter'||e.key==='Escape'){setEditing(false);push(undefined,undefined,title,undefined);}}}/>
+        `}
+        ${!editing && html`
+          <span class="vault-card-title" onClick=${()=>setEditing(true)} title="Click to rename">${title||'Untitled'}</span>
+        `}
+        ${saving && html`
+          <span class="vault-tag" style=${{
+            background: 'rgba(34,197,94,.1)',
+            color: '#4ade80',
+            border:'1px solid rgba(34,197,94,.3)',
+            animation: 'pulse 0.8s ease-in-out'
+          }}>💾 Saving...</span>
+        `}
+        ${isLocked && html`
+          <span class="vault-tag" style=${{
+            background: isUnlocked?'rgba(34,197,94,.1)':'rgba(239,68,68,.1)',
+            color: isUnlocked?'#4ade80':'#f87171',
+            border:'1px solid '+(isUnlocked?'rgba(34,197,94,.3)':'rgba(239,68,68,.3)'),
+          }}>${isUnlocked ? '🔓 Unlocked' : '🔒 Locked'}</span>
+        `}
+        <div style=${{display:'flex',gap:6,flexShrink:0}}>
+          ${isLocked && isUnlocked && html`
+            <button class="vault-action-btn" onClick=${()=>onLock(card.id)}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Lock
+            </button>`}
+          ${!isLocked && html`
+            <button class="vault-action-btn" onClick=${()=>setShowPwMo('set')}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+              Set Lock
+            </button>`}
+          <button class="vault-action-btn danger" onClick=${()=>setShowDel(true)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+            Delete
+          </button>
+        </div>
+      </div>
+      ${tags && html`
+        <div style=${{padding:'6px 18px 8px',display:'flex',gap:5,flexWrap:'wrap',borderBottom:'1px solid var(--bd)'}}>
+          ${(tags||'').split(',').map(t=>t.trim()).filter(Boolean).map(t=>html`
+            <span key=${t} class="vault-tag" style=${{
+              background:'rgba(90,94,247,.08)',
+              color:'var(--ac)',
+              border:'1px solid rgba(90,94,247,.2)',
+            }}>${t}</span>`)}
+        </div>`}
+      ${isLocked && !isUnlocked && html`
+        <div class="vault-locked-overlay">
+          <div style=${{width:56,height:56,borderRadius:16,background:'rgba(239,68,68,.08)',border:'1.5px solid rgba(239,68,68,.2)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px',fontSize:26}}>🔒</div>
+          <div style=${{fontSize:14,fontWeight:700,color:'var(--tx)',marginBottom:6}}>${title}</div>
+          <div style=${{fontSize:12,color:'var(--tx2)',marginBottom:4}}>This card is password protected.</div>
+          <button class="vault-unlock-btn"
+            onClick=${()=>setShowPwMo('verify')}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            Unlock Card
+          </button>
+        </div>`}
+
+      <!-- REDESIGNED TABLE -->
+      ${canSee && html`
+        <div class="vault-table-wrap">
+          <table class="vault-table">
+            <thead>
+              <tr>
+                <th class="vault-th" style=${{width:30,paddingLeft:16,textAlign:'right',color:'transparent',userSelect:'none'}}>#</th>
+                <th class="vault-th" style=${{width:32,textAlign:'center'}}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                </th>
+                ${cols.map((col,ci)=>html`
+                  <th key=${col.id} class="vault-th" style=${{minWidth:120}}>
+                    <div style=${{display:'flex',alignItems:'center',gap:6}}>
+                      <input class="vault-th" style=${{padding:0,border:'none',outline:'none',background:'transparent',minWidth:60,flex:1,cursor:'text'}}
+                        value=${col.label}
+                        onInput=${e=>updateColLabel(col.id,e.target.value)}
+                        onBlur=${e=>push(undefined,undefined,undefined,undefined)}
+                        title="Click to rename column"/>
+                      ${cols.length>1 && html`
+                        <button title="Remove column"
+                          style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',padding:'0 2px',fontSize:11,lineHeight:1,flexShrink:0,transition:'color .15s'}}
+                          onMouseEnter=${e=>{e.currentTarget.style.color='#ef4444';}}
+                          onMouseLeave=${e=>{e.currentTarget.style.color='var(--tx3)';}}
+                          onClick=${()=>removeCol(col.id)}>✕</button>`}
+                    </div>
+                  </th>`)}
+                <th class="vault-th" style=${{width:40,textAlign:'center',borderLeft:'1px solid var(--bd)'}}>
+                  <button title="Add column"
+                    style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:16,padding:'0',lineHeight:1,transition:'color .15s'}}
+                    onMouseEnter=${e=>{e.currentTarget.style.color='var(--ac)';}}
+                    onMouseLeave=${e=>{e.currentTarget.style.color='var(--tx3)';}}
+                    onClick=${addCol}>+</button>
+                </th>
+                <th class="vault-th" style=${{width:32,borderLeft:'1px solid var(--bd)'}}></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row,ri)=>{
+                const isSecret = !!row._secret;
+                return html`
+                  <tr key=${row._id} class="vault-row" style=${{
+                    background: isSecret ? 'rgba(245,158,11,.035)' : 'transparent',
+                  }}>
+                    <td class="vault-row-num">${ri+1}</td>
+
+                    <td class="vault-td" style=${{textAlign:'center',padding:'6px',width:32,borderRight:'1px solid var(--bd)'}}>
+                      <button title=${isSecret?'Secret — click to toggle':'Mark as secret'}
+                        style=${{
+                          background: isSecret?'rgba(245,158,11,.12)':'transparent',
+                          border: isSecret?'1px solid rgba(245,158,11,.3)':'1px solid transparent',
+                          borderRadius:6, width:24, height:24, cursor:'pointer',
+                          fontSize:11, display:'flex',alignItems:'center',justifyContent:'center',
+                          transition:'all .15s', margin:'0 auto',
+                        }}
+                        onClick=${()=>toggleRowSecret(row._id)}>
+                        ${isSecret?'🔒':'👁'}
+                      </button>
+                    </td>
+
+                    ${cols.map(col=>{
+                      const val = row[col.id]||'';
+                      const cellKey = row._id + '_' + col.id;
+                      const isShowingThisCell = !!showSecretCells[cellKey];
+                      const hideVal = isSecret && !isShowingThisCell;
+                      return html`
+                        <td key=${col.id} class="vault-td" style=${{
+                          background: 'rgba(15,14,23,0.3)',
+                          borderLeft:'1px solid rgba(255,255,255,.04)',
+                          minWidth:120
+                        }}>
+                          ${hideVal && html`
+                            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6}}>
+                              <span style=${{letterSpacing:4,fontSize:11,color:'#94a3b8'}}>••••••••</span>
+                              <button class="vault-copy-btn" title="Reveal this cell"
+                                onClick=${()=>revealCell(cellKey, col.label)}>
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                              </button>
+                            </div>`}
+                          ${!hideVal && html`
+                            <div style=${{display:'flex',alignItems:'center',gap:5}}>
+                              <input style=${{background:'transparent',border:'none',outline:'none',color:'#e2e8f0',fontSize:13,fontFamily:'inherit',flex:1,minWidth:0}}
+                                value=${val}
+                                placeholder="—"
+                                onInput=${e=>updateCell(row._id,col.id,e.target.value)}
+                                onBlur=${()=>push(undefined,undefined,undefined,undefined)}/>
+                              ${val && html`
+                                <button class="vault-copy-btn" title="Copy value"
+                                  style=${{color: copyFlash===val?'#818cf8':'#475569', background: copyFlash===val?'rgba(90,94,247,.15)':'none'}}
+                                  onClick=${()=>copyCell(val, col.label)}>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                </button>`}
+                              ${isSecret && isShowingThisCell && html`
+                                <button class="vault-copy-btn" title="Hide this cell"
+                                  onClick=${()=>setShowSecretCells(s=>{const n={...s};delete n[cellKey];return n;})}>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                                </button>`}
+                            </div>`}
+                        </td>`; })}
+
+                    <td class="vault-td" style=${{textAlign:'center',padding:'6px',width:32,borderRight:'none'}}>
+                      <button title="Delete row"
+                        style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:12,padding:'3px 5px',borderRadius:5,transition:'all .15s',lineHeight:1}}
+                        onMouseEnter=${e=>{e.currentTarget.style.color='#ef4444';e.currentTarget.style.background='rgba(239,68,68,.08)';}}
+                        onMouseLeave=${e=>{e.currentTarget.style.color='var(--tx3)';e.currentTarget.style.background='none';}}
+                        onClick=${()=>removeRow(row._id)}>✕</button>
+                    </td>
+                  </tr>`; })}
+
+              <tr>
+                <td colSpan=${cols.length+4} style=${{padding:0}}>
+                  <button class="vault-add-row-btn" onClick=${addRow}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    Add row
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>`}
+
+      <!-- Modals -->
+      ${showPwMo && html`
+        <${VaultPwModal}
+          title=${title}
+          mode=${showPwMo}
+          onConfirm=${h=>{
+            if(showPwMo==='verify'){
+              if(h===card.lockHash){
+                onUnlock(card.id);
+                setShowPwMo(null);
+                // Audit log — fire-and-forget
+                try { api.post('/api/vault/'+card.id+'/audit', {action:'unlock', detail: title||'card'}); } catch(_){}
+              }
+              else{ alert('Wrong password'); }
+            } else {
+              onUpdate({...card,title,tags,cols,rows,lockHash:h});
+              setShowPwMo(null);
+            }
+          }}
+          onClose=${()=>setShowPwMo(null)}/>`}
+
+      ${showDel && html`
+        <${VaultDelModal}
+          title=${title}
+          onConfirm=${()=>{ setShowDel(false); onDelete(card.id); }}
+          onClose=${()=>setShowDel(false)}/>`}
+    </div>`;
+}
+
+// ── New card modal ────────────────────────────────────────────────────────────
+function VaultNewCardModal({onClose, onCreate}){
+  const [title, setTitle] = useState('');
+  const [tags,  setTags]  = useState('');
+  const [err,   setErr]   = useState('');
+  const inp = {
+    width:'100%',background:'var(--sf2)',border:'1px solid var(--bd)',borderRadius:8,
+    padding:'9px 12px',fontSize:13,color:'var(--tx)',fontFamily:'inherit',
+    outline:'none',boxSizing:'border-box',
+  };
+  function submit(){
+    if(!title.trim()){ setErr('Title is required'); return; }
+    const card = {
+      id: vaultNewId(),
+      title: title.trim(),
+      tags: tags.trim(),
+      cols: [{id:'c1',label:'Key'},{id:'c2',label:'Value'}],
+      rows: [],
+      lockHash: '',
+    };
+    onCreate(card);
+    onClose();
+  }
+  const icon = vaultGetIcon(title, tags);
+  return html`
+    <div style=${VS.moBack} onClick=${e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style=${{background:'#13151f',border:'1px solid rgba(90,94,247,.25)',borderRadius:20,padding:'28px',width:420,maxWidth:'calc(100vw - 32px)',boxShadow:'0 32px 80px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.04)'}}>
+        <div style=${{display:'flex',alignItems:'center',gap:12,marginBottom:22}}>
+          <div style=${{width:44,height:44,borderRadius:13,background:icon.bg,border:'1.5px solid '+icon.border,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,boxShadow:'0 0 18px '+icon.border.replace(/[\d.]+\)$/,'.3)')}}>${icon.icon}</div>
+          <div>
+            <div style=${{fontSize:16,fontWeight:900,color:'#f1f5f9',letterSpacing:'-.3px'}}>New Vault Card</div>
+            <div style=${{fontSize:12,color:'#64748b',marginTop:1}}>Encrypted credential store</div>
+          </div>
+        </div>
+        <div style=${{marginBottom:16}}>
+          <label style=${{display:'block',fontSize:11,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.07em',marginBottom:7}}>Card Title <span style=${{color:'#818cf8'}}>*</span></label>
+          <input style=${{width:'100%',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.12)',borderRadius:11,padding:'10px 14px',fontSize:13,color:'#e2e8f0',fontFamily:'inherit',outline:'none',boxSizing:'border-box',transition:'border-color .15s'}}
+            placeholder="e.g. AWS Production, GitHub Creds…"
+            value=${title} autoFocus autoComplete="off"
+            onFocus=${e=>{e.target.style.borderColor='rgba(129,140,248,.5)';}}
+            onBlur=${e=>{e.target.style.borderColor='rgba(255,255,255,.12)';}}
+            onInput=${e=>{setTitle(e.target.value);setErr('');}}
+            onKeyDown=${e=>{if(e.key==='Enter')submit();}}/>
+          ${err && html`<div style=${{fontSize:11,color:'#f87171',marginTop:5}}>${err}</div>`}
+        </div>
+        <div style=${{marginBottom:24}}>
+          <label style=${{display:'block',fontSize:11,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.07em',marginBottom:7}}>Tags <span style=${{fontWeight:400,textTransform:'none',letterSpacing:0,color:'#475569'}}>(optional, comma-separated)</span></label>
+          <input style=${{width:'100%',background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.12)',borderRadius:11,padding:'10px 14px',fontSize:13,color:'#e2e8f0',fontFamily:'inherit',outline:'none',boxSizing:'border-box',transition:'border-color .15s'}}
+            placeholder="aws, prod, infra"
+            value=${tags} autoComplete="off"
+            onFocus=${e=>{e.target.style.borderColor='rgba(129,140,248,.5)';}}
+            onBlur=${e=>{e.target.style.borderColor='rgba(255,255,255,.12)';}}
+            onInput=${e=>setTags(e.target.value)}
+            onKeyDown=${e=>{if(e.key==='Enter')submit();}}/>
+        </div>
+        <div style=${{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button style=${{background:'rgba(255,255,255,.06)',border:'1px solid rgba(255,255,255,.1)',color:'#94a3b8',fontSize:13,padding:'9px 18px',borderRadius:11,cursor:'pointer',fontFamily:'inherit',fontWeight:600,transition:'all .15s'}}
+            onMouseEnter=${e=>{e.currentTarget.style.background='rgba(255,255,255,.09)';}}
+            onMouseLeave=${e=>{e.currentTarget.style.background='rgba(255,255,255,.06)';}}
+            onClick=${onClose}>Cancel</button>
+          <button class="vault-new-btn" onClick=${submit}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Create Card
+          </button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Main VaultView ────────────────────────────────────────────────────────────
+// Module-level cache: vault data survives view switches (unmount/remount).
+// Cleared when user saves/deletes so the next mount sees fresh data.
+let _vaultCache = null; // { cards, auditLog }
+function vaultClearCache(){ _vaultCache = null; }
+function VaultView({cu}){
+  const [cards,    setCards]   = useState([]);
+  const [vLoading, setVLoading]= useState(true);
+  const [unlocked, setUnlocked]= useState({});
+  const [filter,   setFilter]  = useState('');
+  const [auditLog, setAuditLog]= useState([]);
+  const [auditOpen,setAuditOpen]=useState(false);
+  const [showNew,  setShowNew] = useState(false);
+
+  const offlineKey = vaultStorageKey(cu);
+
+  // Load from cache first, then API (or localStorage if offline)
+  useEffect(()=>{
+    if(!cu) return;
+    if(cu._offline){
+      setCards(vaultLoad(offlineKey));
+      setVLoading(false);
+      return;
+    }
+    // Serve from module-level cache — avoids two fetches every time user switches to Vault view
+    if(_vaultCache){
+      setCards(_vaultCache.cards);
+      setAuditLog(_vaultCache.auditLog);
+      setVLoading(false);
+      return;
+    }
+    setVLoading(true);
+    Promise.all([api.get('/api/vault'), api.get('/api/vault/audit')]).then(([data, audit])=>{
+      const cards = Array.isArray(data) ? data.map(c=>({
+        ...c,
+        rows: typeof c.rows==='string' ? (function(s){try{return JSON.parse(s);}catch(e){return [];}}(c.rows)) : (c.rows||[]),
+        cols: typeof c.cols==='string' ? (function(s){try{return JSON.parse(s);}catch(e){return null;}}(c.cols)) : (c.cols||null),
+        lockHash: c.lock_hash||c.lockHash||''
+      })) : [];
+      const auditLog = Array.isArray(audit) ? audit : [];
+      _vaultCache = { cards, auditLog };
+      setCards(cards);
+      setAuditLog(auditLog);
+      setVLoading(false);
+    }).catch(()=>{ setVLoading(false); });
+  }, [cu && cu.id]);
+
+  async function apiCreate(card){
+    const res = await api.post('/api/vault', {
+      title:card.title, tags:card.tags,
+      rows:card.rows, cols:card.cols||null,
+      lock_hash: card.lockHash||''
+    });
+    vaultClearCache();
+    if(res && res.id){
+      setCards(prev=>prev.map(c=>c.id===card.id?{...c,id:res.id,created:res.created}:c));
+    }
+  }
+  async function apiUpdate(card){
+    await api.put('/api/vault/'+card.id, {
+      title:card.title, tags:card.tags,
+      rows:card.rows, cols:card.cols||null,
+      lock_hash: card.lockHash||''
+    });
+    vaultClearCache();
+  }
+  async function apiDelete(id){
+    await api.del('/api/vault/'+id);
+    vaultClearCache();
+  }
+
+  function handleCreate(card){
+    const next=[card,...cards];
+    setCards(next);
+    if(cu&&!cu._offline) apiCreate(card);
+    else vaultPersist(offlineKey,next);
+  }
+  function handleUpdate(updated){
+    const next=cards.map(c=>c.id===updated.id?updated:c);
+    setCards(next);
+    if(cu&&!cu._offline) apiUpdate(updated);
+    else vaultPersist(offlineKey,next);
+  }
+  function handleDelete(id){
+    const next=cards.filter(c=>c.id!==id);
+    setCards(next);
+    setUnlocked(u=>{const n={...u};delete n[id];return n;});
+    if(cu&&!cu._offline) apiDelete(id);
+    else vaultPersist(offlineKey,next);
+  }
+  function handleUnlock(id){ setUnlocked(u=>({...u,[id]:true})); }
+  function handleLock(id){   setUnlocked(u=>{const n={...u};delete n[id];return n;}); }
+
+  const filtered = cards.filter(c=>{
+    if(!filter) return true;
+    const hay=(c.title||'')+(c.tags||'')+(c.rows||[]).map(r=>Object.values(r).join(' ')).join(' ');
+    return hay.toLowerCase().includes(filter.toLowerCase());
+  });
+
+  const totalCreds = cards.reduce((s,c)=>(c.rows||[]).length+s,0);
+  const totalProtected = cards.filter(c=>c.lockHash).length;
+  const totalSecrets = cards.reduce((s,c)=>(c.rows||[]).filter(r=>r._secret).length+s,0);
+
+  return html`
+    <div class="vault-scroll" style=${{...VS.wrap, background:'var(--bg)'}}>
+    <div style=${{padding:'28px 32px', width:'100%', boxSizing:'border-box'}}>
+      <!-- Page header -->
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:22,gap:16,flexWrap:'wrap'}}>
+        <div style=${{display:'flex',alignItems:'center',gap:14}}>
+          <div style=${{width:44,height:44,borderRadius:13,background:'linear-gradient(135deg,rgba(90,94,247,.3),rgba(168,85,247,.2))',border:'1.5px solid rgba(90,94,247,.45)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0,boxShadow:'0 0 24px rgba(90,94,247,.3)'}}>🔐</div>
+          <div>
+            <div style=${{fontSize:20,fontWeight:900,letterSpacing:'-.5px',lineHeight:1.15}}>
+              <span style=${{background:'linear-gradient(135deg,#818cf8,#c084fc)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',backgroundClip:'text'}}>My Vault</span>
+            </div>
+            <div style=${{fontSize:12,color:'var(--tx2)',marginTop:2,fontWeight:500}}>Encrypted credential store · Click any cell to edit</div>
+          </div>
+        </div>
+        <button class="vault-new-btn" onClick=${()=>setShowNew(true)}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Card
+        </button>
+      </div>
+
+      <!-- Stats bar -->
+      <div style=${{display:'flex',gap:10,marginBottom:18,flexWrap:'wrap'}}>
+        ${[
+          {icon:'🗂️', val:String(cards.length),       lbl:'Total Cards',  accent:'rgba(129,140,248,.15)', border:'rgba(129,140,248,.25)'},
+          {icon:'🔑', val:String(totalCreds),          lbl:'Credentials',  accent:'rgba(34,197,94,.12)',   border:'rgba(34,197,94,.22)'},
+          {icon:'🔒', val:String(totalProtected),      lbl:'Protected',    accent:'rgba(245,158,11,.12)',  border:'rgba(245,158,11,.22)'},
+          {icon:'🕵️', val:String(totalSecrets),        lbl:'Secret Rows',  accent:'rgba(239,68,68,.08)',   border:'rgba(239,68,68,.2)', danger:true},
+        ].map(s=>html`
+          <div style=${{
+            background:'var(--sf)',border:'1px solid var(--bd)',
+            borderLeft:'3px solid '+s.border,
+            borderRadius:10,padding:'10px 16px',
+            display:'flex',alignItems:'center',gap:12,
+            flex:'1 1 130px',minWidth:110,
+          }}>
+            <div style=${{width:32,height:32,borderRadius:8,background:s.accent,display:'flex',alignItems:'center',justifyContent:'center',fontSize:15,flexShrink:0}}>${s.icon}</div>
+            <div>
+              <div style=${{fontSize:18,fontWeight:800,color:s.danger?'#ef4444':'var(--tx)',lineHeight:1,letterSpacing:'-.3px'}}>${s.val}</div>
+              <div style=${{fontSize:11,color:'var(--tx2)',fontWeight:600,marginTop:2}}>${s.lbl}</div>
+            </div>
+          </div>`)}
+      </div>
+
+      <!-- Search & count -->
+      <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:20,flexWrap:'wrap'}}>
+        <div class="vault-search-wrap">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx2)" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="vault-search"
+            placeholder="Search cards, tags, credentials…"
+            autoComplete="new-password"
+            value=${filter}
+            onInput=${e=>setFilter(e.target.value)}/>
+        </div>
+        <span style=${{fontSize:11,color:'var(--tx2)',background:'var(--sf)',border:'1px solid var(--bd)',padding:'5px 13px',borderRadius:100,fontWeight:700,whiteSpace:'nowrap'}}>
+          ${String(filtered.length)} / ${String(cards.length)} cards
+        </span>
+      </div>
+
+      <!-- Body -->
+      ${vLoading && html`
+        <div style=${{textAlign:'center',padding:'64px 0',color:'#64748b',fontSize:13}}>
+          <div style=${{width:48,height:48,border:'2px solid rgba(90,94,247,.2)',borderTop:'2px solid #818cf8',borderRadius:'50%',animation:'sp .7s linear infinite',margin:'0 auto 16px'}}></div>
+          <div style=${{fontWeight:600,color:'#94a3b8'}}>Decrypting vault…</div>
+        </div>`}
+      ${!vLoading && filtered.length===0 && html`
+        <div style=${{textAlign:'center',padding:'72px 20px',color:'#475569'}}>
+          <div style=${{width:64,height:64,borderRadius:20,background:'rgba(90,94,247,.07)',border:'1.5px dashed rgba(90,94,247,.2)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 18px',fontSize:30}}>🗄️</div>
+          <div style=${{fontWeight:700,marginBottom:6,color:'#94a3b8',fontSize:15}}>${filter?'No cards match your search':'Your vault is empty'}</div>
+          <div style=${{fontSize:13,color:'#334155'}}>${filter?'Try a different search term':'Click New Card to store your first credentials'}</div>
+        </div>`}
+      ${!vLoading && filtered.map(c=>html`
+        <${VaultSpreadCard}
+          key=${c.id}
+          card=${c}
+          isUnlocked=${!!unlocked[c.id]}
+          onUnlock=${handleUnlock}
+          onLock=${handleLock}
+          onDelete=${handleDelete}
+          onUpdate=${handleUpdate}/>`)}
+
+      ${showNew && html`
+        <${VaultNewCardModal}
+          onClose=${()=>setShowNew(false)}
+          onCreate=${handleCreate}/>`}
+
+      <!-- ── Audit Log Panel ── -->
+      ${!vLoading && !cu._offline && html`
+        <div style=${{marginTop:32,borderTop:'1px solid var(--bd)',paddingTop:22}}>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,flexWrap:'wrap',gap:8}}>
+            <div style=${{display:'flex',alignItems:'center',gap:10}}>
+              <div style=${{width:30,height:30,borderRadius:8,background:'rgba(99,102,241,.12)',border:'1px solid rgba(99,102,241,.25)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🔎</div>
+              <div>
+                <div style=${{fontSize:13,fontWeight:800,color:'var(--tx)'}}>Access Audit Log</div>
+                <div style=${{fontSize:11,color:'var(--tx2)'}}>Every reveal, copy and unlock is recorded here</div>
+              </div>
+            </div>
+            <div style=${{display:'flex',alignItems:'center',gap:8}}>
+              <span style=${{fontSize:10,background:'rgba(34,197,94,.1)',color:'#22c55e',border:'1px solid rgba(34,197,94,.25)',padding:'3px 9px',borderRadius:100,fontWeight:700,letterSpacing:.3}}>
+                ● Fernet AES-128-CBC
+              </span>
+              <button
+                style=${{fontSize:12,color:'var(--tx2)',background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:8,padding:'5px 14px',cursor:'pointer',fontFamily:'inherit',fontWeight:600,transition:'all .15s'}}
+                onMouseEnter=${e=>{e.currentTarget.style.borderColor='rgba(99,102,241,.4)';}}
+                onMouseLeave=${e=>{e.currentTarget.style.borderColor='var(--bd)';}}
+                onClick=${()=>setAuditOpen(o=>!o)}>
+                ${auditOpen?'Hide':'Show'} log ${auditLog.length?'('+auditLog.length+')':''}
+              </button>
+            </div>
+          </div>
+
+          ${auditOpen && html`
+            <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:12,overflow:'hidden'}}>
+              ${auditLog.length===0 && html`
+                <div style=${{padding:'28px',textAlign:'center',color:'#475569',fontSize:13}}>
+                  No audit events yet — reveal or copy a secret to generate entries.
+                </div>`}
+              ${auditLog.length>0 && html`
+                <table style=${{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                  <thead>
+                    <tr style=${{background:'rgba(255,255,255,.03)',borderBottom:'1px solid var(--bd)'}}>
+                      ${['Action','Card','Detail','Time','IP'].map(h=>html`
+                        <th key=${h} style=${{padding:'9px 14px',textAlign:'left',fontWeight:700,color:'#64748b',letterSpacing:.3,whiteSpace:'nowrap'}}>${h}</th>`)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${auditLog.map((e,i)=>{
+                      const actionMeta = {
+                        reveal:  {label:'Reveal',  bg:'rgba(245,158,11,.1)', color:'#f59e0b', icon:'👁'},
+                        copy:    {label:'Copy',    bg:'rgba(99,102,241,.1)', color:'#818cf8', icon:'📋'},
+                        unlock:  {label:'Unlock',  bg:'rgba(34,197,94,.1)',  color:'#22c55e', icon:'🔓'},
+                        create:  {label:'Create',  bg:'rgba(59,130,246,.1)', color:'#60a5fa', icon:'✚'},
+                      }[e.action] || {label:e.action, bg:'rgba(255,255,255,.05)', color:'#94a3b8', icon:'•'};
+                      const timeStr = e.created ? new Date(e.created).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+                      return html`
+                        <tr key=${e.id||i} style=${{borderBottom:'1px solid rgba(255,255,255,.04)',transition:'background .15s'}}
+                          onMouseEnter=${el=>{if(el.currentTarget)el.currentTarget.style.background='rgba(255,255,255,.025)';}}
+                          onMouseLeave=${el=>{if(el.currentTarget)el.currentTarget.style.background='transparent';}}>
+                          <td style=${{padding:'8px 14px',whiteSpace:'nowrap'}}>
+                            <span style=${{display:'inline-flex',alignItems:'center',gap:5,background:actionMeta.bg,color:actionMeta.color,border:'1px solid '+actionMeta.color+'44',borderRadius:6,padding:'2px 8px',fontWeight:700,fontSize:11}}>
+                              ${actionMeta.icon} ${actionMeta.label}
+                            </span>
+                          </td>
+                          <td style=${{padding:'8px 14px',color:'#cbd5e1',maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${e.card_title||e.card_id||'—'}</td>
+                          <td style=${{padding:'8px 14px',color:'#94a3b8',maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${e.detail||'—'}</td>
+                          <td style=${{padding:'8px 14px',color:'#64748b',whiteSpace:'nowrap'}}>${timeStr}</td>
+                          <td style=${{padding:'8px 14px',color:'#475569',fontFamily:'monospace',fontSize:11}}>${e.ip||'—'}</td>
+                        </tr>`;
+                    })}
+                  </tbody>
+                </table>`}
+            </div>`}
+        </div>`}
+    </div>
+    </div>`;
+}
+
+
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
   const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
   const [loading,setLoading]=useState(_hadSession);
   // Read initial view from URL path or ?page= param
-  const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet'];
+  const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      const parts=p.split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/projects/<pid>  → parts[3]==='projects'
-      // bare:      /projects/<pid>                    → parts[1]==='projects'
-      const isWs=parts.length>=4&&parts[2]&&parts[2].startsWith('ws');
-      const projSeg=isWs?parts[3]:parts[1];
-      const pidSeg=isWs?parts[4]:parts[2];
-      if(projSeg==='projects'&&pidSeg){
-        setInitialProjectId(pidSeg);
+      if(p.startsWith('/projects/')&&p.length>10){
+        const pid=p.split('/')[2];
+        if(pid)setInitialProjectId(pid);
         setView('projects');
       }
     }catch(e){}
@@ -7260,9 +7951,7 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const p = wsView || parts[0].trim();
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -7270,13 +7959,8 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/');
-      // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-      // bare:      /<view>                     → parts[0]
-      const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-      const bareView = parts[0].trim();
-      const candidate = wsView || bareView;
-      if(candidate && VALID_VIEWS.includes(candidate)) return candidate;
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
@@ -7290,50 +7974,21 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
-  // Build ws-scoped path helper — reads prefix from multiple sources for robustness
-  const _wsPath=useCallback((page)=>{
-    try{
-      // Source 1: window._pfWsBase set synchronously on login / /api/auth/me
-      const base=window._pfWsBase;
-      if(base){
-        const p=base.split('/');
-        // p = ['','fsbl','ws123','dashboard']
-        if(p.length>=3&&p[2]&&p[2].startsWith('ws'))
-          return '/'+p[1]+'/'+p[2]+'/'+page;
-      }
-      // Source 2: current URL is already ws-scoped (e.g. /fsbl/ws123/dashboard)
-      const loc=window.location.pathname.split('/');
-      if(loc.length>=3&&loc[2]&&loc[2].startsWith('ws'))
-        return '/'+loc[1]+'/'+loc[2]+'/'+page;
-      // Source 3: React state cu (may be null on first render)
-      const url=cu&&cu.workspace_dashboard_url;
-      if(url){
-        const parts=url.split('/');
-        if(parts.length>=3&&parts[2]&&parts[2].startsWith('ws'))
-          return '/'+parts[1]+'/'+parts[2]+'/'+page;
-      }
-    }catch(e){}
-    return '/'+page; // last-resort fallback
-  },[cu]);
   const _setView=useCallback((v)=>{
     setView(v);
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'',_wsPath(base));
+        history.pushState(null,'','/'+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[_wsPath]);
+  },[]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const parts=window.location.pathname.replace(/^\//, '').split('/');
-        // ws-scoped: /<ws_name>/<ws_id>/<view>  → parts[2]
-        const wsView = parts.length>=3 && parts[1] && parts[1].startsWith('ws') ? parts[2] : null;
-        const bareView = parts[0].trim();
-        const p = wsView || bareView;
+        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -7375,6 +8030,46 @@ function App(){
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
 
+  // ── SSE real-time stream ──────────────────────────────────────────────────
+  // A single EventSource replaces the need for manual polling on task/project/
+  // notification/ticket mutations. The server calls _sse_publish() after every
+  // write, so changes propagate to all connected clients in <1s instead of 30s.
+  useEffect(()=>{
+    if(!cu)return;
+    let es=null;let retryTimer=null;
+    const connect=()=>{
+      try{
+        es=new EventSource('/api/stream', {withCredentials: true});
+        es.onmessage=e=>{
+          try{
+            const msg=JSON.parse(e.data);
+            if(msg.type==='connected')return; // initial handshake
+            if(['task_updated','project_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated'].includes(msg.type)){
+              // Bust cache and reload — the server has already bust its own cache
+              load(teamCtx);
+            }
+            if(msg.type==='notification'||msg.type==='notification_updated'){
+              triggerPollRef.current&&triggerPollRef.current();
+            }
+            if(msg.type==='dm'||msg.type==='dm_created'){
+              api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
+            }
+            if(msg.type==='presence'){
+              api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
+            }
+          }catch(err){}
+        };
+        es.onerror=()=>{
+          // EventSource reconnects automatically, but we add a backoff guard
+          es.close();
+          retryTimer=setTimeout(connect,5000);
+        };
+      }catch(err){}
+    };
+    connect();
+    return()=>{if(es)es.close();if(retryTimer)clearTimeout(retryTimer);};
+  },[cu,teamCtx]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Presence heartbeat — ping every 30s, fetch online users every 15s
   useEffect(()=>{
     if(!cu)return;
@@ -7382,14 +8077,11 @@ function App(){
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    // Fire beat immediately on mount (beat already calls fetchPresence — no double-fetch)
     beat();
-    const beatId=setInterval(()=>{
-      // Skip heartbeat if tab is hidden — saves DB writes when user switches tabs
-      if(!document.hidden) beat();
-    },60000); // 60s heartbeat — presence updates are low-priority
-    const onFocus=()=>{beat();}; // immediate refresh when tab regains focus
+    const beatId=setInterval(beat,30000);
+    const onFocus=()=>{beat();};
     window.addEventListener('focus',onFocus);
+    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
     return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
@@ -7419,6 +8111,15 @@ function App(){
   },[]);
 
   useEffect(()=>{window._pfToast=addToast;},[addToast]);
+  useEffect(()=>{
+    const onApiError=(e)=>{
+      const d=e.detail||{};
+      const label=(d.status?`HTTP ${d.status}`:'Network');
+      addToast('error', label+' request failed', `${d.message||'Request failed'} — ${d.url||''}`);
+    };
+    window.addEventListener('pt:api-error', onApiError);
+    return()=>window.removeEventListener('pt:api-error', onApiError);
+  },[addToast]);
 
   const notify=useCallback((type,title,body,navTo,opts={})=>{
     addToast(type,title,body);
@@ -7435,62 +8136,58 @@ function App(){
 
   const [teamLoading,setTeamLoading]=useState(false);
 
-  const load=useCallback(async(overrideTeamCtx,{bust=false}={})=>{
+  const load=useCallback(async(overrideTeamCtx, bust=false)=>{
     if(!cu)return;
     const tCtx=overrideTeamCtx!==undefined?overrideTeamCtx:teamCtx;
     try{
-      const bustSuffix=bust?'&bust=1':'';
-      const projUrl=(tCtx?'/api/projects?team_id='+tCtx:'/api/projects')+(bust?'&bust=1':'');
-      const taskUrl=(tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks')+(bust?'&bust=1':'');
-      const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw,rems]=await Promise.all([
-        api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'),api.get('/api/reminders'), ]);
+      // Single combined request instead of 9 parallel calls.
+      // bust=true forces a fresh DB read on the server, bypassing stale worker caches.
+      const bustParam=bust?'bust=1':'';
+      const teamParam=tCtx?'team_id='+tCtx:'';
+      const qs=[teamParam,bustParam].filter(Boolean).join('&');
+      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
+      const d=await api.get(appDataUrl);
+      if(!d||d.error){
+        console.warn('[Load] Authentication failed or server error, clearing session');
+        setCu(null);
+        setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+        return;
+      }
+      const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
-      setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
+      const _pm=parseMembers;
+      setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      // Keep _pfWsBase in sync if workspace slug changes
-      if(ws&&ws.id){
-        try{
-          const _slug=ws.workspace_slug||(ws.name||'workspace').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-          window._pfWsBase='/'+_slug+'/'+ws.id+'/dashboard';
-        }catch(_){}
-      }
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
-    }catch(e){console.error(e);}
-  },[cu]);
+    }catch(e){console.error('[Load] Error:',e);}
+  },[cu,teamCtx]);
 
   useEffect(()=>{
+    // Try to get current user; if backend is unreachable, enter offline mode
+    // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){
-        if(u.workspace_dashboard_url){
-          window._pfWsBase=u.workspace_dashboard_url;
-          // If currently on a bare path, redirect to ws-scoped URL immediately
-          try{
-            const loc=window.location.pathname;
-            const parts=loc.split('/');
-            const isAlreadyWsScoped=parts.length>=3&&parts[2]&&parts[2].startsWith('ws');
-            if(!isAlreadyWsScoped){
-              // Extract page segment from bare path (e.g. /dashboard → dashboard)
-              const barePage=parts[1]||'dashboard';
-              const validPages=['dashboard','projects','tasks','messages','channels','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','vault','app'];
-              const page=validPages.includes(barePage)?barePage:'dashboard';
-              const wsParts=u.workspace_dashboard_url.split('/');
-              if(wsParts.length>=3){
-                const wsUrl='/'+wsParts[1]+'/'+wsParts[2]+'/'+page;
-                window.history.replaceState({},'',wsUrl);
-              }
-            }
-          }catch(_){}
-        }
-        setCu(u);
-        try{localStorage.setItem('pf_had_session','1');}catch{} // cache: user has active session
-      } else {
-        try{localStorage.removeItem('pf_had_session');}catch{} // no session — next visit shows login instantly
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
+      else {
+        // Got a response but errored (e.g. 401 not logged in) — show login instantly
+        try{localStorage.removeItem('pf_had_session');}catch{}
+        setLoading(false);
       }
+    }).catch(()=>{
+      // Network error — backend unreachable. Enter offline mode.
+      const offlineUser = {
+        id:'offline', name:'Offline User', email:'offline@local',
+        role:'Developer', _offline:true
+      };
+      setCu(offlineUser);
       setLoading(false);
-    }).catch(()=>{try{localStorage.removeItem('pf_had_session');}catch{}setLoading(false);});
+      // Mark that we're offline so the UI can show a banner
+      window._pfOfflineMode = true;
+      // Default to vault in offline mode
+      _setView('vault');
+    });
   },[]);
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
@@ -7540,20 +8237,11 @@ function App(){
     setData(prev=>({...prev,projects:[],tasks:[]}));
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
-  useEffect(()=>{
-    if(!cu)return;
-    const id=setInterval(async()=>{
-      try{
-        const projUrl=teamCtx?'/api/projects?team_id='+teamCtx:'/api/projects';
-        const taskUrl=teamCtx?'/api/tasks?team_id='+teamCtx:'/api/tasks';
-        const [projects,tasks]=await Promise.all([api.get(projUrl),api.get(taskUrl)]);
-        if(Array.isArray(projects)&&Array.isArray(tasks)){
-          setData(prev=>({...prev,projects,tasks}));
-        }
-      }catch(e){}
-    },30000);
-    return()=>clearInterval(id);
-  },[cu,teamCtx]);
+  // NOTE: The 30s projects+tasks interval has been removed.
+  // /api/app-data (called by load()) already fetches both on every poll.
+  // Additionally, the SSE stream now triggers load() immediately on any
+  // task/project mutation — so this extra interval was both redundant and
+  // doubling DB load (2 extra queries every 30s per connected user).
   useEffect(()=>{
     document.body.className=dark?'dm':'';
     try{
@@ -7591,7 +8279,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },30000); // reduced 5s->30s: DM unread poll
+    },120000); // SSE handles DM unread refresh; fallback only
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -7619,7 +8307,33 @@ function App(){
           addToast(n.type,title,n.content||'');
           showBrowserNotif(title,n.content||'',()=>{
             window.focus();
-            if(n.type==='dm'){const sid=n.sender_id||n.sender;if(sid)setDmTargetUser(sid);_setView('dm');}
+            if(n.type==='dm'){
+              const sid=n.entity_id||n.sender_id||n.sender;
+              if(sid)setDmTargetUser(sid);
+              _setView('dm');
+            }
+            else if(n.entity_id && n.entity_type==='task'){
+              _setView('tasks');
+              setTimeout(()=>{
+                const taskEl=document.querySelector(`[data-task-id="${n.entity_id}"]`);
+                if(taskEl)taskEl.click();
+              },100);
+            }
+            else if(n.entity_id && n.entity_type==='project'){
+              setActiveProject(n.entity_id);
+              _setView('projects');
+            }
+            else if(n.entity_id && n.entity_type==='ticket'){
+              _setView('tickets');
+              setTimeout(()=>{
+                const ticketEl=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);
+                if(ticketEl)ticketEl.click();
+              },100);
+            }
+            else if(n.entity_type==='message' && n.entity_id){
+              setActiveProject(n.entity_id);
+              _setView('messages');
+            }
             else{_setView(nav);}
           },{tag:'notif-'+n.id});
           playSound('notif');
@@ -7643,7 +8357,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(pollOnce, 30000); // reduced from 6s → 30s (5× less DB load)
+    const id=setInterval(pollOnce, 120000); // SSE handles notifications; fallback only
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
@@ -7659,21 +8373,35 @@ function App(){
     });
   },[]);
   const logout=async()=>{
-    // 1. Abort all in-flight API requests immediately so polling stops
+    // 1. Abort all in-flight API requests FIRST — stops polls, cancels app-data
     api._abort();
-    // 2. Unsubscribe from push notifications (fire-and-forget)
-    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
-    // 3. Clear local state and session cache BEFORE redirect
-    try{localStorage.removeItem('pf_had_session');}catch{}
+    // 2. Clear state immediately so UI shows nothing (prevents flash of dashboard)
+    window._pfCurrentUser=null;
     setCu(null);setData({users:[],projects:[],tasks:[],notifs:[]});setDmUnread([]);
-    // 4. AWAIT logout endpoint so the server clears the cookie before we redirect.
-    //    Without await, some browsers redirect before the Set-Cookie header arrives,
-    //    leaving the session cookie alive and causing the "still logged in" bug.
+    // 3. Unsubscribe from push notifications (best-effort)
+    if(window._pfPushUnsubscribe) window._pfPushUnsubscribe().catch(()=>{});
+    // 4. AWAIT logout endpoint — critical: do NOT fire-and-forget.
+    // Without await, the browser navigates to / BEFORE the server clears the
+    // session cookie. The index route sees user_id still in session → 302 to
+    // dashboard → user sees a ghost dashboard flash before 401s kick in.
     try{
-      await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});
-    }catch(e){}
-    // 5. Hard redirect after cookie is cleared
-    window.location.replace('/');
+      await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)});
+    }catch(e){
+      // Timeout or network error — server may have already cleared the session.
+      // Proceed with client-side cleanup anyway.
+    }
+    // 5. Clear ALL localStorage only AFTER server confirms logout
+    try{
+      const keysToRemove=['pf_had_session','pf_dark','pf_col','pf_perms','pf_accent','pfLastSeen'];
+      keysToRemove.forEach(k=>{try{localStorage.removeItem(k);}catch{}});
+      Object.keys(localStorage).forEach(k=>{
+        if(k.startsWith('vw_ai_recents_')||k.startsWith('pf_')){
+          try{localStorage.removeItem(k);}catch{}
+        }
+      });
+    }catch{}
+    // 6. Hard redirect — session is now cleared on server, index won't redirect to dashboard
+    window.location.href='/?action=login';
   };
 
   useEffect(()=>{if(cu)requestNotifPermission();},[cu]);
@@ -7687,6 +8415,20 @@ function App(){
   },[]);
 
   useEffect(()=>{
+    if(!cu)return;
+    const onRefresh=()=>load(undefined,{bust:true});
+    const onRealtime=(e)=>{
+      const msg=e.detail||{};
+      if(['project_updated','task_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
+        onRefresh();
+      }
+    };
+    window.addEventListener('pt:refresh', onRefresh);
+    window.addEventListener('pt:realtime', onRealtime);
+    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+  },[cu,load]);
+
+  useEffect(()=>{
     const unread=safe(data.notifs).filter(n=>!n.read).length;
     const dmTotal=dmUnread.reduce((a,x)=>a+(x.cnt||0),0);
     updateBadge(unread+dmTotal);
@@ -7696,14 +8438,13 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      // Only fetch /api/reminders/due — reminders list already kept fresh by load()
       const due=await api.get('/api/reminders/due');
-      const rems=upcomingReminders; // use already-loaded state — no extra API call
+      const rems=upcomingReminders;
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
           addToast('reminder','⏰ Reminder: '+r.task_title,'Click to view');
           showBrowserNotif('⏰ '+r.task_title,'Reminder is due now!',()=>{
-            setView('reminders');
+            _setView('reminders');
             if(window.electronAPI){window.electronAPI.focusWindow();}else{window.focus();}
           },{tag:'rem-'+r.id,requireInteraction:true});
           playSound('reminder');
@@ -7722,7 +8463,7 @@ function App(){
               firedEarlyRef.current.add(earlyKey);
               addToast('reminder','⏰ Coming up in '+minsBefore+'min',r.task_title);
               showBrowserNotif('⏰ Reminder in '+minsBefore+' min',r.task_title,()=>{
-                setView('reminders');
+                _setView('reminders');
                 if(window.electronAPI){window.electronAPI.focusWindow();}else{window.focus();}
               },{tag:earlyKey,requireInteraction:false});
               playSound('reminder');
@@ -7733,7 +8474,7 @@ function App(){
       }
     };
     checkDue();
-    const id=setInterval(checkDue,30000);
+    const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
     return()=>clearInterval(id);
   },[cu,addToast]);
 
@@ -7764,15 +8505,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
-    if(u.workspace_dashboard_url){
-      window._pfWsBase=u.workspace_dashboard_url;
-      // Hard redirect to ws-scoped URL so page reloads with correct URL from the start
-      window.location.replace(u.workspace_dashboard_url);
-    } else {
-      setCu(u);
-    }
-  }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
@@ -7804,18 +8537,30 @@ function App(){
   const extra=null;
 
   return html`
-    <div style=${{display:'flex',width:'100vw',height:'100vh',background:'var(--bg)',overflow:'hidden'}}>
+    <div style=${{display:'flex',flexDirection:'column',width:'100vw',height:'100vh',background:'var(--bg)',overflow:'hidden'}}>
+      ${cu&&cu._offline?html`
+        <div style=${{background:'rgba(245,158,11,.12)',borderBottom:'1px solid rgba(245,158,11,.28)',padding:'7px 20px',fontSize:12,color:'#f59e0b',display:'flex',alignItems:'center',gap:8,flexShrink:0,zIndex:999}}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><circle cx="12" cy="16" r=".5" fill="currentColor"/></svg>
+          <b>Offline / No Backend</b> — Server not reachable. <b>My Vault</b> and <b>Password Generator</b> work fully (stored locally). Other features require a live backend.
+        </div>`:null}
+      <div style=${{display:'flex',flex:1,overflow:'hidden'}}>
       <${Sidebar} cu=${cu} view=${baseView} setView=${v=>{
+          if(cu&&cu._offline){
+            // In offline mode only allow vault and password-generator
+            if(v==='vault'||v==='password-generator'){_setView(v);}
+            return;
+          }
           if(typeof v==='string'&&v.startsWith('dm:')){const uid=v.slice(3);setDmTargetUser(uid);_setView('dm');}
           else _setView(v);
-        }} onLogout=${logout} unread=${unread} dmUnread=${dmUnread} col=${col} setCol=${v=>{setCol(v);try{localStorage.setItem('pf_col',v?'1':'0');}catch{}}} wsName=${wsName}
+        }} onLogout=${logout} unread=${unread} dmUnread=${dmUnread} col=${col} setCol=${v=>{setCol(v);try{localStorage.setItem('pf_col',v?'1':'0');}catch{}}} wsName=${cu&&cu._offline?'Offline Mode':wsName}
         dark=${dark} setDark=${setDark} wsDmEnabled=${wsDmEnabled} onlineUsers=${onlineUsers}
         teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}
         teamCtx=${teamCtx} setTeamCtx=${setTeamCtx} activeTeam=${activeTeam}
+        offlineMode=${!!(cu&&cu._offline)}
         />
       <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden',minWidth:0}}>
         <${Header} title=${info.title} sub=${info.sub} dark=${dark} setDark=${setDark} extra=${extra}
-          cu=${cu} setCu=${setCu} upcomingReminders=${upcomingReminders} onViewReminders=${()=>setView('reminders')}
+          cu=${cu} setCu=${setCu} upcomingReminders=${upcomingReminders} onViewReminders=${()=>_setView('reminders')}
           notifs=${data.notifs}
           activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}
           onNotifClick=${async n=>{
@@ -7846,8 +8591,8 @@ function App(){
         />
         <div style=${{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
           <${ErrorBoundary}>
-            <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
-            ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}/>`:null}
+            <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
+            ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
             ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
@@ -7865,9 +8610,12 @@ function App(){
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
             ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
             ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
+            ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}
+            ${baseView==='vault'?html`<${VaultView} cu=${cu}/>`:null}
             </div>
           <//>
         </div>
+      </div>
       </div>
     </div>
     <${AIAssistant} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>
@@ -7972,7 +8720,7 @@ function App(){
         </div>
       </div>`:null}
 
-    <${ToastStack} toasts=${toasts} onDismiss=${dismissToast} onNav=${setView}/>
+    <${ToastStack} toasts=${toasts} onDismiss=${dismissToast} onNav=${_setView}/>
 
     ${showNotifBanner?html`
       <div style=${{position:'fixed',bottom:20,left:'50%',transform:'translateX(-50%)',zIndex:9100, background:'var(--sf)',border:'1px solid rgba(90,140,255,.30)',borderRadius:18, padding:'16px 20px',boxShadow:'0 8px 40px rgba(0,0,0,.7)', display:'flex',alignItems:'flex-start',gap:14,maxWidth:440, animation:'slideUp .3s cubic-bezier(.34,1.56,.64,1)'}}>
@@ -8005,47 +8753,4 @@ ReactDOM.createRoot(document.getElementById('root')).render(html`<${ErrorBoundar
 if(window._vwHideBoot)window._vwHideBoot();
 };
 waitForLibs(window._pfStartApp);
-})();
-// ═══════════════════════════════════════════════════════════
-// REAL-TIME SSE CLIENT — auto-reconnect, event dispatch
-// ═══════════════════════════════════════════════════════════
-(function initSSE(){
-  if(window._ptSSEActive) return;
-  window._ptSSEActive = true;
-  let es, retryTimer, retryDelay = 2000;
-  const MAX_DELAY = 30000;
-
-  function connect(){
-    if(es){ try{es.close()}catch(e){} }
-    es = new EventSource("/api/stream");
-    es.onopen = () => { retryDelay = 2000; console.log("[PT] SSE connected"); };
-    es.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if(msg.type === "connected") return;
-        window.dispatchEvent(new CustomEvent("pt:realtime", {detail: msg}));
-        // Trigger a soft refresh on key events
-        if(["task.created","task.updated","task.deleted",
-            "ticket.created","ticket.updated",
-            "comment.added"].includes(msg.type)){
-          window.dispatchEvent(new CustomEvent("pt:refresh"));
-        }
-      } catch(err){}
-    };
-    es.onerror = () => {
-      es.close();
-      retryTimer = setTimeout(()=>{ retryDelay = Math.min(retryDelay*2, MAX_DELAY); connect(); }, retryDelay);
-    };
-  }
-
-  // Only connect when logged in (page has #root)
-  if(document.getElementById("root")){
-    connect();
-  }
-
-  // Show a live indicator dot in the header when connected
-  window.addEventListener("pt:realtime", ()=>{
-    const dot = document.getElementById("pt-live-dot");
-    if(dot){ dot.style.background="#34d399"; dot.title="Live — real-time sync active"; }
-  });
 })();

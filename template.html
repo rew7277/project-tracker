@@ -742,6 +742,19 @@ textarea.inp{resize:vertical;min-height:66px;line-height:1.5}
 @keyframes teamSwitch{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
 .team-switch-enter{animation:teamSwitch .25s ease forwards}
 @keyframes loadBar{0%{width:0%;margin-left:0}60%{width:80%}100%{width:100%;margin-left:120%}}
+
+/* Centralized theme utility tokens — use these instead of hard-coded inline colours. */
+.theme-surface{background:var(--sf);color:var(--tx);border:1px solid var(--bd);box-shadow:var(--sh);}
+.theme-surface-2{background:var(--sf2);color:var(--tx);border:1px solid var(--bd);}
+.theme-muted{color:var(--tx2);}
+.theme-subtle{color:var(--tx3);}
+.theme-input{background:var(--bg);border:1px solid var(--bd);color:var(--tx);border-radius:10px;}
+.theme-glass{background:color-mix(in srgb,var(--sf) 82%,transparent);border:1px solid var(--bd);box-shadow:var(--sh);backdrop-filter:blur(16px);}
+.dm .theme-glass{background:rgba(28,28,30,.82);}
+.btn,.btn2,.card,.modal,.panel,.dropdown,.inp,textarea,select{transition:background .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;}
+.dm input,.dm textarea,.dm select{color-scheme:dark;}
+.lm input,.lm textarea,.lm select{color-scheme:light;}
+
 </style></head><body>
 
 <div id="root"></div>
@@ -866,109 +879,51 @@ function AppLoader(){
 // Global abort controller — cancelled on logout to kill all in-flight requests
 let _apiAbortCtrl = new AbortController();
 const _apiEtagCache = {}; // url → { etag, data }
+const _apiErrorSeen = new Map();
+const _apiRead = async (r) => {
+  const text = await r.text();
+  if (!text) return {};
+  try { return JSON.parse(text); }
+  catch { return { error: text.slice(0, 240) }; }
+};
+const _apiNotifyError = (url, message, status) => {
+  const key = `${status || 0}:${url}:${message || ''}`;
+  const now = Date.now();
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
+  _apiErrorSeen.set(key, now);
+  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
+  console.warn('[API]', status || 'network', url, message);
+};
+const _apiRequest = async (u, opts = {}) => {
+  try {
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = { ...(opts.headers || {}) };
+    const cached = method === 'GET' ? _apiEtagCache[u] : null;
+    if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
+    const r = await fetch(u, { credentials: 'include', signal: _apiAbortCtrl.signal, ...opts, headers });
+    if (r.status === 304 && cached) return cached.data;
+    const data = await _apiRead(r);
+    if (!r.ok) {
+      const message = data?.error || data?.message || `HTTP ${r.status}`;
+      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
+      return { ok:false, error:message, status:r.status, data };
+    }
+    const etag = r.headers.get('ETag');
+    if (method === 'GET' && etag) _apiEtagCache[u] = { etag, data };
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') return null;
+    _apiNotifyError(u, e.message || 'Network error', 0);
+    return { ok:false, error:e.message || 'Network error', status:0 };
+  }
+};
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get: async (u) => {
-    try {
-      const cached = _apiEtagCache[u];
-      const headers = {};
-      if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
-      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal, headers});
-      if (r.status === 304 && cached) return cached.data; // server says nothing changed
-      if (!r.ok) {
-        if (r.status === 401) {
-          console.warn('[API] 401 Unauthorized:', u);
-          return null;
-        }
-        const errData = await r.json().catch(() => ({}));
-        return { error: errData.error || `HTTP ${r.status}`, status: r.status };
-      }
-      const data = await r.json();
-      const etag = r.headers.get('ETag');
-      if (etag) _apiEtagCache[u] = { etag, data };
-      return data;
-    } catch (e) {
-      if (e.name === 'AbortError') return null;
-      console.error('[API] Network error:', u, e);
-      return null;
-    }
-  },
-  post: async (u, b) => {
-    try {
-      const r = await fetch(u, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(b)
-      });
-      if (!r.ok) {
-        if (r.status === 401) {
-          // Auth endpoints (/api/auth/*) return 401 with a real error body (e.g. wrong password).
-          // All other endpoints return 401 because the session expired — treat as null.
-          if (u.startsWith('/api/auth/')) {
-            const errData = await r.json().catch(() => ({}));
-            return { error: errData.error || 'Unauthorized', status: 401 };
-          }
-          console.warn('[API] 401 Unauthorized:', u);
-          return null;
-        }
-        const errData = await r.json().catch(() => ({}));
-        return { error: errData.error || `HTTP ${r.status}`, status: r.status };
-      }
-      return await r.json();
-    } catch (e) {
-      if (e.name === 'AbortError') return null;
-      console.error('[API] Network error:', u, e);
-      return null;
-    }
-  },
-  put: async (u, b) => {
-    try {
-      const r = await fetch(u, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(b)
-      });
-      if (!r.ok) {
-        if (r.status === 401) return null;
-        const errData = await r.json().catch(() => ({}));
-        return { error: errData.error || `HTTP ${r.status}`, status: r.status };
-      }
-      return await r.json();
-    } catch (e) {
-      console.error('[API] Network error:', u, e);
-      return null;
-    }
-  },
-  del: async (u) => {
-    try {
-      const r = await fetch(u, {method: 'DELETE', credentials: 'include'});
-      if (!r.ok) {
-        if (r.status === 401) return null;
-        const errData = await r.json().catch(() => ({}));
-        return { error: errData.error || `HTTP ${r.status}`, status: r.status };
-      }
-      return await r.json();
-    } catch (e) {
-      console.error('[API] Network error:', u, e);
-      return null;
-    }
-  },
-  upload: async (u, fd) => {
-    try {
-      const r = await fetch(u, {method: 'POST', credentials: 'include', body: fd});
-      if (!r.ok) {
-        if (r.status === 401) return null;
-        const errData = await r.json().catch(() => ({}));
-        return { error: errData.error || `HTTP ${r.status}`, status: r.status };
-      }
-      return await r.json();
-    } catch (e) {
-      console.error('[API] Network error:', u, e);
-      return null;
-    }
-  },
+  get:u=>_apiRequest(u),
+  post:(u,b)=>_apiRequest(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  put:(u,b)=>_apiRequest(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  del:u=>_apiRequest(u,{method:'DELETE'}),
+  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
 };
 
 const STAGES={
@@ -4621,7 +4576,7 @@ function MessagesView({projects,users,cu,tasks}){
       }
     };
     fetchTs();
-    const id=setInterval(fetchTs,15000); // reduced 8s→15s
+    const id=setInterval(fetchTs,60000); // SSE handles message updates; fallback only
     return()=>clearInterval(id);
   },[]);
 
@@ -4963,7 +4918,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(toId);
       }
-    },15000); // reduced 3s->15s: DM message poll
+    },60000); // SSE handles DM updates; fallback only
     return()=>clearInterval(id);
   },[toId]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
@@ -8911,14 +8866,14 @@ function App(){
           try{
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
-            if(msg.type==='task_updated'||msg.type==='project_updated'||msg.type==='ticket_updated'){
+            if(['task_updated','project_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated'].includes(msg.type)){
               // Bust cache and reload — the server has already bust its own cache
               load(teamCtx);
             }
-            if(msg.type==='notification'){
+            if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
-            if(msg.type==='dm'){
+            if(msg.type==='dm'||msg.type==='dm_created'){
               api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
             }
             if(msg.type==='presence'){
@@ -8978,6 +8933,15 @@ function App(){
   },[]);
 
   useEffect(()=>{window._pfToast=addToast;},[addToast]);
+  useEffect(()=>{
+    const onApiError=(e)=>{
+      const d=e.detail||{};
+      const label=(d.status?`HTTP ${d.status}`:'Network');
+      addToast('error', label+' request failed', `${d.message||'Request failed'} — ${d.url||''}`);
+    };
+    window.addEventListener('pt:api-error', onApiError);
+    return()=>window.removeEventListener('pt:api-error', onApiError);
+  },[addToast]);
 
   const notify=useCallback((type,title,body,navTo,opts={})=>{
     addToast(type,title,body);
@@ -9137,7 +9101,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },30000); // reduced 5s->30s: DM unread poll
+    },120000); // SSE handles DM unread refresh; fallback only
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -9215,7 +9179,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(pollOnce, 30000); // reduced from 6s → 30s (5× less DB load)
+    const id=setInterval(pollOnce, 120000); // SSE handles notifications; fallback only
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
@@ -9273,6 +9237,20 @@ function App(){
   },[]);
 
   useEffect(()=>{
+    if(!cu)return;
+    const onRefresh=()=>load(undefined,{bust:true});
+    const onRealtime=(e)=>{
+      const msg=e.detail||{};
+      if(['project_updated','task_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
+        onRefresh();
+      }
+    };
+    window.addEventListener('pt:refresh', onRefresh);
+    window.addEventListener('pt:realtime', onRealtime);
+    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+  },[cu,load]);
+
+  useEffect(()=>{
     const unread=safe(data.notifs).filter(n=>!n.read).length;
     const dmTotal=dmUnread.reduce((a,x)=>a+(x.cnt||0),0);
     updateBadge(unread+dmTotal);
@@ -9318,7 +9296,7 @@ function App(){
       }
     };
     checkDue();
-    const id=setInterval(checkDue,30000);
+    const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
     return()=>clearInterval(id);
   },[cu,addToast]);
 
