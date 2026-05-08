@@ -137,10 +137,18 @@ def _parse_db_url(url):
     url = url.replace("postgres://", "postgresql://", 1)
     p = urllib.parse.urlparse(url)
     import ssl as _ssl
-    ssl_ctx = _ssl.create_default_context()
-    # Production default: verify database TLS certificates.
-    # Set DB_SSL_VERIFY=false only for local/self-signed development databases.
-    if os.environ.get("DB_SSL_VERIFY", "true").lower() in ("0", "false", "no"):
+    # Many managed Postgres providers expose TLS with an internal/self-signed CA.
+    # That caused /api/auth/me and /api/auth/login to 500 with
+    # CERTIFICATE_VERIFY_FAILED in Railway-style deployments.
+    # Default to sslmode=require semantics (encrypted, no hostname/CA validation),
+    # and allow strict verification by setting DB_SSL_VERIFY=true plus DB_SSL_CA_FILE
+    # when your provider gives you a trusted CA bundle.
+    verify = os.environ.get("DB_SSL_VERIFY", "false").lower() in ("1", "true", "yes", "verify", "verify-full")
+    ca_file = os.environ.get("DB_SSL_CA_FILE", "").strip()
+    if verify:
+        ssl_ctx = _ssl.create_default_context(cafile=ca_file or None)
+    else:
+        ssl_ctx = _ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = _ssl.CERT_NONE
     return dict(host=p.hostname, port=p.port or 5432, user=p.username,
@@ -506,6 +514,20 @@ def add_security_headers(response):
     if request.is_secure:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+
+@app.errorhandler(404)
+def _api_json_404_handler(e):
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": "API endpoint not found"}), 404
+    return e
+
+@app.errorhandler(500)
+def _api_json_500_handler(e):
+    app.logger.exception("Unhandled server error on %s", request.path)
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": "Server error. Check application logs for details."}), 500
+    return e
 
 CLRS=["#7c3aed","#2563eb","#059669","#d97706","#dc2626","#ec4899","#0891b2","#5a8cff"]
 
@@ -5985,6 +6007,35 @@ def emergency_reset_2fa():
         db.execute("UPDATE users SET two_fa_enabled=0, totp_secret='', totp_verified=0 WHERE workspace_id=?", (ws["id"],))
         return jsonify({"ok":True,"message":"All 2FA reset. You can now log in with email + password."})
 
+
+
+@app.route("/manifest.json")
+def web_manifest():
+    """Small PWA manifest so browsers stop 404-spamming /manifest.json."""
+    return jsonify({
+        "name": "Project Tracker",
+        "short_name": "Project Tracker",
+        "start_url": "/dashboard",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#070313",
+        "theme_color": "#7c3aed",
+        "icons": []
+    })
+
+@app.route("/sw.js")
+def service_worker():
+    """Safe no-op service worker. Keeps old registrations from failing after static hardening."""
+    js = """self.addEventListener('install', event => self.skipWaiting());
+self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', event => {});
+"""
+    return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache"})
+
+@app.route("/favicon.ico")
+def favicon():
+    """Return 204 instead of noisy 404 when no favicon asset is deployed."""
+    return Response(status=204, headers={"Cache-Control":"public, max-age=86400"})
 
 
 @app.route("/static/<path:fn>")

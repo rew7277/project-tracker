@@ -62,9 +62,19 @@ const _apiRead = async (r) => {
   const text = await r.text();
   if (!text) return {};
   try { return JSON.parse(text); }
-  catch { return { error: text.slice(0, 240) }; }
+  catch {
+    const isHtml = /^\s*</.test(text || '');
+    return { error: isHtml ? `Server returned HTTP ${r.status}` : text.slice(0, 240) };
+  }
+};
+const _apiCleanMessage = (message, status) => {
+  let msg = String(message || `HTTP ${status || 0}`);
+  msg = msg.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!msg || msg.length > 180 || /^doctype html/i.test(msg)) msg = status ? `Server returned HTTP ${status}` : 'Network error';
+  return msg;
 };
 const _apiNotifyError = (url, message, status) => {
+  message = _apiCleanMessage(message, status);
   const key = `${status || 0}:${url}:${message || ''}`;
   const now = Date.now();
   if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
