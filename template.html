@@ -974,6 +974,8 @@ const PAL=['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#ec4899','#0891b2'
 const fmtD=d=>{if(!d)return'—';try{return new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}catch(e){return d;}};
 const ago=iso=>{const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)return'just now';if(m<60)return m+'m ago';if(m<1440)return Math.floor(m/60)+'h ago';return Math.floor(m/1440)+'d ago';};
 const safe=a=>(Array.isArray(a)?a:[]);
+// Normalize project.members: DB stores it as a JSON string, UI needs a real array
+const parseMembers=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
 
 function Av({u,size=32}){
   const imgSrc=(u&&u.avatar_data&&u.avatar_data.startsWith('data:image'))?u.avatar_data:
@@ -2933,7 +2935,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     try{await api.del('/api/projects/'+pid);}catch(_){}
     try{
       const fresh=await api.get('/api/projects?bust=1');
-      if(Array.isArray(fresh))setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid)}));
+      if(Array.isArray(fresh))setData&&setData(prev=>({...prev,projects:fresh.filter(p=>p.id!==pid).map(p=>({...p,members:parseMembers(p.members)}))}));
     }catch(_){}
     onReload();
   };
@@ -8944,7 +8946,7 @@ function App(){
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
-      const _pm=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
+      const _pm=parseMembers;
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
@@ -9033,16 +9035,18 @@ function App(){
         const taskUrl=teamCtx?'/api/tasks?team_id='+teamCtx:'/api/tasks';
         const [projects,tasks]=await Promise.all([api.get(projUrl),api.get(taskUrl)]);
         if(Array.isArray(projects)&&Array.isArray(tasks)){
+          // Normalize members field from DB JSON string to real array before writing to state
+          const normProjects=projects.map(p=>({...p,members:parseMembers(p.members)}));
           setData(prev=>{
             // Grace period guard: never remove items created locally in the last 45s
             // This prevents multi-Gunicorn-worker stale cache from vanishing optimistic items
             const GRACE=45000;const now=Date.now();
-            const serverProjIds=new Set(projects.map(p=>p.id));
+            const serverProjIds=new Set(normProjects.map(p=>p.id));
             const serverTaskIds=new Set(tasks.map(t=>t.id));
             const localProjs=(prev.projects||[]).filter(p=>p._localTs&&(now-p._localTs)<GRACE&&!serverProjIds.has(p.id));
             const localTasks=(prev.tasks||[]).filter(t=>t._localTs&&(now-t._localTs)<GRACE&&!serverTaskIds.has(t.id));
             return {...prev,
-              projects:[...projects,...localProjs],
+              projects:[...normProjects,...localProjs],
               tasks:[...tasks,...localTasks]};
           });
         }
