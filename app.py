@@ -759,6 +759,38 @@ def _cache_bust_ws(workspace_id):
                 _CACHE.pop(key, None)
 
 
+
+def _appdata_cache_key(workspace_id, user_id, table):
+    return f"appdata:{workspace_id}:{user_id}:{table}"
+
+def _appdata_cache_get(workspace_id, user_id, table):
+    """Small compatibility cache used by noisy dashboard poll endpoints.
+
+    The frontend asks reminders/notifications/dm-unread on every refresh and
+    at intervals. Older code called this helper but it was never defined, which
+    caused NameError -> HTTP 500 on /api/reminders/due, /api/notifications and
+    /api/dm/unread. Return (data, True) only when a real cached value exists;
+    otherwise callers safely fall back to DB.
+    """
+    try:
+        key = _appdata_cache_key(workspace_id, user_id, table)
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached, True
+    except Exception as e:
+        try: log.warning("[appdata cache get] %s", e)
+        except Exception: pass
+    return None, False
+
+def _appdata_cache_set(workspace_id, user_id, table, data):
+    """Set the compatibility cache. Non-critical: never break a request."""
+    try:
+        _cache_set(_appdata_cache_key(workspace_id, user_id, table), data)
+    except Exception as e:
+        try: log.warning("[appdata cache set] %s", e)
+        except Exception: pass
+    return data
+
 def _cache_inject_item(workspace_id, table, item_dict):
     """After a create, inject the new item into existing cache entries
     so the next poll (background refresh) returns instantly from cache
@@ -1326,14 +1358,24 @@ def _email_hero(title, subtitle):
 
 
 def _email_completion_banner(title, note, accent="#10b981"):
+    """Premium celebration block with inbox-safe fallback and CSS animation where supported."""
+    safe_title = _email_escape(title)
+    safe_note = _email_escape(note)
     return f'''
-      <table role="presentation" class="pt-done" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ecfdf5;border:1px solid #bbf7d0;border-radius:20px;margin:0 0 18px;box-shadow:0 10px 28px rgba(16,185,129,.12);">
-        <tr><td style="padding:20px 22px;">
+      <table role="presentation" class="pt-done" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:22px;margin:0 0 20px;box-shadow:0 14px 36px rgba(16,185,129,.14);overflow:hidden;">
+        <tr><td height="5" style="height:5px;background:linear-gradient(90deg,#22c55e,#06b6d4,#8b5cf6,#f59e0b);font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr><td style="padding:22px 24px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-            <td width="48" valign="top"><div style="width:42px;height:42px;border-radius:14px;background:{accent};color:#ffffff;text-align:center;line-height:42px;font-size:22px;font-weight:900;">✓</div></td>
-            <td style="padding-left:12px;"><div style="font-size:20px;line-height:25px;color:#064e3b;font-weight:900;letter-spacing:-.25px;">{_email_escape(title)}</div><div style="font-size:13px;line-height:20px;color:#047857;margin-top:3px;">{_email_escape(note)}</div></td>
+            <td width="54" valign="top"><div style="width:48px;height:48px;border-radius:16px;background:{accent};color:#ffffff;text-align:center;line-height:48px;font-size:25px;font-weight:900;box-shadow:0 10px 22px rgba(16,185,129,.28);">✓</div></td>
+            <td style="padding-left:14px;">
+              <div style="font-size:12px;line-height:15px;color:#047857;font-weight:900;letter-spacing:.9px;text-transform:uppercase;margin-bottom:5px;">Completed milestone</div>
+              <div style="font-size:22px;line-height:28px;color:#052e16;font-weight:950;letter-spacing:-.45px;">{safe_title}</div>
+              <div style="font-size:14px;line-height:22px;color:#047857;margin-top:5px;">{safe_note}</div>
+            </td>
           </tr></table>
-          <div style="margin-top:14px;font-size:18px;letter-spacing:6px;line-height:22px;color:#10b981;">✦ ✦ ✦</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;"><tr>
+            <td align="center" style="font-size:20px;letter-spacing:8px;line-height:24px;color:#10b981;">✦ 🎉 ✦ ⭐ ✦</td>
+          </tr></table>
         </td></tr>
       </table>'''
 
@@ -3932,12 +3974,19 @@ def send_dm():
 def dm_unread():
     ws, uid = wid(), session["user_id"]
     data, found = _appdata_cache_get(ws, uid, "dm_unread")
-    if found: return jsonify(data)
-    with get_db() as db:
-        rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
-            WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
-            (ws, uid)).fetchall()
-        return jsonify([dict(r) for r in rows])
+    if found:
+        return jsonify(data)
+    try:
+        with get_db() as db:
+            rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
+                WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
+                (ws, uid)).fetchall()
+            result = [dict(r) for r in rows]
+            _appdata_cache_set(ws, uid, "dm_unread", result)
+            return jsonify(result)
+    except Exception as e:
+        log.error("[dm/unread] %s", e)
+        return jsonify([])
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 @app.route("/api/reminders", methods=["GET"])
@@ -4452,49 +4501,59 @@ def required_hours():
 @app.route("/api/reminders/due", methods=["GET"])
 @login_required
 def due_reminders():
-    """Return reminders due now. Checks appdata cache first; only hits DB to mark fired."""
+    """Return reminders due now. Never lets background polling crash the UI."""
     ws, uid = wid(), session["user_id"]
     now_str = ts()
-    # Get all reminders from cache
     cached_reminders, found = _appdata_cache_get(ws, uid, "reminders")
     if found:
-        due = [r for r in cached_reminders
-               if not r.get("fired") and r.get("remind_at","") <= now_str]
+        due = [r for r in cached_reminders if not r.get("fired") and r.get("remind_at", "") <= now_str]
         if due:
-            ids = [r["id"] for r in due]
-            try:
-                with get_db() as db:
-                    db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-                # Bust reminders cache so next poll gets updated fired status
-                _cache_bust(ws, "reminders")
-            except Exception: pass
+            ids = [r.get("id") for r in due if r.get("id")]
+            if ids:
+                try:
+                    with get_db() as db:
+                        db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
+                    _cache_bust(ws, "reminders")
+                except Exception as e:
+                    log.warning("[reminders/due mark fired] %s", e)
         return jsonify(due)
-    # Fallback: hit DB directly
-    with get_db() as db:
-        rows = db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
-            AND fired=0 AND remind_at <= ?""", (ws, uid, now_str)).fetchall()
-        ids  = [r["id"] for r in rows]
-        if ids:
-            db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-        return jsonify([dict(r) for r in rows])
+    try:
+        with get_db() as db:
+            rows = db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
+                AND fired=0 AND remind_at <= ?""", (ws, uid, now_str)).fetchall()
+            result = [dict(r) for r in rows]
+            ids = [r["id"] for r in rows]
+            if ids:
+                db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
+            _appdata_cache_set(ws, uid, "reminders_due", result)
+            return jsonify(result)
+    except Exception as e:
+        log.error("[reminders/due] %s", e)
+        return jsonify([])
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 @app.route("/api/notifications")
 @login_required
 def get_notifs():
     ws, uid = wid(), session["user_id"]
-    # Serve from shared appdata cache — avoids a separate DB round-trip
     data, found = _appdata_cache_get(ws, uid, "notifications")
-    if found: return jsonify(data)
+    if found:
+        return jsonify(data)
     cache_key = f"notifs:{ws}:{uid}"
     cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
-    with get_db() as db:
-        rows = db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
-            ORDER BY ts DESC LIMIT 50""", (ws, uid)).fetchall()
-        result = [dict(r) for r in rows]
-        _cache_set(cache_key, result)
-        return jsonify(result)
+    if cached is not None:
+        return jsonify(cached)
+    try:
+        with get_db() as db:
+            rows = db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
+                ORDER BY ts DESC LIMIT 50""", (ws, uid)).fetchall()
+            result = [dict(r) for r in rows]
+            _cache_set(cache_key, result)
+            _appdata_cache_set(ws, uid, "notifications", result)
+            return jsonify(result)
+    except Exception as e:
+        log.error("[notifications] %s", e)
+        return jsonify([])
 
 @app.route("/api/notifications/read-all",methods=["PUT"])
 @login_required
