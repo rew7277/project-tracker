@@ -49,13 +49,44 @@ function AppLoader(){
 
 // Global abort controller — cancelled on logout to stop all in-flight requests
 let _apiAbortCtrl = new AbortController();
+const _apiNotifyError = (url, message, status) => {
+  const detail = { url, message, status };
+  window.dispatchEvent(new CustomEvent('pt:api-error', { detail }));
+  if (typeof showToast === 'function') showToast(message || 'Request failed', 'error');
+  console.warn('[API]', status || 'network', url, message);
+};
+
+const _apiRead = async (response) => {
+  const text = await response.text();
+  if (!text) return {};
+  try { return JSON.parse(text); }
+  catch { return { error: text.slice(0, 240) }; }
+};
+
+const _apiRequest = async (url, options = {}) => {
+  try {
+    const response = await fetch(url, { credentials: 'include', signal: _apiAbortCtrl.signal, ...options });
+    const data = await _apiRead(response);
+    if (!response.ok) {
+      const message = data?.error || data?.message || `HTTP ${response.status}`;
+      _apiNotifyError(url, message, response.status);
+      return { ok: false, error: message, status: response.status, data };
+    }
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') return null;
+    _apiNotifyError(url, e.message || 'Network error', 0);
+    return { ok: false, error: e.message || 'Network error', status: 0 };
+  }
+};
+
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:u=>fetch(u,{credentials:'include',signal:_apiAbortCtrl.signal}).then(r=>r.json()).catch(e=>{if(e.name==='AbortError')return null;return {};}),
-  post:(u,b)=>fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  put:(u,b)=>fetch(u,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({})),
-  del:u=>fetch(u,{method:'DELETE',credentials:'include'}).then(r=>r.json()).catch(()=>({})),
-  upload:(u,fd)=>fetch(u,{method:'POST',credentials:'include',body:fd}).then(r=>r.json()).catch(()=>({})),
+  get:u=>_apiRequest(u),
+  post:(u,b)=>_apiRequest(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  put:(u,b)=>_apiRequest(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  del:u=>_apiRequest(u,{method:'DELETE'}),
+  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
 };
 
 const STAGES={

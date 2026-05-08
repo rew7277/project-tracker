@@ -101,7 +101,7 @@ def vault_decrypt(token: str) -> str:
         return token
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session, Response, send_file, redirect
+from flask import Flask, request, jsonify, session, Response, send_file, send_from_directory, redirect
 from flask_cors import CORS
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -124,8 +124,11 @@ def _parse_db_url(url):
     p = urllib.parse.urlparse(url)
     import ssl as _ssl
     ssl_ctx = _ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = _ssl.CERT_NONE
+    # Production default: verify database TLS certificates.
+    # Set DB_SSL_VERIFY=false only for local/self-signed development databases.
+    if os.environ.get("DB_SSL_VERIFY", "true").lower() in ("0", "false", "no"):
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
     return dict(host=p.hostname, port=p.port or 5432, user=p.username,
                 password=p.password, database=p.path.lstrip("/"),
                 ssl_context=ssl_ctx)
@@ -1068,56 +1071,53 @@ def send_email(to_email, subject, body_html, workspace_id=None):
         _tb.print_exc()
         return False
 
+def _email_escape(value):
+    import html as _html
+    return _html.escape(str(value or ""), quote=True)
+
+
 def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
-    """Shared premium email shell — dark header, white card, branded footer.
-    All child templates call this so visual consistency is guaranteed across
-    every notification type without duplicating the shell HTML.
-    """
-    return f"""<!DOCTYPE html>
+    """Apple-inspired email shell, designed for real email clients."""
+    cta_url = _email_escape(cta_url or APP_URL)
+    cta_text = _email_escape(cta_text or "View Dashboard")
+    cta_color = _email_escape(cta_color or "#5a8cff")
+    return f"""<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta name="color-scheme" content="light"/>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
 <title>Project Tracker</title>
+<style>
+  @media only screen and (max-width:620px) {{
+    .pt-wrap {{ padding:20px 10px !important; }}
+    .pt-card {{ width:100% !important; border-radius:24px !important; }}
+    .pt-pad {{ padding:24px 18px !important; }}
+    .pt-title {{ font-size:26px !important; }}
+    .pt-two-col {{ display:block !important; width:100% !important; }}
+    .pt-stat {{ margin-bottom:12px !important; }}
+  }}
+  .pt-cta:hover {{ filter:brightness(1.08); }}
+</style>
 </head>
-<body style="margin:0;padding:0;background:#0f0f13;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f0f13;min-height:100vh;">
-    <tr><td align="center" style="padding:40px 16px;">
-
-      <!-- Outer card -->
-      <table width="600" cellpadding="0" cellspacing="0" border="0"
-             style="max-width:600px;width:100%;background:#18181f;border-radius:20px;
-                    overflow:hidden;box-shadow:0 32px 80px rgba(0,0,0,.6);">
-
-        <!-- ── HEADER ── -->
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg,#edf5ff 0%,#f7f1ff 45%,#f8fbff 100%);min-height:100vh;">
+    <tr><td class="pt-wrap" align="center" style="padding:42px 16px;">
+      <table role="presentation" class="pt-card" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:rgba(255,255,255,.94);border:1px solid rgba(255,255,255,.88);border-radius:32px;overflow:hidden;box-shadow:0 34px 90px rgba(31,41,55,.18), inset 0 1px 0 rgba(255,255,255,.95);">
         {header_html}
-
-        <!-- ── BODY ── -->
-        <tr><td style="padding:36px 40px 28px;">
+        <tr><td class="pt-pad" style="padding:34px 38px 16px;">
           {body_html}
-
-          <!-- CTA button -->
-          <table cellpadding="0" cellspacing="0" border="0" style="margin:32px 0 8px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:30px 0 12px;">
             <tr>
-              <td style="border-radius:12px;background:{cta_color};">
-                <a href="{cta_url}"
-                   style="display:inline-block;padding:14px 32px;color:#fff;font-size:15px;
-                          font-weight:700;text-decoration:none;letter-spacing:.3px;
-                          border-radius:12px;">{cta_text}</a>
+              <td bgcolor="{cta_color}" style="border-radius:18px;background:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 16px 32px rgba(90,140,255,.34);">
+                <a class="pt-cta" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:800;text-decoration:none;border-radius:18px;mso-padding-alt:0;">{cta_text}</a>
               </td>
             </tr>
           </table>
         </td></tr>
-
-        <!-- ── FOOTER ── -->
-        <tr><td style="background:#111118;padding:20px 40px;border-top:1px solid #2a2a35;">
-          <p style="margin:0;font-size:11px;color:#4a4a5a;text-align:center;letter-spacing:.5px;">
-            PROJECT TRACKER &nbsp;·&nbsp; Notification System &nbsp;·&nbsp;
-            <a href="{cta_url}" style="color:#5a5a7a;text-decoration:none;">Manage preferences</a>
-          </p>
+        <tr><td style="padding:22px 38px 30px;background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(245,248,255,.92));border-top:1px solid rgba(148,163,184,.18);">
+          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#7b8496;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#5a8cff;text-decoration:none;font-weight:700;">Manage preferences</a></p>
         </td></tr>
-
       </table>
     </td></tr>
   </table>
@@ -1126,28 +1126,32 @@ def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
 
 
 def _header_strip(accent, icon, label):
-    """Thin coloured accent bar + icon + label for the email header."""
+    """Premium header using email-safe emoji icons instead of SF Symbols."""
+    accent = _email_escape(accent or "#5a8cff")
+    icon = _email_escape(icon or "✨")
+    label = _email_escape(label or "Project Update")
     return f"""
-    <tr><td>
-      <!-- Accent bar -->
-      <div style="height:4px;background:linear-gradient(90deg,{accent},transparent);"></div>
-      <!-- Logo row -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="padding:24px 40px 20px;">
-        <tr>
-          <td style="vertical-align:middle;">
-            <span style="font-size:22px;font-weight:900;color:#fff;
-                         letter-spacing:-1px;">Project<span style="color:{accent};">Tracker</span></span>
-          </td>
-          <td align="right" style="vertical-align:middle;">
-            <span style="font-size:11px;color:#4a4a5a;letter-spacing:1px;text-transform:uppercase;">{label}</span>
-          </td>
-        </tr>
+    <tr><td style="background:linear-gradient(135deg,#0b1225 0%,#142a5f 45%,#6d4aff 100%);padding:0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr><td style="padding:28px 34px 26px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td style="vertical-align:middle;">
+                <div style="display:inline-block;width:44px;height:44px;border-radius:16px;background:rgba(255,255,255,.16);text-align:center;line-height:44px;font-size:22px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25);">{icon}</div>
+              </td>
+              <td style="vertical-align:middle;padding-left:14px;">
+                <div style="font-size:23px;line-height:28px;font-weight:900;letter-spacing:-.7px;color:#ffffff;">Project<span style="color:#bcd7ff;">Tracker</span></div>
+                <div style="font-size:12px;line-height:16px;color:rgba(255,255,255,.72);font-weight:700;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
+              </td>
+              <td align="right" style="vertical-align:middle;">
+                <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.14);color:#ffffff;font-size:12px;font-weight:800;">Live Summary</div>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
       </table>
-      <!-- Divider -->
-      <div style="height:1px;background:#2a2a35;margin:0 40px;"></div>
+      <div style="height:5px;background:linear-gradient(90deg,{accent},#9b5cff,#34d3ff);"></div>
     </td></tr>"""
-
 
 def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
     """Premium email: task assigned to user."""
@@ -1811,6 +1815,15 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_ws_due ON tasks(workspace_id, due, stage)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_ws_created ON tasks(workspace_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_ws_assignee_due ON tasks(workspace_id, assignee, due)",
+            "CREATE INDEX IF NOT EXISTS idx_projects_ws_created ON projects(workspace_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_ws_created ON messages(workspace_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_ws_task_created ON messages(workspace_id, task_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_ws_user_ts ON notifications(workspace_id, user_id, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_direct_messages_ws_recipient_created ON direct_messages(workspace_id, recipient, created)",
+            "CREATE INDEX IF NOT EXISTS idx_reminders_ws_user_due ON reminders(workspace_id, user_id, remind_at, fired)",
             "ALTER TABLE workspaces ADD COLUMN plan TEXT DEFAULT 'starter'",
             "ALTER TABLE workspaces ADD COLUMN suspended INTEGER DEFAULT 0",
             # ── Stripe billing ──
@@ -5858,316 +5871,28 @@ def emergency_reset_2fa():
 
 @app.route("/static/<path:fn>")
 def serve_static(fn):
-    """Serve static files (frontend.js, landing.html, etc.) from app directory."""
-    # Try every plausible location for the file
-    locations = [
-        os.path.join(BASE_DIR, fn),                # Same directory as app.py  ← most common
-        os.path.join(BASE_DIR, "static", fn),      # static/ subdirectory
-        os.path.join(JS_DIR, fn),                  # pf_static/ (downloaded libs)
-        os.path.join(BASE_DIR, "pf_static", fn),   # explicit pf_static path
-        os.path.join(BASE_DIR, "..", fn),           # Parent directory
-        os.path.join("/app", fn),                  # Railway /app root
-        os.path.join("/app", "static", fn),        # Railway /app/static
-    ]
+    """Serve only approved static assets; never expose BASE_DIR wholesale."""
+    from werkzeug.utils import safe_join
+    if not fn or fn.startswith(("/", "\\")) or ".." in fn.split("/"):
+        return jsonify({"error": "Invalid static path"}), 400
+    blocked_ext = {".py", ".db", ".sqlite", ".sqlite3", ".env", ".pem", ".key", ".crt", ".json", ".log", ".bak", ".zip"}
+    _, ext = os.path.splitext(fn.lower())
+    if ext in blocked_ext:
+        return jsonify({"error": "Static file type not allowed"}), 403
+    if fn in {"frontend.js"}:
+        path = safe_join(BASE_DIR, fn)
+        if path and os.path.isfile(path):
+            return send_from_directory(BASE_DIR, fn, max_age=604800)
+    for root in [os.path.join(BASE_DIR, "static"), JS_DIR, os.path.join(BASE_DIR, "pf_static")]:
+        path = safe_join(root, fn)
+        if path and os.path.isfile(path):
+            return send_from_directory(root, fn, max_age=604800 if ext in (".js", ".css", ".woff2", ".png", ".jpg", ".jpeg", ".svg", ".webp") else 0)
+    if fn == "frontend.js":
+        err_js = """console.error('[Project Tracker] frontend.js not found on server.');
+document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;padding:40px;background:#0a0618;min-height:100vh\"><h2>⚠ frontend.js missing</h2><p>Deploy frontend.js to the same folder as app.py or /static/frontend.js.</p></div>';"""
+        return Response(err_js, mimetype="application/javascript", headers={"Cache-Control": "no-cache"})
+    return "", 404
 
-    path = None
-    for loc in locations:
-        if os.path.exists(loc) and os.path.isfile(loc):
-            path = loc
-            break
-
-    if not path:
-        # Special case: if frontend.js is missing, return a helpful JS error
-        # instead of an HTML 404 (which causes the MIME-type rejection)
-        if fn == "frontend.js":
-            err_js = (
-                "console.error('[Project Tracker] frontend.js not found on server. "
-                "Make sure frontend.js is deployed in the same directory as app.py.');"
-                "document.body.innerHTML='<div style=\"color:#f87171;font-family:monospace;"
-                "padding:40px;background:#0a0618;min-height:100vh\">"
-                "<h2>⚠ frontend.js missing</h2>"
-                "<p>Deploy frontend.js to the same folder as app.py on your server.</p>"
-                "</div>';"
-            )
-            return Response(err_js, mimetype="application/javascript",
-                            headers={"Cache-Control": "no-cache"})
-        print(f"  ⚠ Static file not found: {fn}")
-        print(f"     Searched: {locations}")
-        return "", 404
-
-    import mimetypes as _mt
-    mime = _mt.guess_type(fn)[0] or "application/octet-stream"
-    with open(path, "rb") as fh:
-        data = fh.read()
-    resp = Response(data, mimetype=mime)
-    resp.headers["Cache-Control"] = "public, max-age=604800, immutable" if fn.endswith(".js") else "no-cache"
-    return resp
-
-@app.route("/js/<path:fn>")
-def serve_js(fn):
-    path=os.path.join(JS_DIR,fn)
-    if os.path.exists(path) and os.path.getsize(path)>1000:
-        mime,_=mimetypes.guess_type(fn)
-        return Response(open(path,"rb").read(),mimetype=mime or "application/javascript",
-                        headers={"Cache-Control":"public,max-age=86400"})
-    CDN={
-        "react.min.js":     "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
-        "react-dom.min.js": "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
-        "prop-types.min.js":"https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js",
-        "recharts.min.js":  "https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js",
-        "htm.min.js":       "https://unpkg.com/htm@3.1.1/dist/htm.js",
-    }
-    if fn in CDN:
-        from flask import redirect
-        return redirect(CDN[fn], code=302)
-    return "Not Found", 404
-
-@app.route("/sw.js")
-def serve_sw():
-    """Service Worker for background push notifications and offline caching."""
-    sw_code = r"""
-// Project Tracker Service Worker v3
-const CACHE = 'pf-v3';
-const ICON = '/favicon.ico';
-
-// Install & cache shell assets
-self.addEventListener('install', e => {
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', e => {
-  // Delete ALL old caches so stale requests (e.g. /${imgSrc}) are never replayed
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => clients.claim())
-  );
-});
-
-// ── Push notification handler ────────────────────────────────────────────────
-self.addEventListener('push', e => {
-  let data = {};
-  try { data = e.data ? e.data.json() : {}; } catch(err) {}
-  const title  = data.title  || 'Project Tracker';
-  const body   = data.body   || '';
-  const tag    = data.tag    || 'pf-notif';
-  const url    = data.url    || '/';
-  const icon   = data.icon   || ICON;
-  const badge  = data.badge  || ICON;
-  const opts = {
-    body, tag, icon, badge,
-    vibrate: [200, 100, 200],
-    requireInteraction: data.requireInteraction || false,
-    data: { url },
-    actions: [
-      { action: 'open',    title: 'Open'    },
-      { action: 'dismiss', title: 'Dismiss' }
-    ]
-  };
-  e.waitUntil(self.registration.showNotification(title, opts));
-});
-
-// ── Notification click handler ───────────────────────────────────────────────
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  if (e.action === 'dismiss') return;
-  const tag = (e.notification.data && e.notification.data.tag) || null;
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
-      for (const c of cs) {
-        if (c.url.includes(self.location.origin) && 'focus' in c) {
-          c.focus();
-          c.postMessage({ type: 'PF_NOTIF_CLICK', tag });
-          return;
-        }
-      }
-      if (clients.openWindow) return clients.openWindow('/');
-    })
-  );
-});
-
-// ── Background sync — poll notifications every 30s when visible ─────────────
-self.addEventListener('message', e => {
-  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
-});
-
-// Periodic background fetch (Chrome 80+ with periodicSync)
-self.addEventListener('periodicsync', e => {
-  if (e.tag === 'pf-poll') {
-    e.waitUntil(pollNotifications());
-  }
-});
-
-async function pollNotifications() {
-  try {
-    const r = await fetch('/api/notifications', { credentials: 'include' });
-    if (!r.ok) return;
-    const notifs = await r.json();
-    const unread = notifs.filter(n => !n.read);
-    if (unread.length > 0) {
-      const badge = navigator.setAppBadge || null;
-      if (badge) navigator.setAppBadge(unread.length).catch(()=>{});
-    }
-  } catch(e) {}
-}
-"""
-    return Response(sw_code, mimetype="application/javascript",
-                    headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
-
-@app.route("/manifest.json")
-def serve_manifest():
-    """PWA manifest — full desktop installability."""
-    manifest = {
-        "name": "Project Tracker",
-        "short_name": "PFPro",
-        "description": "AI-powered team project management — tasks, huddles, timeline, tickets & more.",
-        "start_url": "/dashboard",
-        "scope": "/",
-        "display": "standalone",
-        "display_override": ["window-controls-overlay", "standalone"],
-        "background_color": "#ffffff",
-        "theme_color": "#1d4ed8",
-        "orientation": "landscape-primary",
-        "categories": ["productivity", "business", "collaboration"],
-        "lang": "en",
-        "icons": [
-            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
-            {"src": "/favicon.ico", "sizes": "48x48", "type": "image/x-icon"}
-        ],
-        "shortcuts": [
-            {"name": "Dashboard", "short_name": "Dashboard", "url": "/dashboard", "description": "Go to your dashboard"},
-            {"name": "New Task", "short_name": "New Task", "url": "/tasks", "description": "Create a new task"},
-            {"name": "Projects", "short_name": "Projects", "url": "/projects", "description": "View all projects"}
-        ],
-        "screenshots": [
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "wide", "label": "Project Tracker Dashboard"}
-        ]
-    }
-    return jsonify(manifest)
-
-@app.route("/favicon.ico")
-@app.route("/favicon.png")
-def favicon():
-    """Serve the Project Tracker blue favicon — same as icon-192 PNG."""
-    import base64
-    from flask import Response
-    # Exact same blue Project Tracker icon as icon-192
-    png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAEuklEQVR4nO3UQQ5TSRAEUS7ClTj/3IZZITWDRgJsV2b/eiHF3r8rw1++AAAAAAAAAAAAAAAAAAAAAAAAhPj67Z/vnDV9cxykx7DR9M1xkB7DRtM3x0F6DL/r75D+jQK4kPQYXh39jTGkb46D9BjePfwbQkjfHAfpMXxy/K0RpG+Og/QYPj3+xgjSN8dBegwT42+LIH1zHKTHMDX+pgjSN8dBegwCQJT0GBKkvzl9cxykxyAARNk2/oYI0jfHgQAEsBoBCGA1G8f/AwFAAALYjQAEsBoBCGA1AhDAagQggNWkRpCOIPnd6ZvjQAACWI0ABLCa5BBSEaS/OX1zHKTHIABESY9hOoL0twqgjPQYBIAo6TFMRpD+RgEUkh7DVATpbxNAKekxTESQ/iYBFJMew6cjSH+LAMpJj0EAS0kfodmnB9CiAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKPOTpL+tUQEUOUH6G9sUQJECmFcAJU6S/tYmBVBggvQ3tyiAAgWQUwBhk6S/vUEBhBWAAFYrAAGstYH0G6QVgABWK4Clw/8v6TcRwBKbSb+NAB7sTaTfSgAP8mbSbyeAy30C6TcUwIU+kfSbCuACN5B+YwGUuon0WwugyM2k314Ahl9B+hYCMPwK0rcRgPHHSd9IAIZfQfpmAjD8CtI3FIDxx0nfUgCGX0H6tgIw/ArStxbARcP/k997+7cJYGDMtwxkS+Sv3E8AFxz4b/jEP93TEICjerPvr7/ZlQE8jYnhe8OHBPAkEsP3nhcH8CTSw/euAoiQHrv3vTSA20mP21tfHMDtpActAgFESI94cwgCCJIerRAeFMBNpEcqhJ8RwCDpYYrgVwQwQHqMQvh/BPBB0uNrshUBfIj04BptRABvJj2yG2xCAG8iPaobbUAAQ4/Ie28ngDc8Iu+9nQDe8Ii893YCePEBeff96gNIPmJ6PE+w/XYCePEBeff9rggg8Yjp0TzJ5tsJ4MUH5N33uyaAqUdMD+XJNt7vqgAmHjE9kifbeLvrAvjUQ6bHscmm+10ZwLsfMT2IjbbcLxpAC+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNAQAAAAAAAAAAAAAAAAAAAGAx/wJoKCsUOqYWXQAAAABJRU5ErkJggg=="
-    png_data = base64.b64decode(png_b64)
-    return Response(png_data, mimetype='image/png',
-        headers={'Cache-Control':'public,max-age=3600','Content-Disposition':'inline; filename="favicon.png"'})
-
-@app.route("/icon-192.png")
-def icon_192():
-    """Real PNG icon — 192x192 blue app icon."""
-    import base64
-    png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAEuklEQVR4nO3UQQ5TSRAEUS7ClTj/3IZZITWDRgJsV2b/eiHF3r8rw1++AAAAAAAAAAAAAAAAAAAAAAAAhPj67Z/vnDV9cxykx7DR9M1xkB7DRtM3x0F6DL/r75D+jQK4kPQYXh39jTGkb46D9BjePfwbQkjfHAfpMXxy/K0RpG+Og/QYPj3+xgjSN8dBegwT42+LIH1zHKTHMDX+pgjSN8dBegwCQJT0GBKkvzl9cxykxyAARNk2/oYI0jfHgQAEsBoBCGA1G8f/AwFAAALYjQAEsBoBCGA1AhDAagQggNWkRpCOIPnd6ZvjQAACWI0ABLCa5BBSEaS/OX1zHKTHIABESY9hOoL0twqgjPQYBIAo6TFMRpD+RgEUkh7DVATpbxNAKekxTESQ/iYBFJMew6cjSH+LAMpJj0EAS0kfodmnB9CiAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKFUAMwqgVAHMKIBSBTCjAEoVwIwCKPOTpL+tUQEUOUH6G9sUQJECmFcAJU6S/tYmBVBggvQ3tyiAAgWQUwBhk6S/vUEBhBWAAFYrAAGstYH0G6QVgABWK4Clw/8v6TcRwBKbSb+NAB7sTaTfSgAP8mbSbyeAy30C6TcUwIU+kfSbCuACN5B+YwGUuon0WwugyM2k314Ahl9B+hYCMPwK0rcRgPHHSd9IAIZfQfpmAjD8CtI3FIDxx0nfUgCGX0H6tgIw/ArStxbARcP/k997+7cJYGDMtwxkS+Sv3E8AFxz4b/jEP93TEICjerPvr7/ZlQE8jYnhe8OHBPAkEsP3nhcH8CTSw/euAoiQHrv3vTSA20mP21tfHMDtpActAgFESI94cwgCCJIerRAeFMBNpEcqhJ8RwCDpYYrgVwQwQHqMQvh/BPBB0uNrshUBfIj04BptRABvJj2yG2xCAG8iPaobbUAAQ4/Ie28ngDc8Iu+9nQDe8Ii893YCePEBeff96gNIPmJ6PE+w/XYCePEBeff9rggg8Yjp0TzJ5tsJ4MUH5N33uyaAqUdMD+XJNt7vqgAmHjE9kifbeLvrAvjUQ6bHscmm+10ZwLsfMT2IjbbcLxpAC+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNcZAew0bTN8dBegwbTd8cB+kxbDR9cxykx7DR9M1xkB7DRtM3x0F6DBtN3xwH6TFsNH1zHKTHsNH0zXGQHsNG0zfHQXoMG03fHAfpMWw0fXMcpMew0fTNAQAAAAAAAAAAAAAAAAAAAGAx/wJoKCsUOqYWXQAAAABJRU5ErkJggg=="
-    png_data = base64.b64decode(png_b64)
-    return Response(png_data, mimetype='image/png',
-        headers={'Cache-Control':'public,max-age=86400'})
-
-@app.route("/icon-512.png")
-def icon_512():
-    """Real PNG icon — 512x512 blue app icon."""
-    import base64
-    png_b64 = "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TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbqP6TaXb1bdzhXqI0u02qt9Uul19O1eohyjdbLP6baWb1bdzhXqI0q2eoH5j6Vb17VyhHqJ0oyep31q6UX07V6iHKL26J6rfXHp19e1coR6i9MqerH576ZXVt3OFeojSq8J/ArS3+nauUA9RekX8Wz0L6RXVt3OFeojS6fineibS6erbuUI9ROl0/FM9E+l09e1c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"
-    png_data = base64.b64decode(png_b64)
-    return Response(png_data, mimetype='image/png',
-        headers={'Cache-Control':'public,max-age=86400'})
-
-# ── Main Application Routes ────────────────────────────────────────────────────
-@app.route("/", methods=["GET", "HEAD"])
-def index():
-    """Serve the landing page for non-authenticated users."""
-    # Health-check / uptime probes use HEAD — respond instantly, no DB needed
-    if request.method == "HEAD":
-        return "", 200
-
-    if "user_id" in session and session.get("workspace_id"):
-        uid = session["user_id"]
-        ws_id = session["workspace_id"]
-        login_at = session.get("login_at", "")
-        # CRITICAL: Verify the session is not invalidated (post-logout)
-        # Without this check, a race between logout + redirect causes ghost dashboard:
-        # logout fires (async), browser navigates to /, old session cookie still sent,
-        # server sees user_id in session → 302 to dashboard → user sees dashboard flash.
-        if login_at:
-            cached_logout = _get_logged_out_at(uid)
-            if cached_logout is None:
-                try:
-                    rows2 = _raw_pg("SELECT logged_out_at FROM users WHERE id=?", (uid,), fetch=True)
-                    cached_logout = rows2[0].get("logged_out_at","") if rows2 else ""
-                    _set_logged_out_at(uid, cached_logout)
-                except Exception:
-                    cached_logout = ""
-            if cached_logout and login_at < cached_logout:
-                # Session was invalidated — clear it and show login
-                session.clear()
-                return _serve_html()
-        # Use slug cached in session — avoids a DB query on every / visit
-        cached_slug = session.get("_ws_slug")
-        if cached_slug:
-            return redirect(f"/{cached_slug}/{ws_id}/dashboard", code=302)
-        try:
-            import re as _re2
-            rows = _raw_pg(
-                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
-                (ws_id,), fetch=True
-            )
-            ws_row = rows[0] if rows else None
-            if ws_row:
-                slug = ws_row.get("workspace_slug") or \
-                       _re2.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or \
-                       "workspace"
-                session["_ws_slug"] = slug   # cache in session for future visits
-                return redirect(f"/{slug}/{ws_id}/dashboard", code=302)
-        except Exception:
-            pass
-        return _serve_html()
-    action = request.args.get("action", "")
-    if action in ("login", "register"):
-        return _serve_html()
-    return _serve_landing()
-
-@app.route("/app")
-@app.route("/dashboard")
-@app.route("/projects")
-@app.route("/tasks")
-@app.route("/messages")
-@app.route("/channels")
-@app.route("/dm")
-@app.route("/settings")
-@app.route("/profile")
-@app.route("/analytics")
-@app.route("/tickets")
-@app.route("/timeline")
-@app.route("/reminders")
-@app.route("/team")
-@app.route("/productivity")
-@app.route("/ai-docs")
-@app.route("/timesheet")
-@app.route("/vault")
-def serve_app():
-    """Serve the main application template, redirecting to ws-scoped URL if logged in."""
-    if "user_id" in session and session.get("workspace_id"):
-        ws_id = session["workspace_id"]
-        # Determine the page being requested
-        path_segment = request.path.strip("/") or "dashboard"
-        try:
-            import re as _re
-            with get_db() as db:
-                ws_row = db.execute(
-                    "SELECT name, workspace_slug FROM workspaces WHERE id=?", (ws_id,)
-                ).fetchone()
-            if ws_row:
-                slug = ws_row["workspace_slug"] or                        _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                return redirect(f"/{slug}/{ws_id}/{path_segment}", code=302)
-        except Exception:
-            pass
-    return _serve_html()
 
 @app.route("/password-generator")
 def password_generator_page():
@@ -6206,12 +5931,31 @@ def admin_security_stats():
         with _BAN_LOCK:
             banned_ips = [ip for ip, exp in _BAN_LIST.items() if now < exp]
             hits = dict(_BAN_HITS)
+    totp_enabled = totp_disabled = 0
+    no_totp = []
+    try:
+        with get_db() as db:
+            totp_enabled = db.execute("SELECT COUNT(*) FROM users WHERE totp_verified = 1").fetchone()[0]
+            totp_disabled = db.execute("SELECT COUNT(*) FROM users WHERE totp_verified IS NULL OR totp_verified = 0").fetchone()[0]
+            no_totp = db.execute("""
+                SELECT u.id, u.name, u.email, u.role, w.name AS workspace_name
+                FROM users u
+                LEFT JOIN workspaces w ON w.id = u.workspace_id
+                WHERE u.totp_verified IS NULL OR u.totp_verified = 0
+                ORDER BY u.created DESC LIMIT 100
+            """).fetchall()
+    except Exception as e:
+        log.warning("[security-stats] TOTP stats unavailable: %s", e)
+
     return jsonify({
         "banned_ips": banned_ips,
         "banned_count": len(banned_ips),
         "pending_bans": hits,
         "ban_threshold": _BAN_THRESH,
         "ban_ttl_hours": _BAN_TTL // 3600,
+        "totp_enabled": totp_enabled,
+        "totp_disabled": totp_disabled,
+        "no_totp": [dict(r) for r in no_totp],
     })
 
 @app.route("/api/admin/unban-ip", methods=["POST"])
@@ -6597,8 +6341,9 @@ def _audit(action, target="", detail=""):
     except Exception as _ae:
         log.error("[audit] write error: %s", _ae)
 
-@app.route("/api/admin/security-stats")
-def admin_api_security_stats():
+@app.route("/api/admin/totp-security-stats")
+@login_required
+def admin_api_totp_security_stats():
     if not _require_admin():
         return jsonify({"error": "Unauthorized"}), 401
     try:
@@ -8473,6 +8218,125 @@ def openapi_docs():
         }
     }
     return jsonify(spec)
+
+
+# ── Weekly / bi-weekly Apple-inspired status summary emails ──────────────────
+def _pct_bar(percent, color="#5a8cff"):
+    try:
+        pct = max(0, min(100, int(percent or 0)))
+    except Exception:
+        pct = 0
+    return f"""<div style="height:10px;background:#e9eef7;border-radius:999px;overflow:hidden;box-shadow:inset 0 1px 2px rgba(31,41,55,.08);"><div style="width:{pct}%;height:10px;background:linear-gradient(90deg,{color},#9b5cff);border-radius:999px;"></div></div>"""
+
+
+def _email_stat_card(label, value, note="", color="#5a8cff"):
+    return f"""<td class="pt-two-col" width="50%" style="padding:6px;vertical-align:top;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="pt-stat" style="background:linear-gradient(180deg,#ffffff,#f7faff);border:1px solid #e7edf8;border-radius:22px;box-shadow:0 14px 30px rgba(31,41,55,.08);">
+        <tr><td style="padding:18px 18px 16px;">
+          <div style="font-size:12px;color:#7b8496;font-weight:800;letter-spacing:.5px;text-transform:uppercase;">{_email_escape(label)}</div>
+          <div style="margin-top:8px;font-size:30px;line-height:34px;font-weight:900;color:#111827;letter-spacing:-.8px;">{_email_escape(value)}</div>
+          <div style="margin-top:6px;font-size:12px;line-height:17px;color:{_email_escape(color)};font-weight:800;">{_email_escape(note)}</div>
+        </td></tr>
+      </table>
+    </td>"""
+
+
+def _build_status_summary_email(user, tasks, role="individual", period_label="Weekly"):
+    name = user.get("name") or user.get("email") or "there"
+    total = len(tasks)
+    done = sum(1 for t in tasks if (t.get("stage") or "").lower() in ("completed", "production", "done"))
+    blocked = sum(1 for t in tasks if (t.get("stage") or "").lower() == "blocked")
+    avg = round(sum(int(t.get("pct") or 0) for t in tasks) / total) if total else 0
+    today = now_ist().strftime("%Y-%m-%d")
+    overdue = sum(1 for t in tasks if (t.get("due") or "") and (t.get("due") or "")[:10] < today and (t.get("stage") or "").lower() not in ("completed", "production", "done"))
+
+    task_rows = ""
+    for t in tasks[:8]:
+        title = _email_escape(t.get("title") or "Untitled task")
+        project = _email_escape(t.get("project") or "No project")
+        due = _email_escape(t.get("due") or "No deadline")
+        stage = _email_escape(t.get("stage") or "Backlog")
+        pct = int(t.get("pct") or 0)
+        task_rows += f"""<tr><td style="padding:14px 0;border-bottom:1px solid #edf2fb;">
+          <table role="presentation" width="100%"><tr>
+            <td style="padding-right:12px;">
+              <div style="font-size:15px;font-weight:900;color:#111827;line-height:20px;">{title}</div>
+              <div style="font-size:12px;color:#7b8496;line-height:18px;">{project} · {stage} · Due {due}</div>
+              <div style="margin-top:9px;">{_pct_bar(pct)}</div>
+            </td>
+            <td width="46" align="right" style="font-size:14px;font-weight:900;color:#5a8cff;vertical-align:top;">{pct}%</td>
+          </tr></table>
+        </td></tr>"""
+    if not task_rows:
+        task_rows = '<tr><td style="padding:18px;color:#7b8496;background:#f8fbff;border-radius:18px;">No active tasks for this period.</td></tr>'
+
+    manager_extra = ""
+    if role.lower() in ("admin", "manager"):
+        manager_extra = f"""
+        <h2 style="margin:30px 0 12px;font-size:20px;line-height:26px;color:#111827;letter-spacing:-.3px;">Manager overview</h2>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          {_email_stat_card("Team KPIs", f"{avg}%", "average completion")}
+          {_email_stat_card("Blockers", blocked, "needs attention", "#ff3b30")}
+        </tr></table>"""
+
+    lead_extra = ""
+    if role.lower() in ("admin", "manager", "teamlead", "team lead"):
+        risk = "High" if blocked or overdue else "Low"
+        lead_extra = f"""
+        <h2 style="margin:30px 0 12px;font-size:20px;line-height:26px;color:#111827;letter-spacing:-.3px;">Team lead view</h2>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#ffffff,#f8fbff);border:1px solid #e7edf8;border-radius:24px;box-shadow:0 14px 30px rgba(31,41,55,.08);">
+          <tr><td style="padding:18px;">
+            <div style="font-size:13px;font-weight:900;color:#111827;margin-bottom:8px;">Milestones & burndown</div>
+            {_pct_bar(avg, "#34c759")}
+            <div style="margin-top:10px;font-size:12px;color:#7b8496;">Risk level: <strong style="color:#ff9500;">{risk}</strong> · Overdue: {overdue} · Completed: {done}/{total}</div>
+          </td></tr>
+        </table>"""
+
+    body = f"""
+      <h1 class="pt-title" style="margin:0 0 8px;font-size:32px;line-height:38px;color:#111827;letter-spacing:-1px;">{_email_escape(period_label)} status summary</h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:23px;color:#5d6678;">Hi <strong style="color:#111827;">{_email_escape(name)}</strong>, here is your personalized project/task snapshot with progress, deadlines, blockers and next actions.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+        {_email_stat_card("Tasks", total, "active items")}
+        {_email_stat_card("Progress", f"{avg}%", "overall completion")}
+      </tr><tr>
+        {_email_stat_card("Completed", done, "shipped")}
+        {_email_stat_card("Overdue", overdue, "deadline risk", "#ff3b30")}
+      </tr></table>
+      <h2 style="margin:30px 0 8px;font-size:20px;line-height:26px;color:#111827;letter-spacing:-.3px;">Individual tasks</h2>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #e7edf8;border-radius:24px;padding:4px 18px;box-shadow:0 14px 30px rgba(31,41,55,.08);">{task_rows}</table>
+      {manager_extra}
+      {lead_extra}
+    """
+    return _email_base(_header_strip("#5a8cff", "📊", "Status Summary"), body, APP_URL, "View Dashboard", "#5a8cff")
+
+
+def send_status_summary_digest(user_id, frequency="weekly"):
+    """Send one personalized weekly/bi-weekly status summary email. Call from cron/job runner."""
+    with get_db() as db:
+        user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not user:
+            return False
+        rows = db.execute("""
+            SELECT * FROM tasks
+            WHERE workspace_id=? AND (assignee=? OR assignee=? OR assignee='')
+            ORDER BY due IS NULL, due ASC, created DESC
+            LIMIT 50
+        """, (user["workspace_id"], user["id"], user["name"])).fetchall()
+    html = _build_status_summary_email(dict(user), [dict(r) for r in rows], user.get("role", "individual"), "Bi-weekly" if frequency == "bi-weekly" else "Weekly")
+    subject = f"📊 {('Bi-weekly' if frequency == 'bi-weekly' else 'Weekly')} Project Tracker status summary"
+    return send_email(user["email"], subject, html, user["workspace_id"])
+
+@app.route("/api/email/status-summary", methods=["POST"])
+@login_required
+def api_send_status_summary_digest():
+    """Manual trigger for testing weekly/bi-weekly dynamic email summaries."""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id") or session.get("user_id")
+    frequency = data.get("frequency", "weekly")
+    if frequency not in ("weekly", "bi-weekly"):
+        frequency = "weekly"
+    ok = send_status_summary_digest(user_id, frequency)
+    return jsonify({"ok": bool(ok)})
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DB MIGRATIONS FOR NEW TABLES
