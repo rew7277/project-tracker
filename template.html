@@ -377,7 +377,7 @@ function AuthScreen({onLogin}){
       const p=new URLSearchParams(window.location.search);
       if(p.get('google_auth')==='1'){
         fetch('/api/auth/me').then(r=>r.ok?r.json():null).then(u=>{
-          if(u&&u.id){history.replaceState(null,'','/');onLogin(u);}
+          if(u&&u.id){history.replaceState(null,'',workspaceBasePath(u));onLogin(u);}
         }).catch(()=>{});
       }
     }catch(e){}
@@ -2471,14 +2471,14 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      history.pushState(null,'','/projects/'+slug);
+      history.pushState(null,'',workspaceBasePath(cu)+'projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      if(window.location.pathname.startsWith('/projects/')){
-        history.pushState(null,'','/projects');
+      if(routeViewFromPath(['projects'])==='projects'){
+        history.pushState(null,'',workspaceBasePath(cu)+'projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2810,7 +2810,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       if(t.project)setPid(t.project);
       setShowResolved(true);
       onClearInitialTask&&onClearInitialTask();
-      try{history.replaceState(null,'','/tasks');}catch(e){}
+      try{history.replaceState(null,'',workspaceBasePath(cu)+'tasks');}catch(e){}
     };
     const existing=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
     if(existing){openTask(existing);return;}
@@ -4887,7 +4887,7 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
       setDetailTicket(t);
       setShowResolved(true);
       onClearInitialTicket&&onClearInitialTicket();
-      try{history.replaceState(null,'','/tickets');}catch(e){}
+      try{history.replaceState(null,'',workspaceBasePath(cu)+'tickets');}catch(e){}
     }
   },[initialTicketId,tickets]);
   useEffect(()=>{load();},[load]);
@@ -8154,6 +8154,29 @@ function VaultView({cu}){
 
 
 
+function workspaceSlugFromUser(u){
+  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
+}
+function workspaceBasePath(u){return '/'+workspaceSlugFromUser(u)+'/';}
+function pathParts(){try{return window.location.pathname.split('/').filter(Boolean);}catch(e){return [];}}
+function routeViewFromPath(validViews){
+  try{
+    const parts=pathParts();
+    if(!parts.length)return '';
+    if(validViews.includes(parts[0]))return parts[0];
+    if(parts.length>=2&&validViews.includes(parts[1]))return parts[1];
+  }catch(e){}
+  return '';
+}
+function projectIdFromPath(){
+  try{
+    const parts=pathParts();
+    if(parts[0]==='projects'&&parts[1])return parts[1];
+    if(parts.length>=3&&parts[1]==='projects')return parts[2];
+  }catch(e){}
+  return '';
+}
+
 function deepLinkFromSearch(){
   try{
     const sp=new URLSearchParams(window.location.search);
@@ -8186,18 +8209,15 @@ function App(){
       if(dl.taskId)setInitialTaskId(dl.taskId);
       if(dl.ticketId)setInitialTicketId(dl.ticketId);
       if(dl.projectId)setInitialProjectId(dl.projectId);
-      if(p.startsWith('/projects/')&&p.length>10){
-        const pid=p.split('/')[2];
-        if(pid)setInitialProjectId(pid);
-        setView('projects');
-      }
+      const pid=projectIdFromPath();
+      if(pid){setInitialProjectId(pid);setView('projects');}
     }catch(e){}
   },[]);
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
+      const p=routeViewFromPath(Object.keys(VIEW_T));
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
     }catch(e){}
@@ -8206,7 +8226,7 @@ function App(){
     try{
       const dl=deepLinkFromSearch();
       if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      const p=routeViewFromPath(VALID_VIEWS);
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
@@ -8226,7 +8246,7 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        history.pushState(null,'',workspaceBasePath(cu)+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -8235,7 +8255,7 @@ function App(){
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+        const p=routeViewFromPath(VALID_VIEWS);
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -8391,10 +8411,10 @@ function App(){
       const bustParam=bust?'bust=1':'';
       const teamParam=tCtx?'team_id='+tCtx:'';
       const qs=[teamParam,bustParam].filter(Boolean).join('&');
-      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
+      const appDataUrl='/api/dashboard/bootstrap'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] app-data failed; keeping current screen to avoid toast/refresh loops', d && d.error);
+        console.warn('[Load] dashboard bootstrap failed; keeping current screen to avoid toast/refresh loops', d && d.error);
         if(d && (d.status===401 || d.status===403)){
           setCu(null);
           setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
@@ -8486,7 +8506,7 @@ function App(){
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
   // NOTE: The 30s projects+tasks interval has been removed.
-  // /api/app-data (called by load()) already fetches both on every poll.
+  // /api/dashboard/bootstrap (called by load()) already fetches both on every poll.
   // Additionally, the SSE stream now triggers load() immediately on any
   // task/project mutation — so this extra interval was both redundant and
   // doubling DB load (2 extra queries every 30s per connected user).

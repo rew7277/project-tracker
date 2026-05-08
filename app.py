@@ -1210,6 +1210,43 @@ def _email_abs_url(path_or_url=""):
     return base + target
 
 
+_RESERVED_WORKSPACE_SLUGS = {
+    "api", "static", "favicon.ico", "manifest.json", "sw.js",
+    "dashboard", "login", "app", "admin", "about", "privacy", "terms",
+    "security", "password-generator", "onboarding", "projects", "tasks",
+    "tickets", "messages", "dm", "channels", "settings", "assets"
+}
+
+
+def _workspace_slug_for_id(workspace_id):
+    """Resolve a stable workspace slug for workspace-scoped links."""
+    try:
+        with get_db() as db:
+            ws = db.execute(
+                "SELECT name, workspace_slug FROM workspaces WHERE id=?",
+                (workspace_id,)
+            ).fetchone()
+        if not ws:
+            return "workspace"
+        slug = (ws["workspace_slug"] or "").strip()
+        return slug or _slugify(ws["name"] or "workspace")
+    except Exception:
+        return "workspace"
+
+
+def _workspace_link(workspace_id, target=""):
+    """Build a workspace-scoped app URL, e.g. /fsbl/?action=task&id=T-1."""
+    slug = _workspace_slug_for_id(workspace_id)
+    target = str(target or "")
+    if target.startswith("http://") or target.startswith("https://"):
+        return target
+    if target.startswith("?"):
+        return f"/{slug}/{target}"
+    if not target.startswith("/"):
+        target = "/" + target
+    return f"/{slug}{target}"
+
+
 def _email_status_meta(status, default_accent="#635bff"):
     key = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
     return {
@@ -1387,7 +1424,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
     body = _email_hero("You’ve got a new task", subtitle)
     body += _email_notification_card(task_title, "Task", "New", accent, 12, f'Status: <strong style="color:{accent};">New</strong> · Assigned by {_email_escape(assigner_name)}')
     body += _email_meta_grid("Priority", "Normal", "Next step", "Review & update", accent)
-    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A new task has been assigned to you")
+    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, _workspace_link(workspace_id, f"?action=task&id={_email_escape(task_id)}"), "Open Task →", accent, "A new task has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1401,7 +1438,7 @@ def send_status_change_email(user_email, user_name, task_title, new_stage, chang
     if progress == 100:
         body += _email_completion_banner("Task completed", "This one is now marked complete. Nice momentum from the team.", accent)
     body += _email_notification_card(task_title, "Task", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Status Update"), body, "/?action=dashboard", "View Task →", accent, f"Task moved to {label}")
+    html = _email_base(_header_strip(accent, icon, "Status Update"), body, _workspace_link(workspace_id, "?action=dashboard"), "View Task →", accent, f"Task moved to {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1414,7 +1451,7 @@ def send_comment_email(user_email, user_name, task_title, commenter_name, commen
     body += f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:20px;margin-top:14px;"><tr><td style="padding:18px 20px;border-left:4px solid {accent};border-radius:20px;">
       <div style="font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
     </td></tr></table>'''
-    html = _email_base(_header_strip(accent, "💬", "Task Comment"), body, "/?action=dashboard", "Reply →", accent, "New comment on your task")
+    html = _email_base(_header_strip(accent, "💬", "Task Comment"), body, _workspace_link(workspace_id, "?action=dashboard"), "Reply →", accent, "New comment on your task")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1424,7 +1461,7 @@ def send_task_reassigned_email(user_email, user_name, task_title, assigner_name,
     subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> reassigned this task to you.'
     body = _email_hero("Task reassigned to you", subtitle)
     body += _email_notification_card(task_title, "Task", "Reassigned", accent, 20, f'Reassigned by <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong>')
-    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A task was reassigned to you")
+    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, _workspace_link(workspace_id, f"?action=task&id={_email_escape(task_id)}"), "Open Task →", accent, "A task was reassigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1435,7 +1472,7 @@ def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_i
     body = _email_hero("Deadline coming up", subtitle)
     body += _email_notification_card(task_title, "Due soon", "Due soon", accent, 72, f'Deadline: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Focus", "Finish or update", "Reminder", "Due within 24 hours", accent)
-    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is due soon")
+    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, _workspace_link(workspace_id, f"?action=task&id={_email_escape(task_id)}"), "Update Task →", accent, "A task is due soon")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1446,7 +1483,7 @@ def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id
     body = _email_hero("This task is overdue", subtitle)
     body += _email_notification_card(task_title, "Overdue task", "Overdue", accent, 88, f'Was due: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Risk", "Schedule impact", "Next step", "Update status today", accent)
-    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is overdue")
+    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, _workspace_link(workspace_id, f"?action=task&id={_email_escape(task_id)}"), "Update Task →", accent, "A task is overdue")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1459,7 +1496,7 @@ def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_nam
     body = _email_hero("New ticket assigned", subtitle)
     body += _email_notification_card(ticket_title, "Support ticket", priority_key.title(), accent, 10, f'Priority: <strong style="color:{accent};">{_email_escape(priority_key.title())}</strong>')
     body += _email_meta_grid("Owner", user_name, "Reporter", reporter_name, accent)
-    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, "A support ticket has been assigned to you")
+    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, _workspace_link(workspace_id, f"?action=ticket&id={_email_escape(ticket_id)}"), "View Ticket →", accent, "A support ticket has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1473,7 +1510,7 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     if progress == 100:
         body += _email_completion_banner("Ticket resolved", "The ticket is now complete/resolved and ready for review or closure.", accent)
     body += _email_notification_card(ticket_title, "Support ticket", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, f"Ticket {label}")
+    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, _workspace_link(workspace_id, f"?action=ticket&id={_email_escape(ticket_id)}"), "View Ticket →", accent, f"Ticket {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1490,7 +1527,7 @@ def send_mention_email(user_email, user_name, mentioner_name, context_title, com
       </tr></table>
       <div style="background:#f8fbff;border:1px solid #e5edf7;border-left:4px solid {accent};border-radius:18px;padding:16px 18px;font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
     </td></tr></table>'''
-    html = _email_base(_header_strip(accent, "💬", "Mention"), body, "/?action=dashboard", "View Thread →", accent, "You were mentioned in Project Tracker")
+    html = _email_base(_header_strip(accent, "💬", "Mention"), body, _workspace_link(workspace_id, "?action=dashboard"), "View Thread →", accent, "You were mentioned in Project Tracker")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1502,7 +1539,7 @@ def send_task_completed_email(user_email, user_name, task_title, completer_name,
     body += _email_completion_banner("Completed successfully", "This task has reached 100%. Review the output or open the dashboard for the next action.", accent)
     body += _email_notification_card(task_title, "Completed task", "Completed", accent, 100, f'Completed by <strong style="color:#0f172a;">{_email_escape(completer_name)}</strong>')
     body += _email_meta_grid("Progress", "100%", "Status", "Completed", accent)
-    html = _email_base(_header_strip(accent, "✅", "Task Complete"), body, "/?action=dashboard", "View Project →", accent, "A task has been completed")
+    html = _email_base(_header_strip(accent, "✅", "Task Complete"), body, _workspace_link(workspace_id, "?action=dashboard"), "View Project →", accent, "A task has been completed")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -2425,7 +2462,7 @@ def login():
             if ws_row:
                 import re as _re
                 slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -2880,7 +2917,7 @@ def totp_verify_login():
             ).fetchone()
             if ws_row:
                 slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -3572,7 +3609,7 @@ def me():
         ws_slug = u.get("_ws_slug","")
         if ws_name or ws_slug:
             slug = ws_slug or _re.sub(r"[^a-z0-9]+", "-", ws_name.lower().strip()).strip("-") or "workspace"
-            result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+            result["workspace_dashboard_url"] = f"/{slug}/dashboard"
             result["workspace_slug"] = slug
             result["workspace_id_from_me"] = u["workspace_id"]
         _cache_set(me_cache_key, result)
@@ -5365,6 +5402,47 @@ def ws_sso_callback(ws_name, ws_id):
     return redirect(f"/{slug}/{ws_id}/dashboard")
 
 
+# ── Workspace-scoped app pages  /<workspace_slug>/<page>  ──────────────────
+
+@app.route("/<ws_name>/", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/dashboard", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/projects", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/projects/<proj_id>", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/tasks", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/kanban", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/messages", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/channels", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/dm", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/tickets", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/timeline", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/reminders", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/team", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/productivity", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/ai-docs", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/timesheet", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/vault", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/password-generator", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/settings", methods=["GET", "HEAD"])
+@app.route("/<ws_name>/app", methods=["GET", "HEAD"])
+def ws_slug_app_page(ws_name, **kwargs):
+    """Serve the SPA under a workspace slug, without exposing workspace id in URLs."""
+    if request.method == "HEAD":
+        return Response(status=200, headers={"Cache-Control": "no-store"})
+    slug = (ws_name or "").strip().lower()
+    if not slug or slug in _RESERVED_WORKSPACE_SLUGS or "." in slug:
+        return _serve_html() if request.args.get("action") else ("", 404)
+    # If logged in, ensure the URL slug belongs to the logged-in workspace.
+    if "user_id" in session and session.get("workspace_id"):
+        expected = _workspace_slug_for_id(session.get("workspace_id"))
+        if expected and slug != expected:
+            # Preserve deep-link query while correcting the workspace path.
+            qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
+            tail = request.path.split("/", 2)[2] if request.path.count("/") >= 2 else "dashboard"
+            if not tail:
+                tail = "dashboard"
+            return redirect(f"/{expected}/{tail}{qs}")
+    return _serve_html()
+
 # ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
 
 @app.route("/<ws_name>/<ws_id>/dashboard")
@@ -5513,7 +5591,7 @@ def get_workspace_url():
         "workspace_id":   ws["id"],
         "workspace_name": ws["name"],
         "slug":           slug,
-        "dashboard_url":  f"{base}/{slug}/{ws['id']}/dashboard",
+        "dashboard_url":  f"{base}/{slug}/dashboard",
         "sso_login_url":  f"{base}/{slug}/{ws['id']}/sso/login",
         "sso_callback_url": f"{base}/{slug}/{ws['id']}/sso/callback",
     })
@@ -6049,6 +6127,9 @@ def public_landing():
         "reset-password", "accept-invite"
     }
     if action in app_actions:
+        if "user_id" in session and session.get("workspace_id"):
+            qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
+            return redirect(f"/{_workspace_slug_for_id(session.get('workspace_id'))}/{qs}")
         return _serve_html()
     return _serve_landing()
 
