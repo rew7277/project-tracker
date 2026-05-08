@@ -9080,7 +9080,8 @@ function App(){
   // Additionally, the SSE stream now triggers load() immediately on any
   // task/project mutation — so this extra interval was both redundant and
   // doubling DB load (2 extra queries every 30s per connected user).
-  useEffect(()=>{\n    document.body.className=dark?'dm':'';
+  useEffect(()=>{
+    document.body.className=dark?'dm':'';
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
       if(saved&&saved.ac){
