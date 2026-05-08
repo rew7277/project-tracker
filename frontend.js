@@ -8241,10 +8241,10 @@ function App(){
       const bustParam=bust?'bust=1':'';
       const teamParam=tCtx?'team_id='+tCtx:'';
       const qs=[teamParam,bustParam].filter(Boolean).join('&');
-      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
+      const appDataUrl='/api/dashboard/bootstrap'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] app-data failed; keeping current screen to avoid toast/refresh loops', d && d.error);
+        console.warn('[Load] dashboard bootstrap failed; keeping current screen to avoid toast/refresh loops', d && d.error);
         if(d && (d.status===401 || d.status===403)){
           setCu(null);
           setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
@@ -8336,7 +8336,7 @@ function App(){
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
   // NOTE: The 30s projects+tasks interval has been removed.
-  // /api/app-data (called by load()) already fetches both on every poll.
+  // /api/dashboard/bootstrap (called by load()) already fetches both on every poll.
   // Additionally, the SSE stream now triggers load() immediately on any
   // task/project mutation — so this extra interval was both redundant and
   // doubling DB load (2 extra queries every 30s per connected user).
