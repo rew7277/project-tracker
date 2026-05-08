@@ -1392,6 +1392,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_tickets_assignee ON tickets(workspace_id, assignee)",
             "CREATE INDEX IF NOT EXISTS idx_dm_sender ON direct_messages(workspace_id, sender)",
             "CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)",
+            # Added: composite index for team-scoped project queries (used by _fetch_app_data_from_db)
+            "CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(workspace_id, team_id, created DESC)",
+            # Added: composite index for tickets ordered by created (used in get_app_data LIMIT query)
+            "CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(workspace_id, created DESC)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target)",
             # Soft-delete support
@@ -3387,6 +3391,37 @@ def del_user(uid):
     _cache_bust_ws(wid())
     return jsonify({"ok":True})
 
+@app.route("/api/users/<uid>/avatar")
+@login_required
+def get_user_avatar(uid):
+    """Serve a user's avatar blob with a 24h browser cache.
+    Keeping avatar_data out of the /api/app-data bulk payload removes
+    up to 500KB–1MB per poll for a 10-person workspace.
+    """
+    with get_db() as db:
+        row = db.execute("SELECT avatar_data FROM users WHERE id=? AND workspace_id=?",
+                         (uid, wid())).fetchone()
+    data = row["avatar_data"] if row and row["avatar_data"] else None
+    if not data:
+        return "", 404
+    etag = hashlib.md5(data.encode() if isinstance(data, str) else data).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    # Detect mime type from base64 data-URL prefix if present
+    mime = "image/png"
+    if isinstance(data, str) and data.startswith("data:"):
+        mime = data.split(";")[0].split(":")[1]
+        data = data.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(data)
+    except Exception:
+        return "", 500
+    resp = make_response(raw)
+    resp.headers["Content-Type"] = mime
+    resp.headers["Cache-Control"] = "public, max-age=86400"  # 24h browser cache
+    resp.headers["ETag"] = etag
+    return resp
+
 # ── Projects ──────────────────────────────────────────────────────────────────
 @app.route("/api/projects/all")
 @login_required
@@ -3425,20 +3460,30 @@ def _fetch_app_data_from_db(ws, team_id, uid):
             cols = [c["name"] for c in (conn.columns or [])]
             return [dict(zip(cols, r)) for r in (rows or [])]
 
-        users    = _q("SELECT id,name,email,role,avatar_data,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name", (ws,))
+        # Exclude avatar_data from bulk fetch — it's 20-100KB per user as base64.
+        # Avatars are served separately via /api/users/<uid>/avatar with 24h browser cache.
+        users    = _q("SELECT id,name,email,role,avatar,color,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name", (ws,))
 
         if team_id:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC", (ws, team_id))
-            tasks    = _q("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500", (ws, team_id))
+            projects = _q("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 300", (ws, team_id))
+            # Exclude comments from bulk fetch — comments are a JSON blob stored inline
+            # and can be large. They are fetched on-demand when a task is opened.
+            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
+                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
+                             FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at=''
+                             ORDER BY created DESC LIMIT 500""", (ws, team_id))
         else:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (ws,))
-            tasks    = _q("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' ORDER BY created DESC LIMIT 500", (ws,))
+            projects = _q("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 300", (ws,))
+            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
+                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
+                             FROM tasks WHERE workspace_id=? AND deleted_at=''
+                             ORDER BY created DESC LIMIT 500""", (ws,))
 
         notifs   = _q("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY ts DESC LIMIT 50", (ws, uid))
         dm_unread= _q("SELECT sender,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender", (ws, uid))
         ws_rows  = _q("SELECT * FROM workspaces WHERE id=?", (ws,))
         teams    = _q("SELECT * FROM teams WHERE workspace_id=?", (ws,))
-        tickets  = _q("SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC", (ws,))
+        tickets  = _q("SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 200", (ws,))
         reminders= _q("SELECT * FROM reminders WHERE workspace_id=? AND user_id=? AND remind_at>=? ORDER BY remind_at", (ws, uid, now_str))
 
         return {
@@ -3449,6 +3494,16 @@ def _fetch_app_data_from_db(ws, team_id, uid):
         }
     finally:
         _return_pool_conn(conn)
+
+
+def _etag_response(result):
+    """Return a jsonify response with ETag header; emit 304 if client has fresh copy."""
+    etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    resp = jsonify(result)
+    resp.headers["ETag"] = etag
+    return resp
 
 
 @app.route("/api/app-data")
@@ -3473,7 +3528,10 @@ def get_app_data():
     if request.args.get("bust") == "1":
         result = _fetch_app_data_from_db(ws, team_id, uid)
         _cache_set(cache_key, result)
-        return jsonify(result)
+        etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+        resp = jsonify(result)
+        resp.headers["ETag"] = etag
+        return resp
 
     now = _time.time()
 
@@ -3485,7 +3543,7 @@ def get_app_data():
                 entry = _json.loads(raw)
                 age = now - entry["ts"]
                 if age < _CACHE_TTL:
-                    return jsonify(entry["val"])   # fresh
+                    return _etag_response(entry["val"])   # fresh
                 if age < _CACHE_STALE:
                     # Try to become the one refresher using SET NX (atomic)
                     lock_key = f"ptcache:lock:{cache_key}"
@@ -3501,7 +3559,7 @@ def get_app_data():
                                 try: _redis_client.delete(lock_key)
                                 except: pass
                         _cthread.Thread(target=_bg_refresh_redis, daemon=True).start()
-                    return jsonify(entry["val"])   # stale but fast
+                    return _etag_response(entry["val"])   # stale but fast
         except Exception:
             pass  # Redis blip — fall through to dict
 
@@ -3511,7 +3569,7 @@ def get_app_data():
     if entry:
         age = now - entry["ts"]
         if age < _CACHE_TTL:
-            return jsonify(entry["val"])
+            return _etag_response(entry["val"])
         if age < _CACHE_STALE and not entry.get("refreshing"):
             with _CACHE_LOCK:
                 if cache_key in _CACHE:
@@ -3526,12 +3584,17 @@ def get_app_data():
                         if cache_key in _CACHE:
                             _CACHE[cache_key]["refreshing"] = False
             _cthread.Thread(target=_bg_refresh, daemon=True).start()
-            return jsonify(entry["val"])   # stale but fast
+            return _etag_response(entry["val"])   # stale but fast
 
     # Cache cold or too stale — block on DB (first load only)
     result = _fetch_app_data_from_db(ws, team_id, uid)
     _cache_set(cache_key, result)
-    return jsonify(result)
+    etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    resp = jsonify(result)
+    resp.headers["ETag"] = etag
+    return resp
 
 
 
@@ -3614,6 +3677,8 @@ def create_project():
         # Previously only busting 'notifs' left the appdata cache stale, causing the
         # background SWR refresh to overwrite state and make the new project disappear.
         _cache_bust_ws(wid())
+        # Push SSE event so connected clients update immediately without waiting for next poll
+        _sse_publish(wid(), "project_updated", {"id": pid, "action": "created"})
         return jsonify(dict(p))
 
 @app.route("/api/projects/<pid>",methods=["PUT"])
@@ -3655,6 +3720,8 @@ def update_project(pid):
     # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
     # that's why added members weren't visible until cache expired.
     _cache_bust_ws(wid())
+    # Notify connected clients via SSE so they reload without waiting 30s
+    _sse_publish(wid(), "project_updated", {"id": pid, "action": "updated"})
     return jsonify(dict(updated))
 @app.route("/api/projects/<pid>",methods=["DELETE"])
 @login_required
@@ -3804,6 +3871,10 @@ def create_task():
         # Bust full workspace cache so app-data background refresh picks up the new task.
         # Previously only busting 'notifs' left app-data stale, causing new tasks to vanish.
         _cache_bust_ws(wid())
+        # Push SSE event — connected clients reload immediately without polling delay
+        _sse_publish(wid(), "task_updated", {"id": tid, "action": "created",
+                                              "project": d.get("project", ""),
+                                              "assignee": d.get("assignee", "")})
         return jsonify(dict(t))
 
 
@@ -3947,7 +4018,12 @@ def update_task(tid):
                           f"{cname}: {latest.get('text','')[:80]}", "/"),
                     daemon=True).start()
         _cache_bust_ws(wid())
-        return jsonify(dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()))
+        updated_task = dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+        # Push SSE — all workspace clients get the new stage/assignee immediately
+        _sse_publish(wid(), "task_updated", {"id": tid, "action": "updated",
+                                              "stage": updated_task.get("stage",""),
+                                              "project": updated_task.get("project","")})
+        return jsonify(updated_task)
 
 
 @app.route("/api/subtasks/search")
@@ -4354,9 +4430,8 @@ def create_ticket():
                        (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now))
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     _cache_bust_ws(wid())
+    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     return jsonify(result)
-
-@app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
 def update_ticket(tid):
     d=request.json or {}
@@ -4379,9 +4454,9 @@ def update_ticket(tid):
                     d.get("team_id",cur_team_id),tid))
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     _cache_bust_ws(wid())
+    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
+                                            "status": result.get("status","")})
     return jsonify(result)
-
-@app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
 def delete_ticket(tid):
     with get_db() as db:

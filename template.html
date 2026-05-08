@@ -865,11 +865,16 @@ function AppLoader(){
 
 // Global abort controller — cancelled on logout to kill all in-flight requests
 let _apiAbortCtrl = new AbortController();
+const _apiEtagCache = {}; // url → { etag, data }
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
   get: async (u) => {
     try {
-      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal});
+      const cached = _apiEtagCache[u];
+      const headers = {};
+      if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
+      const r = await fetch(u, {credentials: 'include', signal: _apiAbortCtrl.signal, headers});
+      if (r.status === 304 && cached) return cached.data; // server says nothing changed
       if (!r.ok) {
         if (r.status === 401) {
           console.warn('[API] 401 Unauthorized:', u);
@@ -878,7 +883,10 @@ const api={
         const errData = await r.json().catch(() => ({}));
         return { error: errData.error || `HTTP ${r.status}`, status: r.status };
       }
-      return await r.json();
+      const data = await r.json();
+      const etag = r.headers.get('ETag');
+      if (etag) _apiEtagCache[u] = { etag, data };
+      return data;
     } catch (e) {
       if (e.name === 'AbortError') return null;
       console.error('[API] Network error:', u, e);
@@ -8869,6 +8877,46 @@ function App(){
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
 
+  // ── SSE real-time stream ──────────────────────────────────────────────────
+  // A single EventSource replaces the need for manual polling on task/project/
+  // notification/ticket mutations. The server calls _sse_publish() after every
+  // write, so changes propagate to all connected clients in <1s instead of 30s.
+  useEffect(()=>{
+    if(!cu)return;
+    let es=null;let retryTimer=null;
+    const connect=()=>{
+      try{
+        es=new EventSource('/api/stream');
+        es.onmessage=e=>{
+          try{
+            const msg=JSON.parse(e.data);
+            if(msg.type==='connected')return; // initial handshake
+            if(msg.type==='task_updated'||msg.type==='project_updated'||msg.type==='ticket_updated'){
+              // Bust cache and reload — the server has already bust its own cache
+              load(teamCtx);
+            }
+            if(msg.type==='notification'){
+              triggerPollRef.current&&triggerPollRef.current();
+            }
+            if(msg.type==='dm'){
+              api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
+            }
+            if(msg.type==='presence'){
+              api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
+            }
+          }catch(err){}
+        };
+        es.onerror=()=>{
+          // EventSource reconnects automatically, but we add a backoff guard
+          es.close();
+          retryTimer=setTimeout(connect,5000);
+        };
+      }catch(err){}
+    };
+    connect();
+    return()=>{if(es)es.close();if(retryTimer)clearTimeout(retryTimer);};
+  },[cu,teamCtx]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Presence heartbeat — ping every 30s, fetch online users every 15s
   useEffect(()=>{
     if(!cu)return;
@@ -9027,35 +9075,12 @@ function App(){
     setData(prev=>({...prev,projects:[],tasks:[]}));
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
-  useEffect(()=>{
-    if(!cu)return;
-    const id=setInterval(async()=>{
-      try{
-        const projUrl=teamCtx?'/api/projects?team_id='+teamCtx:'/api/projects';
-        const taskUrl=teamCtx?'/api/tasks?team_id='+teamCtx:'/api/tasks';
-        const [projects,tasks]=await Promise.all([api.get(projUrl),api.get(taskUrl)]);
-        if(Array.isArray(projects)&&Array.isArray(tasks)){
-          // Normalize members field from DB JSON string to real array before writing to state
-          const normProjects=projects.map(p=>({...p,members:parseMembers(p.members)}));
-          setData(prev=>{
-            // Grace period guard: never remove items created locally in the last 45s
-            // This prevents multi-Gunicorn-worker stale cache from vanishing optimistic items
-            const GRACE=45000;const now=Date.now();
-            const serverProjIds=new Set(normProjects.map(p=>p.id));
-            const serverTaskIds=new Set(tasks.map(t=>t.id));
-            const localProjs=(prev.projects||[]).filter(p=>p._localTs&&(now-p._localTs)<GRACE&&!serverProjIds.has(p.id));
-            const localTasks=(prev.tasks||[]).filter(t=>t._localTs&&(now-t._localTs)<GRACE&&!serverTaskIds.has(t.id));
-            return {...prev,
-              projects:[...normProjects,...localProjs],
-              tasks:[...tasks,...localTasks]};
-          });
-        }
-      }catch(e){}
-    },30000);
-    return()=>clearInterval(id);
-  },[cu,teamCtx]);
-  useEffect(()=>{
-    document.body.className=dark?'dm':'';
+  // NOTE: The 30s projects+tasks interval has been removed.
+  // /api/app-data (called by load()) already fetches both on every poll.
+  // Additionally, the SSE stream now triggers load() immediately on any
+  // task/project mutation — so this extra interval was both redundant and
+  // doubling DB load (2 extra queries every 30s per connected user).
+  useEffect(()=>{\n    document.body.className=dark?'dm':'';
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
       if(saved&&saved.ac){
