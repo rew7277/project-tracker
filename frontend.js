@@ -73,14 +73,31 @@ const _apiCleanMessage = (message, status) => {
   if (!msg || msg.length > 180 || /^doctype html/i.test(msg)) msg = status ? `Server returned HTTP ${status}` : 'Network error';
   return msg;
 };
+const _API_SILENT_PREFIXES = [
+  '/api/auth/me',          // expected on logged-out/expired sessions
+  '/api/app-data',         // background refresh; show banner in UI, not toast spam
+  '/api/presence',         // heartbeat/polling
+  '/api/notifications',    // SSE/fallback polling
+  '/api/reminders/due',    // reminder polling
+  '/api/dm/unread',        // DM polling
+  '/api/timelogs'          // dashboard background poll
+];
+const _apiShouldToast = (url, status) => {
+  const u = String(url || '').split('?')[0];
+  if (_API_SILENT_PREFIXES.some(p => u === p || u.startsWith(p + '/'))) return false;
+  if (status === 401 || status === 403) return false;
+  return true;
+};
 const _apiNotifyError = (url, message, status) => {
   message = _apiCleanMessage(message, status);
-  const key = `${status || 0}:${url}:${message || ''}`;
+  const key = `${status || 0}:${String(url || '').split('?')[0]}:${message || ''}`;
   const now = Date.now();
-  if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
+  // One visible toast per unique API problem every 2 minutes. Background polls are console-only.
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 120000) return;
   _apiErrorSeen.set(key, now);
-  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
   console.warn('[API]', status || 'network', url, message);
+  if (!_apiShouldToast(url, status)) return;
+  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
 };
 const _apiRequest = async (u, opts = {}) => {
   try {
@@ -93,7 +110,7 @@ const _apiRequest = async (u, opts = {}) => {
     const data = await _apiRead(r);
     if (!r.ok) {
       const message = data?.error || data?.message || `HTTP ${r.status}`;
-      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
+      _apiNotifyError(u, message, r.status);
       return { ok:false, error:message, status:r.status, data };
     }
     const etag = r.headers.get('ETag');
@@ -8158,9 +8175,11 @@ function App(){
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] Authentication failed or server error, clearing session');
-        setCu(null);
-        setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+        console.warn('[Load] app-data failed; keeping current screen to avoid toast/refresh loops', d && d.error);
+        if(d && (d.status===401 || d.status===403)){
+          setCu(null);
+          setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+        }
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;

@@ -1167,448 +1167,300 @@ def _email_escape(value):
     return _html.escape(str(value or ""), quote=True)
 
 
-def _email_body_cleanup(body_html):
-    """Keep older notification snippets readable inside the new light email shell.
+def _email_abs_url(path_or_url=""):
+    # Return an absolute HTTPS URL for email links.
+    base = (os.environ.get("APP_BASE_URL") or APP_URL or "https://projecttracker.in").rstrip("/")
+    target = str(path_or_url or "")
+    if target.startswith("http://") or target.startswith("https://"):
+        return target
+    if not target.startswith("/"):
+        target = "/" + target
+    return base + target
 
-    Some old templates used white text intended for a black card. Email clients often
-    strip/alter CSS, which made the notification text almost invisible on light
-    backgrounds. This normalizes the common legacy colors without changing CTA links.
-    """
-    body_html = str(body_html or "")
-    replacements = {
-        "color:#fff;": "color:#101828;",
-        "color:#ffffff;": "color:#101828;",
-        "color:#e0e0f0;": "color:#1f2937;",
-        "color:#8888a8;": "color:#667085;",
-        "color:#4a4a5a;": "color:#667085;",
-        "color:#6a6a8a;": "color:#344054;",
-        "background:#111118;": "background:#ffffff;",
-        "border:1px solid #2a2a35;": "border:1px solid #e6eaf2;",
-    }
-    for old, new in replacements.items():
-        body_html = body_html.replace(old, new)
-    return body_html
 
-def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
-    """Apple-inspired email shell, designed for real email clients."""
-    cta_url = _email_escape(cta_url or APP_URL)
+def _email_status_meta(status, default_accent="#635bff"):
+    key = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return {
+        "new": ("#635bff", "New", "●"),
+        "backlog": ("#64748b", "Backlog", "●"),
+        "todo": ("#64748b", "To do", "●"),
+        "in_progress": ("#f59e0b", "In progress", "●"),
+        "review": ("#8b5cf6", "In review", "●"),
+        "testing": ("#06b6d4", "Testing", "●"),
+        "blocked": ("#ef4444", "Blocked", "●"),
+        "completed": ("#10b981", "Completed", "✓"),
+        "done": ("#10b981", "Done", "✓"),
+        "production": ("#10b981", "Production", "✓"),
+        "resolved": ("#10b981", "Resolved", "✓"),
+        "closed": ("#64748b", "Closed", "✓"),
+        "open": ("#635bff", "Open", "●"),
+    }.get(key, (default_accent, str(status or "Updated").replace("_", " ").title(), "●"))
+
+
+def _email_progress_bar(percent=0, color="#635bff", height=10):
+    try:
+        pct = max(0, min(100, int(percent or 0)))
+    except Exception:
+        pct = 0
+    return f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-radius:999px;background:#eaf0fb;overflow:hidden;">
+      <tr><td width="{pct}%" height="{height}" style="height:{height}px;background:{color};background-image:linear-gradient(90deg,{color},#9b5cff);font-size:0;line-height:0;">&nbsp;</td><td width="{100-pct}%" height="{height}" style="height:{height}px;font-size:0;line-height:0;">&nbsp;</td></tr>
+    </table>'''
+
+
+def _email_pill(label, color="#635bff"):
+    label = _email_escape(label)
+    color = _email_escape(color)
+    return f'''<span style="display:inline-block;padding:7px 12px;border-radius:999px;background:{color}16;color:{color};font-size:11px;line-height:13px;font-weight:900;text-transform:uppercase;letter-spacing:.6px;">{label}</span>'''
+
+
+def _email_base(header_html, body_html, cta_url=None, cta_text="View Dashboard", cta_color="#4f46e5", preheader="Project Tracker update"):
+    """Email shell tuned for real inboxes: table-first, inline styles, no fragile glass/CSS-only effects."""
+    cta_url = _email_escape(_email_abs_url(cta_url or "/?action=login"))
     cta_text = _email_escape(cta_text or "View Dashboard")
-    cta_color = _email_escape(cta_color or "#5a8cff")
-    body_html = _email_body_cleanup(body_html)
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light only">
+    cta_color = _email_escape(cta_color or "#4f46e5")
+    preheader = _email_escape(preheader or "Project Tracker update")
+    return f'''<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
 <title>Project Tracker</title>
 <style>
-  @media only screen and (max-width:620px) {{
-    .pt-wrap {{ padding:20px 10px !important; }}
-    .pt-card {{ width:100% !important; border-radius:24px !important; }}
-    .pt-pad {{ padding:24px 18px !important; }}
-    .pt-title {{ font-size:26px !important; }}
-    .pt-two-col {{ display:block !important; width:100% !important; }}
-    .pt-stat {{ margin-bottom:12px !important; }}
-  }}
-  .pt-cta:hover {{ filter:brightness(1.08); }}
+@media only screen and (max-width:680px){{
+  .pt-wrap{{padding:18px 10px!important}} .pt-shell{{width:100%!important;border-radius:22px!important}}
+  .pt-pad{{padding:26px 20px!important}} .pt-title{{font-size:26px!important;line-height:32px!important}}
+  .pt-two td{{display:block!important;width:100%!important;padding:0 0 10px!important}}
+  .pt-cta a{{display:block!important;text-align:center!important}}
+  .pt-hide-sm{{display:none!important}}
+}}
+@keyframes ptDone{{0%{{transform:scale(1)}}50%{{transform:scale(1.02)}}100%{{transform:scale(1)}}}}
+.pt-done{{animation:ptDone 2.5s ease-in-out infinite}}
 </style>
 </head>
-<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg,#edf5ff 0%,#f7f1ff 45%,#f8fbff 100%);min-height:100vh;">
-    <tr><td class="pt-wrap" align="center" style="padding:42px 16px;">
-      <table role="presentation" class="pt-card" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:rgba(255,255,255,.94);border:1px solid rgba(255,255,255,.88);border-radius:32px;overflow:hidden;box-shadow:0 34px 90px rgba(31,41,55,.18), inset 0 1px 0 rgba(255,255,255,.95);">
-        {header_html}
-        <tr><td class="pt-pad" style="padding:34px 38px 16px;">
-          {body_html}
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:30px 0 12px;">
-            <tr>
-              <td bgcolor="{cta_color}" style="border-radius:18px;background:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 16px 32px rgba(90,140,255,.34);">
-                <a class="pt-cta" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:800;text-decoration:none;border-radius:18px;mso-padding-alt:0;">{cta_text}</a>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-        <tr><td style="padding:22px 38px 30px;background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(245,248,255,.92));border-top:1px solid rgba(148,163,184,.18);">
-          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#7b8496;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#5a8cff;text-decoration:none;font-weight:700;">Manage preferences</a></p>
-        </td></tr>
-      </table>
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;line-height:1px;font-size:1px;">{preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f7fb;">
+<tr><td class="pt-wrap" align="center" style="padding:36px 14px;">
+  <table role="presentation" class="pt-shell" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:#ffffff;border:1px solid #e4e9f2;border-radius:28px;overflow:hidden;box-shadow:0 18px 48px rgba(31,41,55,.12);">
+    {header_html}
+    <tr><td class="pt-pad" style="padding:34px 38px 8px;background:#ffffff;">
+      {body_html}
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 12px;"><tr>
+        <td class="pt-cta" bgcolor="{cta_color}" style="border-radius:14px;background:{cta_color};box-shadow:0 10px 22px rgba(79,70,229,.22);">
+          <a href="{cta_url}" style="display:inline-block;padding:14px 24px;color:#ffffff!important;text-decoration:none;font-size:14px;line-height:18px;font-weight:800;border-radius:14px;">{cta_text}</a>
+        </td>
+      </tr></table>
+    </td></tr>
+    <tr><td style="padding:18px 38px 28px;background:#fbfcff;border-top:1px solid #edf1f7;">
+      <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#64748b;">Project Tracker · Project, task and ticket intelligence</p>
+      <p style="margin:6px 0 0;text-align:center;font-size:11px;line-height:16px;color:#94a3b8;">You received this because notifications are enabled for your workspace.</p>
     </td></tr>
   </table>
-</body>
-</html>"""
+</td></tr>
+</table>
+</body></html>'''
 
 
-def _header_strip(accent, icon, label):
-    """Premium header using email-safe emoji icons instead of SF Symbols."""
-    accent = _email_escape(accent or "#5a8cff")
-    icon = _email_escape(icon or "✨")
+def _header_strip(accent="#4f46e5", icon="📌", label="Project Update"):
+    accent = _email_escape(accent or "#4f46e5")
+    icon = _email_escape(icon or "📌")
     label = _email_escape(label or "Project Update")
-    return f"""
-    <tr><td style="background:linear-gradient(135deg,#0b1225 0%,#142a5f 45%,#6d4aff 100%);padding:0;">
+    return f'''
+    <tr><td style="background:#101828;padding:0;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td style="padding:28px 34px 26px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-            <tr>
-              <td style="vertical-align:middle;">
-                <div style="display:inline-block;width:44px;height:44px;border-radius:16px;background:rgba(255,255,255,.16);text-align:center;line-height:44px;font-size:22px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25);">{icon}</div>
-              </td>
-              <td style="vertical-align:middle;padding-left:14px;">
-                <div style="font-size:23px;line-height:28px;font-weight:900;letter-spacing:-.7px;color:#ffffff;">Project<span style="color:#bcd7ff;">Tracker</span></div>
-                <div style="font-size:12px;line-height:16px;color:rgba(255,255,255,.72);font-weight:700;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
-              </td>
-              <td align="right" style="vertical-align:middle;">
-                <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.14);color:#ffffff;font-size:12px;font-weight:800;">Live Summary</div>
-              </td>
-            </tr>
-          </table>
+        <tr><td style="padding:28px 36px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td width="48" valign="middle"><div style="width:42px;height:42px;border-radius:14px;background:#ffffff1f;text-align:center;line-height:42px;font-size:21px;color:#ffffff;">{icon}</div></td>
+            <td valign="middle" style="padding-left:12px;">
+              <div style="font-size:22px;line-height:26px;font-weight:900;color:#ffffff;letter-spacing:-.5px;">Project<span style="color:#c7d2fe;">Tracker</span></div>
+              <div style="font-size:11px;line-height:15px;color:#dbeafe;font-weight:800;letter-spacing:.9px;text-transform:uppercase;margin-top:2px;">{label}</div>
+            </td>
+            <td class="pt-hide-sm" align="right" valign="middle"><span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#ffffff1c;color:#ffffff;font-size:12px;font-weight:800;">Notification</span></td>
+          </tr></table>
         </td></tr>
       </table>
-      <div style="height:5px;background:linear-gradient(90deg,{accent},#9b5cff,#34d3ff);"></div>
-    </td></tr>"""
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="4" style="height:4px;background:{accent};font-size:0;line-height:0;">&nbsp;</td></tr></table>
+    </td></tr>'''
+
+
+def _email_notification_card(title, eyebrow="Task", badge="New", accent="#4f46e5", progress=0, meta=""):
+    safe_title = _email_escape(title)
+    safe_eyebrow = _email_escape(eyebrow)
+    safe_badge = _email_escape(badge)
+    pct = max(0, min(100, int(progress or 0)))
+    return f'''
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #e5eaf3;border-radius:20px;margin:0 0 18px;box-shadow:0 10px 28px rgba(15,23,42,.07);">
+        <tr><td style="padding:22px 24px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td valign="top" style="padding-right:12px;">
+              <div style="font-size:11px;line-height:14px;color:#64748b;letter-spacing:.9px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">{safe_eyebrow}</div>
+              <div style="font-size:22px;line-height:28px;color:#111827;font-weight:900;letter-spacing:-.35px;">{safe_title}</div>
+            </td>
+            <td width="92" align="right" valign="top"><span style="display:inline-block;padding:7px 12px;border-radius:999px;background:#eef2ff;color:{accent};font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.3px;">{safe_badge}</span></td>
+          </tr></table>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;background:#edf2f7;border-radius:999px;"><tr>
+            <td width="{pct}%" height="9" style="height:9px;background:{accent};border-radius:999px;font-size:0;line-height:0;">&nbsp;</td><td style="font-size:0;line-height:0;">&nbsp;</td>
+          </tr></table>
+          <div style="margin-top:11px;font-size:13px;line-height:20px;color:#475569;">{meta}</div>
+        </td></tr>
+      </table>'''
+
+
+def _email_meta_grid(left_label, left_value, right_label, right_value, accent="#4f46e5"):
+    return f'''
+      <table role="presentation" class="pt-two" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 4px;"><tr>
+        <td width="50%" style="padding-right:8px;vertical-align:top;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e5eaf3;border-radius:16px;"><tr><td style="padding:14px 16px;">
+          <div style="font-size:11px;color:#64748b;font-weight:900;text-transform:uppercase;letter-spacing:.7px;">{_email_escape(left_label)}</div>
+          <div style="font-size:16px;color:#111827;font-weight:850;margin-top:5px;">{_email_escape(left_value)}</div>
+        </td></tr></table></td>
+        <td width="50%" style="padding-left:8px;vertical-align:top;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e5eaf3;border-radius:16px;"><tr><td style="padding:14px 16px;">
+          <div style="font-size:11px;color:#64748b;font-weight:900;text-transform:uppercase;letter-spacing:.7px;">{_email_escape(right_label)}</div>
+          <div style="font-size:16px;color:#111827;font-weight:850;margin-top:5px;">{_email_escape(right_value)}</div>
+        </td></tr></table></td>
+      </tr></table>'''
+
+
+def _email_hero(title, subtitle):
+    return f'''
+      <h1 class="pt-title" style="margin:0 0 10px;font-size:31px;line-height:38px;color:#111827;letter-spacing:-.9px;font-weight:900;">{_email_escape(title)}</h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:24px;color:#475569;">{subtitle}</p>'''
+
+
+def _email_completion_banner(title, note, accent="#10b981"):
+    return f'''
+      <table role="presentation" class="pt-done" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ecfdf5;border:1px solid #bbf7d0;border-radius:20px;margin:0 0 18px;box-shadow:0 10px 28px rgba(16,185,129,.12);">
+        <tr><td style="padding:20px 22px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td width="48" valign="top"><div style="width:42px;height:42px;border-radius:14px;background:{accent};color:#ffffff;text-align:center;line-height:42px;font-size:22px;font-weight:900;">✓</div></td>
+            <td style="padding-left:12px;"><div style="font-size:20px;line-height:25px;color:#064e3b;font-weight:900;letter-spacing:-.25px;">{_email_escape(title)}</div><div style="font-size:13px;line-height:20px;color:#047857;margin-top:3px;">{_email_escape(note)}</div></td>
+          </tr></table>
+          <div style="margin-top:14px;font-size:18px;letter-spacing:6px;line-height:22px;color:#10b981;">✦ ✦ ✦</div>
+        </td></tr>
+      </table>'''
+
 
 def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    """Premium email: task assigned to user."""
-    accent  = "#6366f1"
+    accent = "#635bff"
     subject = f"📋 New Task: {task_title}"
-    safe_user = _email_escape(user_name)
-    safe_assigner = _email_escape(assigner_name)
-    safe_task = _email_escape(task_title)
-    header  = _header_strip(accent, "📋", "Task Assignment")
-    body    = f"""
-      <h1 class="pt-title" style="margin:0 0 10px;font-size:32px;line-height:38px;color:#101828;letter-spacing:-1px;font-weight:900;">You’ve got a new task</h1>
-      <p style="margin:0 0 24px;font-size:15px;line-height:23px;color:#667085;">
-        Hi <strong style="color:#101828;">{safe_user}</strong>, <strong style="color:#101828;">{safe_assigner}</strong> assigned a new task to you.
-      </p>
-
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#ffffff,#f7f9ff);border:1px solid #e6eaf2;border-radius:24px;box-shadow:0 18px 42px rgba(31,41,55,.10);overflow:hidden;margin:0 0 16px;">
-        <tr>
-          <td style="padding:22px 24px;">
-            <div style="font-size:11px;line-height:14px;color:#667085;letter-spacing:1.1px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">Task</div>
-            <div style="font-size:22px;line-height:28px;font-weight:900;color:#101828;letter-spacing:-.3px;">{safe_task}</div>
-            <div style="margin-top:16px;height:10px;background:#edf2ff;border-radius:999px;overflow:hidden;">
-              <div style="width:12%;height:10px;background:linear-gradient(90deg,#6675ff,#b15cff);border-radius:999px;"></div>
-            </div>
-            <div style="margin-top:10px;font-size:12px;line-height:18px;color:#667085;">Status: <strong style="color:#6366f1;">New</strong> · Assigned by {safe_assigner}</div>
-          </td>
-          <td width="88" align="center" style="padding:22px 24px;vertical-align:top;">
-            <span style="display:inline-block;background:#eef2ff;color:#4f46e5;font-size:11px;font-weight:900;padding:7px 12px;border-radius:999px;letter-spacing:.6px;">NEW</span>
-          </td>
-        </tr>
-      </table>
-
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">
-        <tr>
-          <td style="width:50%;padding-right:8px;">
-            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
-              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Priority</div>
-              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Normal</div>
-            </div>
-          </td>
-          <td style="width:50%;padding-left:8px;">
-            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
-              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Next step</div>
-              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Review & update</div>
-            </div>
-          </td>
-        </tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Open Task →", accent)
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> assigned a new task to you.'
+    body = _email_hero("You’ve got a new task", subtitle)
+    body += _email_notification_card(task_title, "Task", "New", accent, 12, f'Status: <strong style="color:{accent};">New</strong> · Assigned by {_email_escape(assigner_name)}')
+    body += _email_meta_grid("Priority", "Normal", "Next step", "Review & update", accent)
+    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A new task has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
-def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
-    """Premium email: task stage changed."""
-    stage_meta = {
-        "completed":   ("#10b981", "✅", "Completed"),
-        "production":  ("#10b981", "🚀", "In Production"),
-        "in_progress": ("#f59e0b", "⚡", "In Progress"),
-        "review":      ("#8b5cf6", "👀", "In Review"),
-        "backlog":     ("#6b7280", "📥", "Backlog"),
-        "testing":     ("#06b6d4", "🧪", "Testing"),
-    }
-    accent, icon, label = stage_meta.get(new_stage, ("#6366f1","🔄","Updated"))
-    subject = f"{icon} Task moved to {label}: {task_title}"
-    header  = _header_strip(accent, icon, "Status Update")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
-        {icon} Status changed
-      </p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{changer_name}</strong> updated your task.
-      </p>
 
-      <!-- Task card -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
-                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0 0 16px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <!-- Stage pill -->
-          <table cellpadding="0" cellspacing="0" border="0">
-            <tr>
-              <td style="background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:6px 14px;">
-                <span style="font-size:13px;font-weight:700;color:{accent};">{icon} {label}</span>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Task →", accent)
+def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
+    accent, label, mark = _email_status_meta(new_stage)
+    icon = "✅" if label.lower() in ("completed", "done", "production") else "🔄"
+    progress = 100 if label.lower() in ("completed", "done", "production") else 55
+    subject = f"{icon} Task {label}: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(changer_name)}</strong> moved this task to <strong style="color:{accent};">{_email_escape(label)}</strong>.'
+    body = _email_hero("Task status updated", subtitle)
+    if progress == 100:
+        body += _email_completion_banner("Task completed", "This one is now marked complete. Nice momentum from the team.", accent)
+    body += _email_notification_card(task_title, "Task", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
+    html = _email_base(_header_strip(accent, icon, "Status Update"), body, "/?action=dashboard", "View Task →", accent, f"Task moved to {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_comment_email(user_email, user_name, task_title, commenter_name, comment_text, workspace_id):
-    """Premium email: new comment on task."""
-    accent  = "#f59e0b"
-    subject = f"💬 {commenter_name} commented on: {task_title}"
-    header  = _header_strip(accent, "💬", "New Comment")
-    # Avatar initials circle
-    initials = "".join(p[0].upper() for p in commenter_name.split()[:2])
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
-        New comment 💬
-      </p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        someone left a comment on your task.
-      </p>
-
-      <!-- Task label -->
-      <p style="margin:0 0 8px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">On task</p>
-      <p style="margin:0 0 20px;font-size:16px;font-weight:700;color:#e0e0f0;">{task_title}</p>
-
-      <!-- Comment bubble -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;margin-bottom:8px;">
-        <tr><td style="padding:20px 24px;">
-          <!-- Commenter row -->
-          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
-            <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <div style="width:36px;height:36px;border-radius:50%;background:{accent};
-                             display:inline-flex;align-items:center;justify-content:center;">
-                  <span style="font-size:13px;font-weight:800;color:#fff;">{initials}</span>
-                </div>
-              </td>
-              <td style="vertical-align:middle;">
-                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{commenter_name}</p>
-                <p style="margin:0;font-size:11px;color:#5a5a7a;">just now</p>
-              </td>
-            </tr>
-          </table>
-          <!-- Comment text -->
-          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
-            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
-          </div>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Reply →", accent)
+    accent = "#8b5cf6"
+    subject = f"💬 New comment on: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(commenter_name)}</strong> commented on a task.'
+    body = _email_hero("New comment added", subtitle)
+    body += _email_notification_card(task_title, "Task", "Comment", accent, 45, f'From <strong style="color:#0f172a;">{_email_escape(commenter_name)}</strong>')
+    body += f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:20px;margin-top:14px;"><tr><td style="padding:18px 20px;border-left:4px solid {accent};border-radius:20px;">
+      <div style="font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
+    </td></tr></table>'''
+    html = _email_base(_header_strip(accent, "💬", "Task Comment"), body, "/?action=dashboard", "Reply →", accent, "New comment on your task")
     send_email(user_email, subject, html, workspace_id)
 
 
-# ── Extended Email Notification Functions ─────────────────────────────────────
-
 def send_task_reassigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    """Premium email: task reassigned to a different user."""
-    accent  = "#818cf8"
-    subject = f"\U0001f504 Task reassigned to you: {task_title}"
-    header  = _header_strip(accent, "🔄", "Reassignment")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">You're now on this task 🔄</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{assigner_name}</strong> has reassigned this task to you.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Open Task \u2192", accent)
+    accent = "#0ea5e9"
+    subject = f"🔁 Task reassigned: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> reassigned this task to you.'
+    body = _email_hero("Task reassigned to you", subtitle)
+    body += _email_notification_card(task_title, "Task", "Reassigned", accent, 20, f'Reassigned by <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong>')
+    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A task was reassigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    """Premium email: task due in 24 hours."""
-    accent  = "#f59e0b"
-    subject = f"\u23f0 Due Tomorrow: {task_title}"
-    header  = _header_strip(accent, "\u23f0", "Due Reminder")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Due tomorrow \u23f0</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        this task is due <strong style="color:{accent};">tomorrow</strong>. Don't miss it!
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">\U0001f4c5 Due {due_date}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Complete Task \u2192", accent)
+    accent = "#f59e0b"
+    subject = f"⏰ Due soon: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, this task is approaching its deadline.'
+    body = _email_hero("Deadline coming up", subtitle)
+    body += _email_notification_card(task_title, "Due soon", "Due soon", accent, 72, f'Deadline: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
+    body += _email_meta_grid("Focus", "Finish or update", "Reminder", "Due within 24 hours", accent)
+    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is due soon")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    """Premium email: task overdue."""
-    accent  = "#ef4444"
-    subject = f"\U0001f6a8 Overdue: {task_title}"
-    header  = _header_strip(accent, "\U0001f6a8", "Overdue Alert")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">This task is overdue \U0001f6a8</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        the deadline has passed. Please complete or update this task immediately.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Overdue Task</p>
-          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">Was due {due_date}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Update Task \u2192", accent)
+    accent = "#ef4444"
+    subject = f"🚨 Overdue: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, this deadline has passed. Please update the task or complete it.'
+    body = _email_hero("This task is overdue", subtitle)
+    body += _email_notification_card(task_title, "Overdue task", "Overdue", accent, 88, f'Was due: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
+    body += _email_meta_grid("Risk", "Schedule impact", "Next step", "Update status today", accent)
+    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is overdue")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_name, ticket_id, priority, workspace_id):
-    """Premium email: support ticket assigned."""
-    priority_meta = {
-        "critical": ("#ef4444", "\U0001f534", "Critical"),
-        "high":     ("#f97316", "\U0001f7e0", "High"),
-        "medium":   ("#f59e0b", "\U0001f7e1", "Medium"),
-        "low":      ("#10b981", "\U0001f7e2", "Low"),
-    }
-    accent, dot, plabel = priority_meta.get(priority, ("#6366f1", "\U0001f535", "Normal"))
-    subject = f"\U0001f3ab Ticket assigned: {ticket_title}"
-    header  = _header_strip(accent, "\U0001f3ab", "Support Ticket")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">New ticket assigned \U0001f3ab</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{reporter_name}</strong> assigned you a support ticket.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
-          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{dot} {plabel} Priority</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+    priority_key = str(priority or "normal").lower()
+    priority_meta = {"critical": "#ef4444", "high": "#f97316", "medium": "#f59e0b", "low": "#10b981", "normal":"#635bff"}
+    accent = priority_meta.get(priority_key, "#635bff")
+    subject = f"🎫 Ticket assigned: {ticket_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(reporter_name)}</strong> assigned you a support ticket.'
+    body = _email_hero("New ticket assigned", subtitle)
+    body += _email_notification_card(ticket_title, "Support ticket", priority_key.title(), accent, 10, f'Priority: <strong style="color:{accent};">{_email_escape(priority_key.title())}</strong>')
+    body += _email_meta_grid("Owner", user_name, "Reporter", reporter_name, accent)
+    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, "A support ticket has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_status_email(user_email, user_name, ticket_title, new_status, changer_name, ticket_id, workspace_id):
-    """Premium email: ticket status updated."""
-    status_meta = {
-        "open":        ("#6366f1", "\U0001f4c2", "Opened"),
-        "in_progress": ("#f59e0b", "\u26a1",      "In Progress"),
-        "resolved":    ("#10b981", "\u2705",       "Resolved"),
-        "closed":      ("#6b7280", "\U0001f512",   "Closed"),
-    }
-    accent, icon, label = status_meta.get(new_status, ("#6366f1", "\U0001f3ab", "Updated"))
+    accent, label, mark = _email_status_meta(new_status)
+    icon = "✅" if label.lower() in ("resolved", "closed", "completed") else "🎫"
+    progress = 100 if label.lower() in ("resolved", "closed", "completed") else 60
     subject = f"{icon} Ticket {label}: {ticket_title}"
-    header  = _header_strip(accent, icon, "Ticket Update")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Ticket {label.lower()} {icon}</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{changer_name}</strong> updated your ticket status.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
-          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{icon} {label}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(changer_name)}</strong> updated this ticket.'
+    body = _email_hero("Ticket status updated", subtitle)
+    if progress == 100:
+        body += _email_completion_banner("Ticket resolved", "The ticket is now complete/resolved and ready for review or closure.", accent)
+    body += _email_notification_card(ticket_title, "Support ticket", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
+    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, f"Ticket {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
-    """Premium email: @mention in a comment."""
-    accent   = "#a78bfa"
-    initials = "".join(p[0].upper() for p in mentioner_name.split()[:2])
-    subject  = f"\U0001f4ac {mentioner_name} mentioned you in: {context_title}"
-    header   = _header_strip(accent, "\U0001f4ac", "Mention")
-    body     = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Someone mentioned you \U0001f4ac</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        you were mentioned in <strong style="color:#fff;">{context_title}</strong>.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
-            <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <table cellpadding="0" cellspacing="0" border="0">
-                  <tr><td width="38" height="38" style="width:38px;height:38px;border-radius:50%;background:{accent};text-align:center;vertical-align:middle;">
-                    <span style="font-size:14px;font-weight:800;color:#fff;line-height:38px;">{initials}</span>
-                  </td></tr>
-                </table>
-              </td>
-              <td style="vertical-align:middle;">
-                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{mentioner_name}</p>
-                <p style="margin:0;font-size:11px;color:#5a5a7a;">mentioned you</p>
-              </td>
-            </tr>
-          </table>
-          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
-            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
-          </div>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Thread \u2192", accent)
+    accent = "#a855f7"
+    initials = "".join(p[0].upper() for p in str(mentioner_name or "U").split()[:2]) or "U"
+    subject = f"💬 {mentioner_name} mentioned you in: {context_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, you were mentioned in <strong style="color:#0f172a;">{_email_escape(context_title)}</strong>.'
+    body = _email_hero("You were mentioned", subtitle)
+    body += f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fbfdff;border:1px solid #dfe7f3;border-radius:24px;box-shadow:0 18px 44px rgba(15,23,42,.08);"><tr><td style="padding:22px 24px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;"><tr>
+        <td width="44" height="44" align="center" valign="middle" style="width:44px;height:44px;border-radius:50%;background:{accent};color:#ffffff;font-weight:950;font-size:14px;">{_email_escape(initials)}</td>
+        <td style="padding-left:13px;"><div style="font-size:15px;font-weight:950;color:#0f172a;">{_email_escape(mentioner_name)}</div><div style="font-size:12px;color:#667085;">mentioned you</div></td>
+      </tr></table>
+      <div style="background:#f8fbff;border:1px solid #e5edf7;border-left:4px solid {accent};border-radius:18px;padding:16px 18px;font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
+    </td></tr></table>'''
+    html = _email_base(_header_strip(accent, "💬", "Mention"), body, "/?action=dashboard", "View Thread →", accent, "You were mentioned in Project Tracker")
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_completed_email(user_email, user_name, task_title, completer_name, workspace_id):
-    """Premium completion email with confetti-dot celebration row."""
     accent = "#10b981"
-    subject = f"\u2705 Done! {task_title}"
-    confetti_colors = ["#10b981","#6366f1","#f59e0b","#ef4444","#8b5cf6",
-                       "#06b6d4","#f97316","#10b981","#818cf8","#10b981"]
-    dots = "".join(
-        f'<td width="12" height="12" style="width:12px;height:12px;border-radius:50%;background:{c};">&nbsp;</td>'
-        f'<td width="5">&nbsp;</td>'
-        for c in confetti_colors
-    )
-    confetti = f'<table cellpadding="0" cellspacing="4" border="0" style="margin-bottom:20px;"><tr>{dots}</tr></table>'
-    header   = _header_strip(accent, "\u2705", "Task Complete")
-    body     = f"""
-      {confetti}
-      <p style="margin:0 0 6px;font-size:30px;font-weight:900;color:#fff;line-height:1.2;">Task complete! \U0001f389</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{completer_name}</strong> just wrapped this one up.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr>
-          <td style="padding:20px 24px;">
-            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Completed</p>
-            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          </td>
-          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
-            <span style="font-size:28px;">\u2705</span>
-          </td>
-        </tr>
-      </table>
-      <p style="margin:16px 0 0;font-size:13px;color:#4a4a5a;text-align:center;">Great work by the team \U0001f91c</p>"""
-    html = _email_base(header, body, APP_URL, "View Project \u2192", accent)
+    subject = f"✅ Completed: {task_title}"
+    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(completer_name)}</strong> completed this task.'
+    body = _email_hero("Task completed", subtitle)
+    body += _email_completion_banner("Completed successfully", "This task has reached 100%. Review the output or open the dashboard for the next action.", accent)
+    body += _email_notification_card(task_title, "Completed task", "Completed", accent, 100, f'Completed by <strong style="color:#0f172a;">{_email_escape(completer_name)}</strong>')
+    body += _email_meta_grid("Progress", "100%", "Status", "Completed", accent)
+    html = _email_base(_header_strip(accent, "✅", "Task Complete"), body, "/?action=dashboard", "View Project →", accent, "A task has been completed")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -3069,25 +2921,12 @@ def signout_redirect():
 
 def _send_verification_email(user_email, user_name, token, workspace_id=None):
     """Send email verification link."""
-    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
-    link = f"{base}/api/auth/verify-email?token={token}"
+    link = _email_abs_url(f"/api/auth/verify-email?token={token}")
     subject = "Project Tracker — Verify Your Email"
-    body = f"""
-    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
-    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
-      </div>
-      <div style="padding:32px;">
-        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
-        <p style="color:#555;margin:0 0 24px;">Click the button below to verify your email address and activate your account.</p>
-        <div style="text-align:center;margin:0 0 24px;">
-          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Verify Email</a>
-        </div>
-        <p style="color:#888;font-size:12px;">Link expires in 24 hours. If you didn't create an account, ignore this email.</p>
-      </div>
-    </div></body></html>"""
-    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
+    body = _email_hero("Verify your email", f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, confirm this address to activate your Project Tracker account.')
+    body += _email_notification_card("Email verification", "Security", "Action required", "#635bff", 50, "This link expires in 24 hours.")
+    html = _email_base(_header_strip("#635bff", "🔐", "Email Verification"), body, link, "Verify Email →", "#635bff", "Verify your Project Tracker email")
+    threading.Thread(target=send_email, args=(user_email, subject, html, workspace_id), daemon=True).start()
 
 @app.route("/api/auth/verify-email")
 def verify_email():
@@ -3127,25 +2966,12 @@ def resend_verification():
 
 def _send_password_reset_email(user_email, user_name, token, workspace_id=None):
     """Send password reset email. Token expires in 12 minutes."""
-    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
-    link = f"{base}/?action=reset-password&token={token}"
+    link = _email_abs_url(f"/?action=reset-password&token={token}")
     subject = "Project Tracker — Reset Your Password"
-    body = f"""
-    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
-    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
-      </div>
-      <div style="padding:32px;">
-        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
-        <p style="color:#555;margin:0 0 24px;">Click the button below to reset your password. This link expires in <b>12 minutes</b>.</p>
-        <div style="text-align:center;margin:0 0 24px;">
-          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Reset Password</a>
-        </div>
-        <p style="color:#888;font-size:12px;">If you didn't request a password reset, you can safely ignore this email.</p>
-      </div>
-    </div></body></html>"""
-    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
+    body = _email_hero("Reset your password", f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, use the secure button below to reset your password.')
+    body += _email_notification_card("Password reset request", "Security", "12 min expiry", "#f59e0b", 70, "If you did not request this, you can safely ignore the email.")
+    html = _email_base(_header_strip("#f59e0b", "🔑", "Password Reset"), body, link, "Reset Password →", "#f59e0b", "Reset your Project Tracker password")
+    threading.Thread(target=send_email, args=(user_email, subject, html, workspace_id), daemon=True).start()
 
 @app.route("/api/auth/forgot-password", methods=["POST"])
 def forgot_password():
@@ -3275,25 +3101,12 @@ def logout_all_sessions():
 # ── Email Invites ─────────────────────────────────────────────────────────────
 
 def _send_workspace_invite_email(to_email, inviter_name, ws_name, token, role, workspace_id=None):
-    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
-    link = f"{base}/?action=accept-invite&token={token}"
+    link = _email_abs_url(f"/?action=accept-invite&token={token}")
     subject = f"You're invited to join {ws_name} on Project Tracker"
-    body = f"""
-    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
-    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
-      </div>
-      <div style="padding:32px;">
-        <h2 style="color:#111;margin:0 0 8px;">{inviter_name} invited you!</h2>
-        <p style="color:#555;margin:0 0 8px;">You've been invited to join the <b>{ws_name}</b> workspace as <b>{role.title()}</b>.</p>
-        <div style="text-align:center;margin:24px 0;">
-          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Accept Invitation</a>
-        </div>
-        <p style="color:#888;font-size:12px;">Invite link expires in 7 days. If you weren't expecting this, ignore it.</p>
-      </div>
-    </div></body></html>"""
-    threading.Thread(target=send_email, args=(to_email, subject, body, workspace_id), daemon=True).start()
+    body = _email_hero("Workspace invitation", f'<strong style="color:#0f172a;">{_email_escape(inviter_name)}</strong> invited you to join <strong style="color:#0f172a;">{_email_escape(ws_name)}</strong>.')
+    body += _email_notification_card(ws_name, "Workspace", role.title(), "#635bff", 25, f'Role: <strong style="color:#0f172a;">{_email_escape(role.title())}</strong> · Invite expires in 7 days')
+    html = _email_base(_header_strip("#635bff", "👥", "Workspace Invite"), body, link, "Accept Invitation →", "#635bff", "You have been invited to a Project Tracker workspace")
+    threading.Thread(target=send_email, args=(to_email, subject, html, workspace_id), daemon=True).start()
 
 @app.route("/api/workspace/invite", methods=["POST"])
 @login_required
