@@ -7264,7 +7264,7 @@ def sse_stream():
         try:
             while True:
                 try:
-                    msg = q.get(timeout=15)  # 15s timeout: release thread, client reconnects
+                    msg = q.get(timeout=8)   # 8s: survives Railway/nginx 30s proxy idle timeout
                     yield f"data: {json.dumps(msg)}\n\n"
                 except _queue.Empty:
                     # Heartbeat keeps connection alive through proxies
