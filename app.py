@@ -922,48 +922,32 @@ RESEND_FROM_EMAIL = os.environ.get('RESEND_FROM_EMAIL', '')
 APP_URL = os.environ.get('APP_URL', 'http://localhost:5000')
 
 def _send_via_resend(to_email, subject, body_html, from_email):
-    """Send email via Resend HTTP API — works on Railway (no SMTP port blocking).
+    """Send email via Resend SDK — avoids Cloudflare 1010 blocks that affect
+    raw urllib calls from Railway IPs. The official SDK uses requests with
+    proper headers/TLS fingerprinting that passes Cloudflare bot checks.
 
-    Common failure: HTTP 403 = the 'from' domain is not verified in Resend.
-    Fix: add RESEND_FROM_EMAIL env var pointing to a verified sender address.
+    Error 1010 = Cloudflare Access Denied (bot fingerprint mismatch on raw
+    urllib calls). Switching to the resend SDK resolves this entirely.
     """
     if not RESEND_API_KEY:
         return False
-    # Prefer the dedicated RESEND_FROM_EMAIL env var so the verified sender
-    # is always used regardless of what SMTP/FROM_EMAIL is configured to.
-    effective_from = RESEND_FROM_EMAIL or from_email or 'onboarding@resend.dev'
+    effective_from = RESEND_FROM_EMAIL or from_email or f"noreply@projecttracker.in"
     try:
-        import json as _json
-        payload = _json.dumps({
+        import resend as _resend
+        _resend.api_key = RESEND_API_KEY
+        params = {
             "from": f"Project Tracker <{effective_from}>",
             "to": [to_email],
             "subject": subject,
-            "html": body_html
-        }).encode()
-        req = urllib.request.Request(
-            "https://api.resend.com/emails",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = resp.read()
-            log.info("[Resend] Sent to %s", to_email)
-            return True
-    except urllib.error.HTTPError as e:
-        # Log the full response body — Resend puts the real reason here
-        # (e.g. "The gmail.com domain is not verified" for 403)
-        try:
-            err_body = e.read().decode('utf-8', errors='replace')
-        except Exception:
-            err_body = '<unreadable>'
-        log.error("[Resend] HTTP error %s from=%s to=%s body=%s", e.code, effective_from, to_email, err_body)
-        return False
+            "html": body_html,
+        }
+        resp = _resend.Emails.send(params)
+        # SDK raises on error; if we reach here it succeeded
+        log.info("[Resend] Sent to %s (id=%s)", to_email, resp.get("id", "?"))
+        return True
     except Exception as e:
-        log.error("[Resend] Error: %s: %s", type(e).__name__, e)
+        log.error("[Resend] Send failed from=%s to=%s error=%s: %s",
+                  effective_from, to_email, type(e).__name__, e)
         return False
 
 def send_email(to_email, subject, body_html, workspace_id=None):
