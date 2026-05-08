@@ -2059,9 +2059,70 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
     {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
     {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
-  const navItems=(isAdminManager?adminNav:devNav).filter(it=>
-    it.id!=='dm'||(wsDmEnabled||isAdminManager)
-  );
+  const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
+
+  // ── Sidebar nav reorder + pin ────────────────────────────────────────────
+  const roleKey=isAdminManager?'admin':'dev';
+  const [navOrder,setNavOrder]=useState(()=>{try{const s=localStorage.getItem('pf_nav_order_'+roleKey);return s?JSON.parse(s):null;}catch{return null;}});
+  const [pinnedTop,setPinnedTop]=useState(()=>{try{const s=localStorage.getItem('pf_nav_pin_top_'+roleKey);return new Set(s?JSON.parse(s):[]);}catch{return new Set();}});
+  const [pinnedBottom,setPinnedBottom]=useState(()=>{try{const s=localStorage.getItem('pf_nav_pin_bot_'+roleKey);return new Set(s?JSON.parse(s):[]);}catch{return new Set();}});
+  const [dragOver,setDragOver]=useState(null);
+  const [hoverNav,setHoverNav]=useState(null);
+  const dragSrc=useRef(null);
+
+  const saveNavPrefs=(order,pTop,pBot)=>{
+    try{
+      localStorage.setItem('pf_nav_order_'+roleKey,JSON.stringify(order||[]));
+      localStorage.setItem('pf_nav_pin_top_'+roleKey,JSON.stringify([...pTop]));
+      localStorage.setItem('pf_nav_pin_bot_'+roleKey,JSON.stringify([...pBot]));
+    }catch{}
+  };
+  const togglePin=(id,zone)=>{
+    const npt=new Set(pinnedTop),npb=new Set(pinnedBottom);
+    if(zone==='top'){if(npt.has(id))npt.delete(id);else{npt.add(id);npb.delete(id);}}
+    else{if(npb.has(id))npb.delete(id);else{npb.add(id);npt.delete(id);}}
+    setPinnedTop(npt);setPinnedBottom(npb);
+    saveNavPrefs(navOrder,npt,npb);
+  };
+  const orderedSections=useMemo(()=>{
+    let items=navOrder
+      ?navOrder.map(id=>baseNavItems.find(x=>x.id===id)).filter(Boolean)
+      :[...baseNavItems];
+    // Append any items added after order was saved
+    baseNavItems.forEach(x=>{if(!items.find(i=>i.id===x.id))items.push(x);});
+    return{
+      top:items.filter(x=>pinnedTop.has(x.id)),
+      mid:items.filter(x=>!pinnedTop.has(x.id)&&!pinnedBottom.has(x.id)),
+      bot:items.filter(x=>pinnedBottom.has(x.id)),
+    };
+  },[navOrder,pinnedTop,pinnedBottom,baseNavItems]);
+
+  const renderNavBtn=it=>{
+    const isOfflineLocked=offlineMode&&it.id!=='vault'&&it.id!=='password-generator';
+    return html`<button key=${it.id}
+      title=${col?it.label:(isOfflineLocked?it.label+' (requires backend)':'')}
+      onClick=${()=>{if(isOfflineLocked)return;if(it.href){window.open(it.href,'_blank');}else{setView(it.id);}}}
+      style=${{
+        display:'flex',alignItems:'center',gap:col?0:10,width:'100%',
+        padding:col?'10px 0':'9px 10px',borderRadius:9,border:'none',
+        cursor:isOfflineLocked?'not-allowed':'pointer',
+        background:baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
+        color:isOfflineLocked?'rgba(200,195,240,0.25)':(baseView===it.id?'#a5b4fc':'rgba(200,195,240,0.65)'),
+        fontSize:12,fontWeight:baseView===it.id?700:500,transition:'all .12s',textAlign:'left',
+        borderLeft:baseView===it.id&&!col?'2px solid #818cf8':'2px solid transparent',
+        justifyContent:col?'center':'flex-start',position:'relative',
+        opacity:isOfflineLocked?0.35:1,
+        boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none'
+      }}
+      onMouseEnter=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
+      onMouseLeave=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
+      <span style=${{flexShrink:0,width:col?'auto':18,display:'flex',alignItems:'center',justifyContent:'center',opacity:baseView===it.id?1:.8}}>${NAV_ICONS[it.id]||null}</span>
+      ${!col?html`<span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:12,flex:1,paddingRight:hoverNav===it.id&&!col?44:0}}>${it.label}</span>`:null}
+      ${it.badge&&!col&&!isOfflineLocked?html`<span style=${{fontSize:8,fontWeight:800,padding:'1px 5px',borderRadius:4,background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',letterSpacing:'.04em',flexShrink:0}}>${it.badge}</span>`:null}
+      ${it.id==='notifs'&&unread>0&&!isOfflineLocked?html`<span style=${{position:'absolute',top:6,right:col?6:10,minWidth:16,height:16,borderRadius:8,background:'var(--rd)',color:'#fff',fontSize:9,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',padding:'0 4px'}}>${unread>9?'9+':unread}</span>`:null}
+      ${it.id==='dm'&&dmUnread.reduce((a,x)=>a+(x.cnt||0),0)>0&&!isOfflineLocked?html`<span style=${{position:'absolute',top:6,right:col?6:10,minWidth:16,height:16,borderRadius:8,background:'var(--cy)',color:'#fff',fontSize:9,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',padding:'0 4px'}}>${dmUnread.reduce((a,x)=>a+(x.cnt||0),0)}</span>`:null}
+    </button>`;
+  };
 
   const themeIcon=dark
     ?html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`
@@ -2098,37 +2159,66 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
       </div>
 
             <nav style=${{flex:1,overflowY:'auto',padding:'8px 6px',display:'flex',flexDirection:'column',gap:2}}>
-        ${navItems.map(it=>{
-          const isOfflineLocked = offlineMode && it.id!=='vault' && it.id!=='password-generator';
-          return html`
-          <button key=${it.id}
-            title=${col?it.label:(isOfflineLocked?it.label+' (requires backend)':'')}
-            onClick=${()=>{ if(isOfflineLocked) return; if(it.href){ window.open(it.href,'_blank'); } else { setView(it.id); } }}
-            style=${{
-              display:'flex',alignItems:'center', gap:col?0:10, width:'100%', padding:col?'10px 0':'9px 10px', borderRadius:9,border:'none',
-              cursor:isOfflineLocked?'not-allowed':'pointer',
-              background:baseView===it.id?'rgba(90,94,247,0.18)':'transparent',
-              color:isOfflineLocked?'rgba(200,195,240,0.25)':(baseView===it.id?'#a5b4fc':'rgba(200,195,240,0.65)'),
-              fontSize:12,fontWeight:baseView===it.id?700:500,
-              transition:'all .12s',textAlign:'left',
-              borderLeft:baseView===it.id&&!col?'2px solid #818cf8':'2px solid transparent',
-              justifyContent:col?'center':'flex-start', position:'relative',
-              opacity:isOfflineLocked?0.35:1,
-              boxShadow:baseView===it.id?'inset 0 0 0 1px rgba(129,140,248,0.15),0 0 20px rgba(90,94,247,0.1)':'none'
+
+        ${orderedSections.top.length>0?html`
+          ${!col?html`<div style=${{fontSize:8,fontWeight:700,color:'rgba(165,180,252,0.35)',textTransform:'uppercase',letterSpacing:'0.08em',padding:'4px 10px 2px'}}>Pinned</div>`:null}
+          ${orderedSections.top.map(it=>html`
+            <div key=${it.id} style=${{position:'relative'}}
+              onMouseEnter=${()=>setHoverNav(it.id)} onMouseLeave=${()=>setHoverNav(null)}>
+              ${renderNavBtn(it)}
+              ${hoverNav===it.id&&!col?html`
+                <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                  <button title="Unpin from top" onClick=${e=>{e.stopPropagation();togglePin(it.id,'top');}}
+                    style=${{background:'rgba(239,68,68,0.25)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#f87171',fontSize:9,lineHeight:'14px'}}>✕</button>
+                </div>`:null}
+            </div>`)}
+          <div style=${{height:1,background:'rgba(90,94,247,0.15)',margin:'3px 8px 3px'}}></div>`:null}
+
+        ${orderedSections.mid.map(it=>html`
+          <div key=${it.id}
+            draggable=${!col}
+            onDragStart=${()=>{dragSrc.current=it.id;}}
+            onDragOver=${e=>{e.preventDefault();setDragOver(it.id);}}
+            onDragLeave=${()=>setDragOver(null)}
+            onDrop=${e=>{
+              e.preventDefault();setDragOver(null);
+              const src=dragSrc.current;if(!src||src===it.id)return;
+              const all=[...orderedSections.top,...orderedSections.mid,...orderedSections.bot];
+              const ids=all.map(x=>x.id);
+              const fi=ids.indexOf(src),ti=ids.indexOf(it.id);
+              if(fi<0||ti<0)return;
+              ids.splice(fi,1);ids.splice(ids.indexOf(it.id)+(fi<ti?1:0),0,src);
+              setNavOrder(ids);saveNavPrefs(ids,pinnedTop,pinnedBottom);
             }}
-            onMouseEnter=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='rgba(90,94,247,0.10)';e.currentTarget.style.color='#a5b4fc';}}}
-            onMouseLeave=${e=>{if(baseView!==it.id&&!isOfflineLocked){e.currentTarget.style.background='transparent';e.currentTarget.style.color='rgba(200,195,240,0.65)';}}}>
-            <span style=${{flexShrink:0,width:col?'auto':18,display:'flex',alignItems:'center',justifyContent:'center',opacity:baseView===it.id?1:.8}}>${NAV_ICONS[it.id]||null}</span>
-            ${!col?html`<span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:12,flex:1}}>${it.label}</span>`:null}
-            ${it.badge&&!col&&!isOfflineLocked?html`<span style=${{fontSize:8,fontWeight:800,padding:'1px 5px',borderRadius:4,background:'linear-gradient(135deg,#5a5ef7,#a855f7)',color:'#fff',letterSpacing:'.04em',flexShrink:0}}>${it.badge}</span>`:null}
-            ${it.id==='notifs'&&unread>0&&!isOfflineLocked?html`<span style=${{
-              position:'absolute',top:6,right:col?6:10, minWidth:16,height:16,borderRadius:8, background:'var(--rd)',color:'#fff', fontSize:9,fontWeight:700, display:'flex',alignItems:'center',justifyContent:'center', padding:'0 4px'
-            }}>${unread>9?'9+':unread}</span>`:null}
-            ${it.id==='dm'&&dmUnread.reduce((a,x)=>a+(x.cnt||0),0)>0&&!isOfflineLocked?html`<span style=${{
-              position:'absolute',top:6,right:col?6:10, minWidth:16,height:16,borderRadius:8, background:'var(--cy)',color:'#fff', fontSize:9,fontWeight:700, display:'flex',alignItems:'center',justifyContent:'center', padding:'0 4px'
-            }}>${dmUnread.reduce((a,x)=>a+(x.cnt||0),0)}</span>`:null}
-          </button>`;
-        })}
+            style=${{position:'relative',borderRadius:9,
+              outline:dragOver===it.id?'1px dashed rgba(129,140,248,0.5)':'none',
+              background:dragOver===it.id?'rgba(90,94,247,0.07)':'transparent',
+              transition:'background .1s'
+            }}
+            onMouseEnter=${()=>setHoverNav(it.id)}
+            onMouseLeave=${()=>setHoverNav(null)}>
+            ${renderNavBtn(it)}
+            ${hoverNav===it.id&&!col?html`
+              <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                <button title="Pin to top" onClick=${e=>{e.stopPropagation();togglePin(it.id,'top');}}
+                  style=${{background:'rgba(90,94,247,0.3)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#a5b4fc',fontSize:9,lineHeight:'14px'}}>↑</button>
+                <button title="Pin to bottom" onClick=${e=>{e.stopPropagation();togglePin(it.id,'bot');}}
+                  style=${{background:'rgba(90,94,247,0.3)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#a5b4fc',fontSize:9,lineHeight:'14px'}}>↓</button>
+              </div>`:null}
+          </div>`)}
+
+        ${orderedSections.bot.length>0?html`
+          <div style=${{height:1,background:'rgba(90,94,247,0.15)',margin:'3px 8px 3px'}}></div>
+          ${orderedSections.bot.map(it=>html`
+            <div key=${it.id} style=${{position:'relative'}}
+              onMouseEnter=${()=>setHoverNav(it.id)} onMouseLeave=${()=>setHoverNav(null)}>
+              ${renderNavBtn(it)}
+              ${hoverNav===it.id&&!col?html`
+                <div style=${{position:'absolute',right:6,top:'50%',transform:'translateY(-50%)',display:'flex',gap:2,zIndex:20}}>
+                  <button title="Unpin from bottom" onClick=${e=>{e.stopPropagation();togglePin(it.id,'bot');}}
+                    style=${{background:'rgba(239,68,68,0.25)',border:'none',borderRadius:4,cursor:'pointer',padding:'2px 5px',color:'#f87171',fontSize:9,lineHeight:'14px'}}>✕</button>
+                </div>`:null}
+            </div>`)}`:null}
 
       </nav>
 
@@ -3120,6 +3210,8 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       }
       // Replace temp with real project from server (has real ID, created_at, etc.)
       const realProj={...newProj,_localTs:Date.now()};
+      // Normalize members: DB returns a JSON string, card needs a real array
+      if(!Array.isArray(realProj.members)){try{realProj.members=JSON.parse(realProj.members||'[]');}catch{realProj.members=[];}}
       setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
       // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
       setTimeout(()=>reload(),2000);
@@ -8852,7 +8944,8 @@ function App(){
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
-      setData({users:Array.isArray(users)?users:[],projects:Array.isArray(projects)?projects:[],tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
+      const _pm=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
+      setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
