@@ -864,32 +864,72 @@ def generate_otp():
     return str(secrets.randbelow(900000) + 100000)  # always 6 digits
 
 def send_otp_email(to_email, otp_code, user_name):
-    """Send OTP verification email."""
-    subject = "Project Tracker — Your Login Code"
-    body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; background:#f4f4f4; padding:20px;">
-      <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-        <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
-          <h1 style="color:#5a8cff;margin:0;font-size:22px;letter-spacing:-0.5px;">Project Tracker</h1>
-        </div>
-        <div style="padding:32px;">
-          <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
-          <p style="color:#555;margin:0 0 28px;">Use the code below to complete your sign-in. It expires in <b>10 minutes</b>.</p>
-          <div style="text-align:center;margin:0 0 28px;">
-            <div style="display:inline-block;background:#f0fff0;border:2px solid #5a8cff;border-radius:12px;padding:18px 36px;">
-              <span style="font-size:38px;font-weight:800;letter-spacing:10px;color:#0a1a00;font-family:monospace;">{otp_code}</span>
-            </div>
-          </div>
-          <p style="color:#888;font-size:13px;margin:0;">If you didn't request this code, you can safely ignore this email. Do not share this code with anyone.</p>
-        </div>
-        <div style="background:#f9f9f9;padding:14px 32px;text-align:center;border-top:1px solid #eee;">
-          <p style="color:#aaa;font-size:11px;margin:0;">Project Tracker · Team Project Management</p>
-        </div>
-      </div>
-    </body>
-    </html>
-    """
+    """Premium OTP email — dark theme matching all other notification emails."""
+    subject = "Project Tracker \u2014 Your Login Code"
+    accent  = "#6366f1"
+    # Split code into individual digit spans for spacing
+    digits  = "".join(
+        f'<td style="padding:0 4px;"><span style="font-size:36px;font-weight:900;'
+        f'color:#fff;font-family:monospace;letter-spacing:0;">{d}</span></td>'
+        for d in str(otp_code)
+    )
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
+<body style="margin:0;padding:0;background:#0f0f13;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f0f13;min-height:100vh;">
+    <tr><td align="center" style="padding:40px 16px;">
+      <table width="560" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:560px;width:100%;background:#18181f;border-radius:20px;
+                    overflow:hidden;box-shadow:0 32px 80px rgba(0,0,0,.6);">
+        <!-- accent bar -->
+        <tr><td style="height:4px;background:linear-gradient(90deg,{accent},transparent);font-size:0;">&nbsp;</td></tr>
+        <!-- logo row -->
+        <tr><td style="padding:22px 32px 16px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td><span style="font-size:18px;font-weight:900;color:#fff;letter-spacing:-1px;">
+                Project<span style="color:{accent};">Tracker</span></span></td>
+              <td align="right"><span style="font-size:10px;color:#4a4a5a;letter-spacing:1px;text-transform:uppercase;">Login Code</span></td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="height:1px;background:#2a2a35;margin:0 32px;font-size:0;">&nbsp;</td></tr>
+        <!-- body -->
+        <tr><td style="padding:32px 32px 24px;">
+          <p style="margin:0 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Your login code \U0001f510</p>
+          <p style="margin:0 0 28px;font-size:14px;color:#8888a8;line-height:1.6;">
+            Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+            use the code below to complete your sign-in.
+            It expires in <strong style="color:{accent};">10 minutes</strong>.
+          </p>
+          <!-- OTP box -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 28px;">
+            <tr>
+              <td style="background:#111118;border:2px solid {accent};border-radius:16px;padding:20px 32px;text-align:center;">
+                <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                  <tr>{digits}</tr>
+                </table>
+                <p style="margin:10px 0 0;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">One-time code</p>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:0;font-size:12px;color:#4a4a5a;line-height:1.6;text-align:center;">
+            If you didn't request this code, you can safely ignore this email.<br>
+            Never share this code with anyone.
+          </p>
+        </td></tr>
+        <!-- footer -->
+        <tr><td style="background:#111118;padding:16px 32px;border-top:1px solid #2a2a35;text-align:center;">
+          <p style="margin:0;font-size:10px;color:#4a4a5a;letter-spacing:.5px;">
+            PROJECT TRACKER &nbsp;\u00b7&nbsp; Team Project Management
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
     try:
         threading.Thread(target=send_email, args=(to_email, subject, body), daemon=True).start()
         return True
@@ -4255,7 +4295,7 @@ def create_task():
         cname=creator["name"] if creator else "Someone"
         base_ts=int(datetime.now().timestamp()*1000)
         assignee_user=None
-        if d.get("assignee") and d["assignee"]!=session["user_id"]:
+        if d.get("assignee"):
             assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
         proj=None
         proj_members=[]
@@ -4388,16 +4428,15 @@ def update_task(tid):
         if new_assignee_val != old_assignee and new_assignee_val:
             assignee_name = (db.execute("SELECT name FROM users WHERE id=?", (new_assignee_val,)).fetchone() or {}).get("name","?")
             log_task_event(db, wid(), tid, session["user_id"], "assigned", old_assignee or "", assignee_name)
-            # Email the newly assigned person (skip if assigning to yourself)
-            if new_assignee_val != session["user_id"]:
-                new_assignee_row = db.execute("SELECT name,email FROM users WHERE id=?", (new_assignee_val,)).fetchone()
-                reassigner_row   = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
-                reassigner_name  = reassigner_row["name"] if reassigner_row else "Someone"
-                if new_assignee_row and new_assignee_row["email"]:
-                    threading.Thread(target=send_task_reassigned_email,
-                        args=(new_assignee_row["email"], new_assignee_row["name"],
-                              d.get("title", t["title"]), reassigner_name, tid, wid()),
-                        daemon=True).start()
+            # Email the newly assigned person (including self-assignment)
+            new_assignee_row = db.execute("SELECT name,email FROM users WHERE id=?", (new_assignee_val,)).fetchone()
+            reassigner_row   = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            reassigner_name  = reassigner_row["name"] if reassigner_row else "Someone"
+            if new_assignee_row and new_assignee_row["email"]:
+                threading.Thread(target=send_task_reassigned_email,
+                    args=(new_assignee_row["email"], new_assignee_row["name"],
+                          d.get("title", t["title"]), reassigner_name, tid, wid()),
+                    daemon=True).start()
         if d.get("stage") and d["stage"]!=old_stage:
             base_ts2=int(datetime.now().timestamp()*1000)
             # Notify project members when a task is marked completed
@@ -4411,7 +4450,7 @@ def update_task(tid):
                     except: _comp_members = []
                     _notified_completed = set()
                     for _cm_uid in _comp_members:
-                        if _cm_uid == session["user_id"] or _cm_uid in _notified_completed:
+                        if _cm_uid in _notified_completed:
                             continue
                         _cm_user = db.execute("SELECT name,email FROM users WHERE id=?", (_cm_uid,)).fetchone()
                         if _cm_user and _cm_user["email"]:
@@ -4419,7 +4458,7 @@ def update_task(tid):
                             threading.Thread(target=send_task_completed_email,
                                 args=(_cm_user["email"], _cm_user["name"], t["title"], _comp_actor_name, wid()),
                                 daemon=True).start()
-            if t["assignee"] and t["assignee"]!=session["user_id"]:
+            if t["assignee"]:
                 nid=f"n{base_ts2}"
                 db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                            (nid,wid(),"status_change",f"Task '{t['title']}' moved to {d['stage']}",
@@ -4486,7 +4525,7 @@ def update_task(tid):
                 for mu in all_users_ws:
                     for mn in mentioned_names:
                         if mu["name"].strip().lower() == mn.strip().lower():
-                            if mu["id"] != session["user_id"] and mu["id"] != t.get("assignee","") and mu["email"]:
+                            if mu["id"] != t.get("assignee","") and mu["email"]:
                                 threading.Thread(target=send_mention_email,
                                     args=(mu["email"], mu["name"], commenter_name_m,
                                           t["title"], comment_text_raw, wid()),
@@ -4901,13 +4940,13 @@ def create_ticket():
                     d.get("priority","medium"),d.get("status","open"),d.get("assignee",""),
                     session["user_id"],d.get("project",""),json.dumps(d.get("tags",[])),now,now,
                     d.get("team_id","")))
-        if d.get("assignee") and d["assignee"]!=session["user_id"]:
+        if d.get("assignee"):
             nid=f"n{int(datetime.now().timestamp()*1000)}"
             reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
             rname=reporter["name"] if reporter else "Someone"
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now))
-            # Email the assigned person
+            # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_tkt and assignee_tkt["email"]:
                 threading.Thread(target=send_ticket_assigned_email,
@@ -4945,7 +4984,7 @@ def update_ticket(tid):
             _tkt_changer_name = _tkt_changer["name"] if _tkt_changer else "Someone"
             _tkt_notified = set()
             for _tkt_uid in [t["assignee"], t["reporter"]]:
-                if not _tkt_uid or _tkt_uid == session["user_id"] or _tkt_uid in _tkt_notified:
+                if not _tkt_uid or _tkt_uid in _tkt_notified:
                     continue
                 _tkt_notified.add(_tkt_uid)
                 _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
