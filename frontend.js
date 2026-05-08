@@ -2149,7 +2149,9 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
       // Optimistic insert for new task so it doesn't vanish while reload is in-flight
       if(r&&r.id)setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
     }
-    onReload();
+    // bust=true on new task creation — bypasses SWR cache so the new task
+    // is fetched fresh from DB and never vanishes on the next reload.
+    onReload(undefined,{bust:!p.id});
     return r;
   };
   const delTask=async id=>{
@@ -2740,7 +2742,10 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       // NEW task: inject immediately so it doesn't vanish while reload is in-flight
       setData&&setData(prev=>({...prev,tasks:[r,...prev.tasks]}));
     }
-    reload();return r;
+    // bust=true bypasses SWR cache — ensures the fresh task list is fetched
+    // from DB directly, preventing the new task from vanishing when the cache
+    // (TTL up to 60s) overwrites the optimistic insert on the next poll.
+    reload(undefined,{bust:!p.id});return r;
   };
   const delT=async id=>{
     // Optimistic: remove from UI immediately
@@ -7399,12 +7404,13 @@ function App(){
 
   const [teamLoading,setTeamLoading]=useState(false);
 
-  const load=useCallback(async(overrideTeamCtx)=>{
+  const load=useCallback(async(overrideTeamCtx,{bust=false}={})=>{
     if(!cu)return;
     const tCtx=overrideTeamCtx!==undefined?overrideTeamCtx:teamCtx;
     try{
-      const projUrl=tCtx?'/api/projects?team_id='+tCtx:'/api/projects';
-      const taskUrl=tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks';
+      const bustSuffix=bust?'&bust=1':'';
+      const projUrl=(tCtx?'/api/projects?team_id='+tCtx:'/api/projects')+(bust?'&bust=1':'');
+      const taskUrl=(tCtx?'/api/tasks?team_id='+tCtx:'/api/tasks')+(bust?'&bust=1':'');
       const [users,projects,tasks,notifs,dmu,ws,teamsRaw,ticketsRaw,rems]=await Promise.all([
         api.get('/api/users'),api.get(projUrl),api.get(taskUrl), api.get('/api/notifications'),api.get('/api/dm/unread'),api.get('/api/workspace'), api.get('/api/teams'),api.get('/api/tickets'),api.get('/api/reminders'), ]);
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];

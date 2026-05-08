@@ -915,16 +915,27 @@ SMTP_USERNAME = os.environ.get('SMTP_USERNAME', '')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
 FROM_EMAIL = os.environ.get('FROM_EMAIL', SMTP_USERNAME)
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
+# RESEND_FROM_EMAIL must be a verified sender/domain in your Resend account.
+# e.g. "noreply@yourdomain.com". If not set, falls back to FROM_EMAIL / SMTP_USERNAME.
+# A 403 from Resend almost always means the "from" domain is not verified.
+RESEND_FROM_EMAIL = os.environ.get('RESEND_FROM_EMAIL', '')
 APP_URL = os.environ.get('APP_URL', 'http://localhost:5000')
 
 def _send_via_resend(to_email, subject, body_html, from_email):
-    """Send email via Resend HTTP API — works on Railway (no SMTP port blocking)."""
+    """Send email via Resend HTTP API — works on Railway (no SMTP port blocking).
+
+    Common failure: HTTP 403 = the 'from' domain is not verified in Resend.
+    Fix: add RESEND_FROM_EMAIL env var pointing to a verified sender address.
+    """
     if not RESEND_API_KEY:
         return False
+    # Prefer the dedicated RESEND_FROM_EMAIL env var so the verified sender
+    # is always used regardless of what SMTP/FROM_EMAIL is configured to.
+    effective_from = RESEND_FROM_EMAIL or from_email or 'onboarding@resend.dev'
     try:
         import json as _json
         payload = _json.dumps({
-            "from": f"Project Tracker <{from_email or 'noreply@project-tracker.in'}>",
+            "from": f"Project Tracker <{effective_from}>",
             "to": [to_email],
             "subject": subject,
             "html": body_html
@@ -943,8 +954,13 @@ def _send_via_resend(to_email, subject, body_html, from_email):
             log.info("[Resend] Sent to %s", to_email)
             return True
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        log.error("[Resend] HTTP error %s", e.code)
+        # Log the full response body — Resend puts the real reason here
+        # (e.g. "The gmail.com domain is not verified" for 403)
+        try:
+            err_body = e.read().decode('utf-8', errors='replace')
+        except Exception:
+            err_body = '<unreadable>'
+        log.error("[Resend] HTTP error %s from=%s to=%s body=%s", e.code, effective_from, to_email, err_body)
         return False
     except Exception as e:
         log.error("[Resend] Error: %s: %s", type(e).__name__, e)
@@ -3764,15 +3780,19 @@ def bulk_assign_team():
 def get_tasks():
     team_id = request.args.get("team_id","")
     ws, uid = wid(), session["user_id"]
-    # Check shared appdata cache first — avoids DB entirely during polling
-    data, found = _appdata_cache_get(ws, uid, "tasks")
-    if found:
-        if team_id:
-            return jsonify([t for t in data if t.get("team_id") == team_id])
-        return jsonify(data)
-    cache_key = f"tasks:{ws}:{team_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
+    bust = request.args.get("bust") == "1"
+    # Check shared appdata cache first — avoids DB entirely during polling.
+    # Skip cache entirely when bust=1 (called right after task creation) so the
+    # newly created task is always visible and never vanishes on the next reload.
+    if not bust:
+        data, found = _appdata_cache_get(ws, uid, "tasks")
+        if found:
+            if team_id:
+                return jsonify([t for t in data if t.get("team_id") == team_id])
+            return jsonify(data)
+        cache_key = f"tasks:{ws}:{team_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None: return jsonify(cached)
     with get_db() as db:
         if team_id:
             team = db.execute("SELECT member_ids FROM teams WHERE id=? AND workspace_id=?",(team_id,wid())).fetchone()
