@@ -2288,7 +2288,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial,wsSlug}){
+function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -2318,20 +2318,17 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
 
   useEffect(()=>{if(detail){
     const fresh=safe(projects).find(p=>p.id===detail.id);if(fresh)setDetail(fresh);
-    // Push clean URL with workspace slug + project id
+    // Push clean URL with project id
     try{
-      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
-      const pid=detail.id;
-      history.pushState(null,'',(ws?'/'+ws:'')+'/projects/'+pid);
+      const slug=detail.id;
+      history.pushState(null,'','/projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
-    // Back to /{ws_slug}/projects when detail closes
+    // Back to /projects when detail closes
     try{
-      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
-      const projPath=(ws?'/'+ws:'')+'/projects';
-      if(window.location.pathname.includes('/projects/')){
-        history.pushState(null,'',projPath);
+      if(window.location.pathname.startsWith('/projects/')){
+        history.pushState(null,'','/projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -8039,12 +8036,9 @@ function App(){
       if(dl.taskId)setInitialTaskId(dl.taskId);
       if(dl.ticketId)setInitialTicketId(dl.ticketId);
       if(dl.projectId)setInitialProjectId(dl.projectId);
-      // Handle /{ws_slug}/projects/{pid} or /projects/{pid}
-      const parts=p.replace(/^\//, '').split('/').filter(Boolean);
-      const projIdx=parts.indexOf('projects');
-      if(projIdx>=0&&parts.length>projIdx+1){
-        const pid=parts[projIdx+1];
-        if(pid){setInitialProjectId(pid);}
+      if(p.startsWith('/projects/')&&p.length>10){
+        const pid=p.split('/')[2];
+        if(pid)setInitialProjectId(pid);
         setView('projects');
       }
     }catch(e){}
@@ -8052,8 +8046,7 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-      const p=parts.length>=2?parts[1]:(parts[0]||'');
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -8063,9 +8056,7 @@ function App(){
     try{
       const dl=deepLinkFromSearch();
       if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
-      // Path may be /{ws-slug}/{view} or /{view} — skip first segment if it's not a view name
-      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-      const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
@@ -8085,18 +8076,16 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        const slug=wsSlug||(cu&&cu.workspace_slug)||'';
-        history.pushState(null,'',(slug?'/'+slug:'')+'/'+base);
+        history.pushState(null,'','/'+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[wsSlug,cu]);
+  },[]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-        const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
+        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -8134,7 +8123,7 @@ function App(){
   const [dmUnread,setDmUnread]=useState([]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
-  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsSlug,setWsSlug]=useState(()=>{try{return localStorage.getItem('pf_ws_slug')||'';}catch{return '';}});const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
+  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
@@ -8269,7 +8258,6 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      if(ws&&ws.workspace_slug){setWsSlug(ws.workspace_slug);try{localStorage.setItem('pf_ws_slug',ws.workspace_slug);}catch{}}
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
@@ -8279,7 +8267,7 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} if(u.workspace_slug){setWsSlug(u.workspace_slug);try{localStorage.setItem('pf_ws_slug',u.workspace_slug);}catch{}} setLoading(false); }
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
       else {
         // Got a response but errored (e.g. 401 not logged in) — show login instantly
         try{localStorage.removeItem('pf_had_session');}catch{}
@@ -8615,11 +8603,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
-    setCu(u);
-    const slug=u.workspace_slug||'';
-    if(slug){setWsSlug(slug);try{localStorage.setItem('pf_ws_slug',slug);history.replaceState(null,'','/'+slug+'/dashboard');}catch{}}
-  }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
@@ -8707,7 +8691,7 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)} wsSlug=${wsSlug}/>`:null}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
