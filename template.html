@@ -174,6 +174,29 @@ body.dm{
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:9px;font-weight:700;cursor:pointer;transition:all .15s ease;font-family:inherit}.btn.bg{background:var(--sf2);border-color:var(--bd);color:var(--tx2)}.btn.bg:hover{border-color:var(--ac);color:var(--ac);transform:translateY(-1px)}
 .inp,input.inp,select.inp,textarea.inp{width:100%;border:1px solid var(--bd);background:var(--sf);color:var(--tx);border-radius:9px;padding:8px 10px;outline:none;font-family:inherit}.inp:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac4)}
 .lbl{display:block;font-size:11px;font-weight:700;color:var(--tx3);margin-bottom:6px}button,input,select,textarea{font:inherit}button{font-family:inherit}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:999px;border:2px solid var(--bg)}::-webkit-scrollbar-track{background:var(--bg)}
+
+/* --- Global control polish: fixes browser-default buttons/selects leaking into app pages --- */
+:where(button,.btn,[role="button"]):not(.ap-link){
+  border-radius:10px;border:1px solid var(--bd);background:var(--sf);color:var(--tx);
+  min-height:30px;padding:6px 11px;font-weight:700;line-height:1.1;cursor:pointer;
+  box-shadow:0 1px 2px rgba(15,23,42,.04);transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease,background .14s ease,color .14s ease;
+}
+:where(button,.btn,[role="button"]):not(.ap-link):hover{border-color:var(--ac);color:var(--ac);box-shadow:0 8px 18px rgba(15,23,42,.08);transform:translateY(-1px)}
+:where(button,.btn,[role="button"]):not(.ap-link):disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
+:where(input:not([type="file"]):not([type="range"]),select,textarea){
+  border:1px solid var(--bd);background:var(--sf);color:var(--tx);border-radius:10px;
+  min-height:30px;padding:6px 10px;outline:none;font-family:inherit;accent-color:var(--ac);
+}
+:where(input:not([type="file"]):not([type="range"]),select,textarea):focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac4)}
+:where(select){appearance:none;-webkit-appearance:none;padding-right:30px;background-image:linear-gradient(45deg,transparent 50%,var(--tx3) 50%),linear-gradient(135deg,var(--tx3) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+:where(input[type="checkbox"]),:where(input[type="radio"]){min-height:auto;padding:0;border-radius:4px}
+:where(input[type="range"]){accent-color:var(--ac)}
+:where(label){color:var(--tx2)}
+/* Stronger panel surfaces for pages that use inline styles instead of shared classes */
+.fi main,.fi section,.fi article{color:var(--tx)}
+.fi [style*="background: rgb(248"],.fi [style*="background:#f8"],.fi [style*="background: #f8"]{background:var(--sf)!important}
+.fi [style*="border: 1px solid rgb"],.fi [style*="border:1px solid rgb"]{border-color:var(--bd)!important}
+
 .recharts-wrapper,.recharts-surface{outline:none}.recharts-default-tooltip{background:var(--sf)!important;border:1px solid var(--bd)!important;border-radius:10px!important;color:var(--tx)!important}
 @media(max-width:1100px){.fi>div[style*="grid-template-columns: 240px 1fr 1fr"],.fi>div[style*="grid-template-columns:240px 1fr 1fr"]{grid-template-columns:1fr!important}}
 </style>

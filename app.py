@@ -507,7 +507,7 @@ def add_security_headers(response):
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
-        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com; "
+        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com https://unpkg.com; "
         "frame-ancestors 'self'; "
         "frame-src https://accounts.google.com;"
     )
