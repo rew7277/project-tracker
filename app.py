@@ -3557,6 +3557,117 @@ def meet_notify():
                 (nid, wid(), "call", msg, target_id, 0, ts()))
         return jsonify({"ok": True, "caller": cname, "room": room_name})
 
+@app.route("/api/app-data")
+@login_required
+def get_app_data():
+    """Combined data endpoint — returns all data the React app needs in one request.
+    Replaces the old pattern of 9+ parallel API calls on load.
+    Supports ?team_id=... for team-scoped views and ?bust=1 to skip cache."""
+    uid  = session.get("user_id", "")
+    ws   = wid()
+    team_id = request.args.get("team_id", "").strip()
+    bust    = request.args.get("bust", "") == "1"
+
+    cache_key = f"appdata:{ws}:{uid}:{team_id}"
+    if not bust:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    try:
+        with get_db() as db:
+            # Users (no passwords, no totp_secret)
+            users_rows = db.execute(
+                "SELECT id,workspace_id,name,email,role,avatar,color,created,"
+                "two_fa_enabled,last_active,google_picture,auth_provider,email_verified "
+                "FROM users WHERE workspace_id=? AND deleted_at='' ORDER BY name",
+                (ws,)
+            ).fetchall()
+            users = [dict(r) for r in users_rows]
+
+            # Projects
+            proj_q = ("SELECT * FROM projects WHERE workspace_id=? AND deleted_at='' "
+                      "ORDER BY created DESC")
+            proj_params = (ws,)
+            if team_id:
+                proj_q = ("SELECT * FROM projects WHERE workspace_id=? AND team_id=? "
+                          "AND deleted_at='' ORDER BY created DESC")
+                proj_params = (ws, team_id)
+            projects = [dict(r) for r in db.execute(proj_q, proj_params).fetchall()]
+
+            # Tasks (active only — no deleted)
+            task_q = ("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' "
+                      "ORDER BY created DESC LIMIT 2000")
+            task_params = (ws,)
+            if team_id:
+                task_q = ("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? "
+                          "AND deleted_at='' ORDER BY created DESC LIMIT 2000")
+                task_params = (ws, team_id)
+            tasks = [dict(r) for r in db.execute(task_q, task_params).fetchall()]
+
+            # Notifications for this user
+            notifs = [dict(r) for r in db.execute(
+                "SELECT * FROM notifications WHERE workspace_id=? AND user_id=? "
+                "ORDER BY ts DESC LIMIT 50",
+                (ws, uid)
+            ).fetchall()]
+
+            # DM unread counts
+            dm_unread = [dict(r) for r in db.execute(
+                "SELECT sender, COUNT(*) as count FROM direct_messages "
+                "WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",
+                (ws, uid)
+            ).fetchall()]
+
+            # Workspace info
+            ws_row = db.execute(
+                "SELECT id,name,workspace_slug,dm_enabled,required_hours_per_day,"
+                "plan,onboarding_done,onboarding_step "
+                "FROM workspaces WHERE id=?", (ws,)
+            ).fetchone()
+            workspace = dict(ws_row) if ws_row else {}
+
+            # Teams
+            teams = [dict(r) for r in db.execute(
+                "SELECT * FROM teams WHERE workspace_id=? ORDER BY name",
+                (ws,)
+            ).fetchall()]
+
+            # Tickets (latest 200)
+            ticket_q = ("SELECT * FROM tickets WHERE workspace_id=? "
+                        "ORDER BY created DESC LIMIT 200")
+            ticket_params = (ws,)
+            if team_id:
+                ticket_q = ("SELECT * FROM tickets WHERE workspace_id=? AND team_id=? "
+                            "ORDER BY created DESC LIMIT 200")
+                ticket_params = (ws, team_id)
+            tickets = [dict(r) for r in db.execute(ticket_q, ticket_params).fetchall()]
+
+            # Reminders for this user (upcoming + recent)
+            reminders = [dict(r) for r in db.execute(
+                "SELECT * FROM reminders WHERE workspace_id=? AND user_id=? "
+                "ORDER BY remind_at ASC LIMIT 100",
+                (ws, uid)
+            ).fetchall()]
+
+            result = {
+                "users": users,
+                "projects": projects,
+                "tasks": tasks,
+                "notifications": notifs,
+                "dm_unread": dm_unread,
+                "workspace": workspace,
+                "teams": teams,
+                "tickets": tickets,
+                "reminders": reminders,
+            }
+            _cache_set(cache_key, result)
+            return jsonify(result)
+    except Exception as e:
+        log.error("[app-data] %s", e)
+        return jsonify({"error": "Failed to load app data"}), 500
+
+
 @app.route("/api/auth/me")
 def me():
     if "user_id" not in session: return jsonify({"error":"Not logged in"}),401
@@ -6156,6 +6267,9 @@ def _load_template(filename, fallback=''):
         return fallback
 
 HTML                    = _load_template('template.html')
+LANDING_HTML            = _load_template('landing.html', fallback=HTML)  # fallback to SPA if landing.html missing
+PASSWORD_GENERATOR_HTML = _load_template('password-generator.html', fallback='')
+ADMIN_HTML              = _load_template('adminpanel.html', fallback='')
 
 _RE_SCRIPT_TAG = __import__('re').compile(r'<script([^>]*)>', __import__('re').IGNORECASE)
 
@@ -6189,9 +6303,7 @@ def _serve_landing():
         return LANDING_HTML
     return _inject_nonce(LANDING_HTML)
 
-LANDING_HTML            = _load_template('landing.html')
-PASSWORD_GENERATOR_HTML = _load_template('password-generator.html')
-ADMIN_HTML              = _load_template('adminpanel.html')
+# (LANDING_HTML, PASSWORD_GENERATOR_HTML, ADMIN_HTML already loaded above _serve_landing)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
