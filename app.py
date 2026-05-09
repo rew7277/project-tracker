@@ -1167,326 +1167,448 @@ def _email_escape(value):
     return _html.escape(str(value or ""), quote=True)
 
 
-def _email_abs_url(path_or_url=""):
-    # Return an absolute HTTPS URL for email links.
-    base = (os.environ.get("APP_BASE_URL") or APP_URL or "https://projecttracker.in").rstrip("/")
-    target = str(path_or_url or "")
-    if target.startswith("http://") or target.startswith("https://"):
-        return target
-    if not target.startswith("/"):
-        target = "/" + target
-    return base + target
+def _email_body_cleanup(body_html):
+    """Keep older notification snippets readable inside the new light email shell.
 
+    Some old templates used white text intended for a black card. Email clients often
+    strip/alter CSS, which made the notification text almost invisible on light
+    backgrounds. This normalizes the common legacy colors without changing CTA links.
+    """
+    body_html = str(body_html or "")
+    replacements = {
+        "color:#fff;": "color:#101828;",
+        "color:#ffffff;": "color:#101828;",
+        "color:#e0e0f0;": "color:#1f2937;",
+        "color:#8888a8;": "color:#667085;",
+        "color:#4a4a5a;": "color:#667085;",
+        "color:#6a6a8a;": "color:#344054;",
+        "background:#111118;": "background:#ffffff;",
+        "border:1px solid #2a2a35;": "border:1px solid #e6eaf2;",
+    }
+    for old, new in replacements.items():
+        body_html = body_html.replace(old, new)
+    return body_html
 
-def _email_status_meta(status, default_accent="#635bff"):
-    key = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
-    return {
-        "new": ("#635bff", "New", "●"),
-        "backlog": ("#64748b", "Backlog", "●"),
-        "todo": ("#64748b", "To do", "●"),
-        "in_progress": ("#f59e0b", "In progress", "●"),
-        "review": ("#8b5cf6", "In review", "●"),
-        "testing": ("#06b6d4", "Testing", "●"),
-        "blocked": ("#ef4444", "Blocked", "●"),
-        "completed": ("#10b981", "Completed", "✓"),
-        "done": ("#10b981", "Done", "✓"),
-        "production": ("#10b981", "Production", "✓"),
-        "resolved": ("#10b981", "Resolved", "✓"),
-        "closed": ("#64748b", "Closed", "✓"),
-        "open": ("#635bff", "Open", "●"),
-    }.get(key, (default_accent, str(status or "Updated").replace("_", " ").title(), "●"))
-
-
-def _email_progress_bar(percent=0, color="#635bff", height=10):
-    try:
-        pct = max(0, min(100, int(percent or 0)))
-    except Exception:
-        pct = 0
-    return f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-radius:999px;background:#eaf0fb;overflow:hidden;">
-      <tr><td width="{pct}%" height="{height}" style="height:{height}px;background:{color};background-image:linear-gradient(90deg,{color},#9b5cff);font-size:0;line-height:0;">&nbsp;</td><td width="{100-pct}%" height="{height}" style="height:{height}px;font-size:0;line-height:0;">&nbsp;</td></tr>
-    </table>'''
-
-
-def _email_pill(label, color="#635bff"):
-    label = _email_escape(label)
-    color = _email_escape(color)
-    return f'''<span style="display:inline-block;padding:7px 12px;border-radius:999px;background:{color}16;color:{color};font-size:11px;line-height:13px;font-weight:900;text-transform:uppercase;letter-spacing:.6px;">{label}</span>'''
-
-
-def _email_base(header_html, body_html, cta_url=None, cta_text="View Dashboard", cta_color="#635bff", preheader="Project Tracker update"):
-    # Production email shell: table-first, inline styles, readable in Gmail/Outlook.
-    cta_url = _email_escape(_email_abs_url(cta_url or "/?action=login"))
+def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
+    """Apple-inspired email shell, designed for real email clients."""
+    cta_url = _email_escape(cta_url or APP_URL)
     cta_text = _email_escape(cta_text or "View Dashboard")
-    cta_color = _email_escape(cta_color or "#635bff")
-    preheader = _email_escape(preheader or "Project Tracker update")
-    return f'''<!doctype html>
+    cta_color = _email_escape(cta_color or "#5a8cff")
+    body_html = _email_body_cleanup(body_html)
+    return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light only">
-<meta name="supported-color-schemes" content="light">
 <title>Project Tracker</title>
 <style>
-  @media only screen and (max-width:680px) {{
-    .pt-shell {{ padding:18px 10px !important; }}
+  @media only screen and (max-width:620px) {{
+    .pt-wrap {{ padding:20px 10px !important; }}
     .pt-card {{ width:100% !important; border-radius:24px !important; }}
-    .pt-pad {{ padding:26px 20px !important; }}
-    .pt-title {{ font-size:27px !important; line-height:33px !important; }}
-    .pt-hide-sm {{ display:none !important; }}
-    .pt-col {{ display:block !important; width:100% !important; padding-left:0 !important; padding-right:0 !important; }}
-    .pt-button a {{ display:block !important; text-align:center !important; }}
+    .pt-pad {{ padding:24px 18px !important; }}
+    .pt-title {{ font-size:26px !important; }}
+    .pt-two-col {{ display:block !important; width:100% !important; }}
+    .pt-stat {{ margin-bottom:12px !important; }}
   }}
-  @keyframes ptPulse {{ 0%{{transform:scale(1)}} 50%{{transform:scale(1.04)}} 100%{{transform:scale(1)}} }}
-  .pt-animate {{ animation:ptPulse 2.8s ease-in-out infinite; }}
-  .pt-link:hover {{ opacity:.92; }}
+  .pt-cta:hover {{ filter:brightness(1.08); }}
 </style>
 </head>
-<body style="margin:0;padding:0;background:#eef3fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased;">
-  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eef3fb;background-image:linear-gradient(135deg,#eef6ff 0%,#f2edff 50%,#f8fbff 100%);">
-    <tr><td class="pt-shell" align="center" style="padding:42px 16px;">
-      <table role="presentation" class="pt-card" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px;max-width:680px;background:#ffffff;border:1px solid #dfe7f3;border-radius:34px;overflow:hidden;box-shadow:0 26px 70px rgba(15,23,42,.16);">
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg,#edf5ff 0%,#f7f1ff 45%,#f8fbff 100%);min-height:100vh;">
+    <tr><td class="pt-wrap" align="center" style="padding:42px 16px;">
+      <table role="presentation" class="pt-card" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:rgba(255,255,255,.94);border:1px solid rgba(255,255,255,.88);border-radius:32px;overflow:hidden;box-shadow:0 34px 90px rgba(31,41,55,.18), inset 0 1px 0 rgba(255,255,255,.95);">
         {header_html}
-        <tr><td class="pt-pad" style="padding:38px 40px 12px;background:#ffffff;">
+        <tr><td class="pt-pad" style="padding:34px 38px 16px;">
           {body_html}
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:30px 0 12px;">
             <tr>
-              <td class="pt-button" bgcolor="{cta_color}" style="border-radius:18px;background:{cta_color};background-image:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 14px 30px rgba(99,91,255,.28);">
-                <a class="pt-link" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:900;text-decoration:none;border-radius:18px;">{cta_text}</a>
+              <td bgcolor="{cta_color}" style="border-radius:18px;background:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 16px 32px rgba(90,140,255,.34);">
+                <a class="pt-cta" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:800;text-decoration:none;border-radius:18px;mso-padding-alt:0;">{cta_text}</a>
               </td>
             </tr>
           </table>
         </td></tr>
-        <tr><td style="padding:22px 40px 30px;background:#f8fbff;border-top:1px solid #e7eef8;">
-          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#667085;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#635bff;text-decoration:none;font-weight:800;">Open dashboard</a></p>
+        <tr><td style="padding:22px 38px 30px;background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(245,248,255,.92));border-top:1px solid rgba(148,163,184,.18);">
+          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#7b8496;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#5a8cff;text-decoration:none;font-weight:700;">Manage preferences</a></p>
         </td></tr>
       </table>
     </td></tr>
   </table>
 </body>
-</html>'''
+</html>"""
 
 
-def _header_strip(accent="#635bff", icon="✨", label="Project Update"):
-    accent = _email_escape(accent or "#635bff")
+def _header_strip(accent, icon, label):
+    """Premium header using email-safe emoji icons instead of SF Symbols."""
+    accent = _email_escape(accent or "#5a8cff")
     icon = _email_escape(icon or "✨")
     label = _email_escape(label or "Project Update")
-    return f'''
-    <tr><td style="background:#111b3f;background-image:linear-gradient(135deg,#0f172a 0%,#17326d 52%,#6d4aff 100%);padding:0;">
+    return f"""
+    <tr><td style="background:linear-gradient(135deg,#0b1225 0%,#142a5f 45%,#6d4aff 100%);padding:0;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td style="padding:30px 38px 28px;">
+        <tr><td style="padding:28px 34px 26px;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
             <tr>
-              <td width="54" style="vertical-align:middle;">
-                <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td width="46" height="46" align="center" valign="middle" style="width:46px;height:46px;border-radius:17px;background:#ffffff22;color:#ffffff;font-size:22px;box-shadow:inset 0 1px 0 #ffffff44;">{icon}</td></tr></table>
+              <td style="vertical-align:middle;">
+                <div style="display:inline-block;width:44px;height:44px;border-radius:16px;background:rgba(255,255,255,.16);text-align:center;line-height:44px;font-size:22px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25);">{icon}</div>
               </td>
-              <td style="vertical-align:middle;padding-left:12px;">
-                <div style="font-size:24px;line-height:28px;font-weight:950;letter-spacing:-.8px;color:#ffffff;">Project<span style="color:#b9d4ff;">Tracker</span></div>
-                <div style="font-size:12px;line-height:16px;color:#d9e6ff;font-weight:900;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
+              <td style="vertical-align:middle;padding-left:14px;">
+                <div style="font-size:23px;line-height:28px;font-weight:900;letter-spacing:-.7px;color:#ffffff;">Project<span style="color:#bcd7ff;">Tracker</span></div>
+                <div style="font-size:12px;line-height:16px;color:rgba(255,255,255,.72);font-weight:700;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
               </td>
-              <td align="right" class="pt-hide-sm" style="vertical-align:middle;">
-                <span style="display:inline-block;padding:9px 13px;border-radius:999px;background:#ffffff24;color:#ffffff;font-size:12px;font-weight:900;">Live Summary</span>
+              <td align="right" style="vertical-align:middle;">
+                <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.14);color:#ffffff;font-size:12px;font-weight:800;">Live Summary</div>
               </td>
             </tr>
           </table>
         </td></tr>
       </table>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="5" style="height:5px;background:{accent};background-image:linear-gradient(90deg,{accent},#9b5cff,#38d5ff);font-size:0;line-height:0;">&nbsp;</td></tr></table>
-    </td></tr>'''
-
-
-def _email_notification_card(title, eyebrow="Task", badge="New", accent="#635bff", progress=0, meta=""):
-    safe_title = _email_escape(title)
-    safe_eyebrow = _email_escape(eyebrow)
-    safe_meta = meta
-    return f'''
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fbfdff;border:1px solid #dfe7f3;border-radius:24px;box-shadow:0 18px 44px rgba(15,23,42,.08);overflow:hidden;margin:0 0 18px;">
-        <tr>
-          <td style="padding:24px 24px 22px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="vertical-align:top;padding-right:12px;">
-                  <div style="font-size:11px;line-height:14px;color:#64748b;letter-spacing:1px;text-transform:uppercase;font-weight:950;margin-bottom:9px;">{safe_eyebrow}</div>
-                  <div style="font-size:22px;line-height:29px;font-weight:950;color:#0f172a;letter-spacing:-.4px;">{safe_title}</div>
-                </td>
-                <td width="84" align="right" style="vertical-align:top;">{_email_pill(badge, accent)}</td>
-              </tr>
-            </table>
-            <div style="margin-top:18px;">{_email_progress_bar(progress, accent, 10)}</div>
-            <div style="margin-top:11px;font-size:13px;line-height:19px;color:#667085;">{safe_meta}</div>
-          </td>
-        </tr>
-      </table>'''
-
-
-def _email_meta_grid(left_label, left_value, right_label, right_value, accent="#635bff"):
-    return f'''
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 2px;">
-        <tr>
-          <td class="pt-col" width="50%" style="padding-right:8px;vertical-align:top;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:18px;"><tr><td style="padding:15px 16px;">
-              <div style="font-size:11px;color:#64748b;font-weight:950;text-transform:uppercase;letter-spacing:.8px;">{_email_escape(left_label)}</div>
-              <div style="font-size:16px;color:#0f172a;font-weight:900;margin-top:5px;">{_email_escape(left_value)}</div>
-            </td></tr></table>
-          </td>
-          <td class="pt-col" width="50%" style="padding-left:8px;vertical-align:top;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:18px;"><tr><td style="padding:15px 16px;">
-              <div style="font-size:11px;color:#64748b;font-weight:950;text-transform:uppercase;letter-spacing:.8px;">{_email_escape(right_label)}</div>
-              <div style="font-size:16px;color:#0f172a;font-weight:900;margin-top:5px;">{_email_escape(right_value)}</div>
-            </td></tr></table>
-          </td>
-        </tr>
-      </table>'''
-
-
-def _email_hero(title, subtitle):
-    return f'''
-      <h1 class="pt-title" style="margin:0 0 10px;font-size:33px;line-height:39px;color:#0f172a;letter-spacing:-1.1px;font-weight:950;">{_email_escape(title)}</h1>
-      <p style="margin:0 0 26px;font-size:15px;line-height:24px;color:#5f6b7a;">{subtitle}</p>'''
-
-
-def _email_completion_banner(title, note, accent="#10b981"):
-    return f'''
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="pt-animate" style="background:#ecfdf5;border:1px solid #bbf7d0;border-radius:24px;margin:0 0 20px;box-shadow:0 16px 38px rgba(16,185,129,.14);">
-        <tr><td style="padding:20px 22px;">
-          <table role="presentation" width="100%"><tr>
-            <td width="52" valign="top"><div style="width:44px;height:44px;border-radius:16px;background:{accent};color:#ffffff;text-align:center;line-height:44px;font-size:23px;font-weight:900;">✓</div></td>
-            <td style="padding-left:12px;"><div style="font-size:20px;line-height:25px;color:#064e3b;font-weight:950;letter-spacing:-.3px;">{_email_escape(title)}</div><div style="font-size:13px;line-height:20px;color:#047857;margin-top:3px;">{_email_escape(note)}</div></td>
-          </tr></table>
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;"><tr>
-            <td style="width:9px;height:9px;background:#10b981;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
-            <td style="width:9px;height:9px;background:#6366f1;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
-            <td style="width:9px;height:9px;background:#f59e0b;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
-            <td style="width:9px;height:9px;background:#ec4899;border-radius:50%;font-size:0;">&nbsp;</td>
-          </tr></table>
-        </td></tr>
-      </table>'''
-
+      <div style="height:5px;background:linear-gradient(90deg,{accent},#9b5cff,#34d3ff);"></div>
+    </td></tr>"""
 
 def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    accent = "#635bff"
+    """Premium email: task assigned to user."""
+    accent  = "#6366f1"
     subject = f"📋 New Task: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> assigned a new task to you.'
-    body = _email_hero("You’ve got a new task", subtitle)
-    body += _email_notification_card(task_title, "Task", "New", accent, 12, f'Status: <strong style="color:{accent};">New</strong> · Assigned by {_email_escape(assigner_name)}')
-    body += _email_meta_grid("Priority", "Normal", "Next step", "Review & update", accent)
-    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A new task has been assigned to you")
+    safe_user = _email_escape(user_name)
+    safe_assigner = _email_escape(assigner_name)
+    safe_task = _email_escape(task_title)
+    header  = _header_strip(accent, "📋", "Task Assignment")
+    body    = f"""
+      <h1 class="pt-title" style="margin:0 0 10px;font-size:32px;line-height:38px;color:#101828;letter-spacing:-1px;font-weight:900;">You’ve got a new task</h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:23px;color:#667085;">
+        Hi <strong style="color:#101828;">{safe_user}</strong>, <strong style="color:#101828;">{safe_assigner}</strong> assigned a new task to you.
+      </p>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#ffffff,#f7f9ff);border:1px solid #e6eaf2;border-radius:24px;box-shadow:0 18px 42px rgba(31,41,55,.10);overflow:hidden;margin:0 0 16px;">
+        <tr>
+          <td style="padding:22px 24px;">
+            <div style="font-size:11px;line-height:14px;color:#667085;letter-spacing:1.1px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">Task</div>
+            <div style="font-size:22px;line-height:28px;font-weight:900;color:#101828;letter-spacing:-.3px;">{safe_task}</div>
+            <div style="margin-top:16px;height:10px;background:#edf2ff;border-radius:999px;overflow:hidden;">
+              <div style="width:12%;height:10px;background:linear-gradient(90deg,#6675ff,#b15cff);border-radius:999px;"></div>
+            </div>
+            <div style="margin-top:10px;font-size:12px;line-height:18px;color:#667085;">Status: <strong style="color:#6366f1;">New</strong> · Assigned by {safe_assigner}</div>
+          </td>
+          <td width="88" align="center" style="padding:22px 24px;vertical-align:top;">
+            <span style="display:inline-block;background:#eef2ff;color:#4f46e5;font-size:11px;font-weight:900;padding:7px 12px;border-radius:999px;letter-spacing:.6px;">NEW</span>
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">
+        <tr>
+          <td style="width:50%;padding-right:8px;">
+            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
+              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Priority</div>
+              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Normal</div>
+            </div>
+          </td>
+          <td style="width:50%;padding-left:8px;">
+            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
+              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Next step</div>
+              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Review & update</div>
+            </div>
+          </td>
+        </tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Open Task →", accent)
     send_email(user_email, subject, html, workspace_id)
 
-
 def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
-    accent, label, mark = _email_status_meta(new_stage)
-    icon = "✅" if label.lower() in ("completed", "done", "production") else "🔄"
-    progress = 100 if label.lower() in ("completed", "done", "production") else 55
-    subject = f"{icon} Task {label}: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(changer_name)}</strong> moved this task to <strong style="color:{accent};">{_email_escape(label)}</strong>.'
-    body = _email_hero("Task status updated", subtitle)
-    if progress == 100:
-        body += _email_completion_banner("Task completed", "This one is now marked complete. Nice momentum from the team.", accent)
-    body += _email_notification_card(task_title, "Task", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Status Update"), body, "/?action=dashboard", "View Task →", accent, f"Task moved to {label}")
+    """Premium email: task stage changed."""
+    stage_meta = {
+        "completed":   ("#10b981", "✅", "Completed"),
+        "production":  ("#10b981", "🚀", "In Production"),
+        "in_progress": ("#f59e0b", "⚡", "In Progress"),
+        "review":      ("#8b5cf6", "👀", "In Review"),
+        "backlog":     ("#6b7280", "📥", "Backlog"),
+        "testing":     ("#06b6d4", "🧪", "Testing"),
+    }
+    accent, icon, label = stage_meta.get(new_stage, ("#6366f1","🔄","Updated"))
+    subject = f"{icon} Task moved to {label}: {task_title}"
+    header  = _header_strip(accent, icon, "Status Update")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
+        {icon} Status changed
+      </p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{changer_name}</strong> updated your task.
+      </p>
+
+      <!-- Task card -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
+                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0 0 16px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <!-- Stage pill -->
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td style="background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:6px 14px;">
+                <span style="font-size:13px;font-weight:700;color:{accent};">{icon} {label}</span>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Task →", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_comment_email(user_email, user_name, task_title, commenter_name, comment_text, workspace_id):
-    accent = "#8b5cf6"
-    subject = f"💬 New comment on: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(commenter_name)}</strong> commented on a task.'
-    body = _email_hero("New comment added", subtitle)
-    body += _email_notification_card(task_title, "Task", "Comment", accent, 45, f'From <strong style="color:#0f172a;">{_email_escape(commenter_name)}</strong>')
-    body += f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:20px;margin-top:14px;"><tr><td style="padding:18px 20px;border-left:4px solid {accent};border-radius:20px;">
-      <div style="font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
-    </td></tr></table>'''
-    html = _email_base(_header_strip(accent, "💬", "Task Comment"), body, "/?action=dashboard", "Reply →", accent, "New comment on your task")
+    """Premium email: new comment on task."""
+    accent  = "#f59e0b"
+    subject = f"💬 {commenter_name} commented on: {task_title}"
+    header  = _header_strip(accent, "💬", "New Comment")
+    # Avatar initials circle
+    initials = "".join(p[0].upper() for p in commenter_name.split()[:2])
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
+        New comment 💬
+      </p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        someone left a comment on your task.
+      </p>
+
+      <!-- Task label -->
+      <p style="margin:0 0 8px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">On task</p>
+      <p style="margin:0 0 20px;font-size:16px;font-weight:700;color:#e0e0f0;">{task_title}</p>
+
+      <!-- Comment bubble -->
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;margin-bottom:8px;">
+        <tr><td style="padding:20px 24px;">
+          <!-- Commenter row -->
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <div style="width:36px;height:36px;border-radius:50%;background:{accent};
+                             display:inline-flex;align-items:center;justify-content:center;">
+                  <span style="font-size:13px;font-weight:800;color:#fff;">{initials}</span>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{commenter_name}</p>
+                <p style="margin:0;font-size:11px;color:#5a5a7a;">just now</p>
+              </td>
+            </tr>
+          </table>
+          <!-- Comment text -->
+          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
+            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
+          </div>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Reply →", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
+# ── Extended Email Notification Functions ─────────────────────────────────────
+
 def send_task_reassigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    accent = "#0ea5e9"
-    subject = f"🔁 Task reassigned: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> reassigned this task to you.'
-    body = _email_hero("Task reassigned to you", subtitle)
-    body += _email_notification_card(task_title, "Task", "Reassigned", accent, 20, f'Reassigned by <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong>')
-    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A task was reassigned to you")
+    """Premium email: task reassigned to a different user."""
+    accent  = "#818cf8"
+    subject = f"\U0001f504 Task reassigned to you: {task_title}"
+    header  = _header_strip(accent, "🔄", "Reassignment")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">You're now on this task 🔄</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{assigner_name}</strong> has reassigned this task to you.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Open Task \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    accent = "#f59e0b"
-    subject = f"⏰ Due soon: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, this task is approaching its deadline.'
-    body = _email_hero("Deadline coming up", subtitle)
-    body += _email_notification_card(task_title, "Due soon", "Due soon", accent, 72, f'Deadline: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
-    body += _email_meta_grid("Focus", "Finish or update", "Reminder", "Due within 24 hours", accent)
-    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is due soon")
+    """Premium email: task due in 24 hours."""
+    accent  = "#f59e0b"
+    subject = f"\u23f0 Due Tomorrow: {task_title}"
+    header  = _header_strip(accent, "\u23f0", "Due Reminder")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Due tomorrow \u23f0</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        this task is due <strong style="color:{accent};">tomorrow</strong>. Don't miss it!
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
+          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">\U0001f4c5 Due {due_date}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Complete Task \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    accent = "#ef4444"
-    subject = f"🚨 Overdue: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, this deadline has passed. Please update the task or complete it.'
-    body = _email_hero("This task is overdue", subtitle)
-    body += _email_notification_card(task_title, "Overdue task", "Overdue", accent, 88, f'Was due: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
-    body += _email_meta_grid("Risk", "Schedule impact", "Next step", "Update status today", accent)
-    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is overdue")
+    """Premium email: task overdue."""
+    accent  = "#ef4444"
+    subject = f"\U0001f6a8 Overdue: {task_title}"
+    header  = _header_strip(accent, "\U0001f6a8", "Overdue Alert")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">This task is overdue \U0001f6a8</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        the deadline has passed. Please complete or update this task immediately.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Overdue Task</p>
+          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">Was due {due_date}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "Update Task \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_name, ticket_id, priority, workspace_id):
-    priority_key = str(priority or "normal").lower()
-    priority_meta = {"critical": "#ef4444", "high": "#f97316", "medium": "#f59e0b", "low": "#10b981", "normal":"#635bff"}
-    accent = priority_meta.get(priority_key, "#635bff")
-    subject = f"🎫 Ticket assigned: {ticket_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(reporter_name)}</strong> assigned you a support ticket.'
-    body = _email_hero("New ticket assigned", subtitle)
-    body += _email_notification_card(ticket_title, "Support ticket", priority_key.title(), accent, 10, f'Priority: <strong style="color:{accent};">{_email_escape(priority_key.title())}</strong>')
-    body += _email_meta_grid("Owner", user_name, "Reporter", reporter_name, accent)
-    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, "A support ticket has been assigned to you")
+    """Premium email: support ticket assigned."""
+    priority_meta = {
+        "critical": ("#ef4444", "\U0001f534", "Critical"),
+        "high":     ("#f97316", "\U0001f7e0", "High"),
+        "medium":   ("#f59e0b", "\U0001f7e1", "Medium"),
+        "low":      ("#10b981", "\U0001f7e2", "Low"),
+    }
+    accent, dot, plabel = priority_meta.get(priority, ("#6366f1", "\U0001f535", "Normal"))
+    subject = f"\U0001f3ab Ticket assigned: {ticket_title}"
+    header  = _header_strip(accent, "\U0001f3ab", "Support Ticket")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">New ticket assigned \U0001f3ab</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{reporter_name}</strong> assigned you a support ticket.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
+          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{dot} {plabel} Priority</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_status_email(user_email, user_name, ticket_title, new_status, changer_name, ticket_id, workspace_id):
-    accent, label, mark = _email_status_meta(new_status)
-    icon = "✅" if label.lower() in ("resolved", "closed", "completed") else "🎫"
-    progress = 100 if label.lower() in ("resolved", "closed", "completed") else 60
+    """Premium email: ticket status updated."""
+    status_meta = {
+        "open":        ("#6366f1", "\U0001f4c2", "Opened"),
+        "in_progress": ("#f59e0b", "\u26a1",      "In Progress"),
+        "resolved":    ("#10b981", "\u2705",       "Resolved"),
+        "closed":      ("#6b7280", "\U0001f512",   "Closed"),
+    }
+    accent, icon, label = status_meta.get(new_status, ("#6366f1", "\U0001f3ab", "Updated"))
     subject = f"{icon} Ticket {label}: {ticket_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(changer_name)}</strong> updated this ticket.'
-    body = _email_hero("Ticket status updated", subtitle)
-    if progress == 100:
-        body += _email_completion_banner("Ticket resolved", "The ticket is now complete/resolved and ready for review or closure.", accent)
-    body += _email_notification_card(ticket_title, "Support ticket", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, f"Ticket {label}")
+    header  = _header_strip(accent, icon, "Ticket Update")
+    body    = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Ticket {label.lower()} {icon}</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{changer_name}</strong> updated your ticket status.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
+          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
+          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{icon} {label}</span>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
-    accent = "#a855f7"
-    initials = "".join(p[0].upper() for p in str(mentioner_name or "U").split()[:2]) or "U"
-    subject = f"💬 {mentioner_name} mentioned you in: {context_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, you were mentioned in <strong style="color:#0f172a;">{_email_escape(context_title)}</strong>.'
-    body = _email_hero("You were mentioned", subtitle)
-    body += f'''<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fbfdff;border:1px solid #dfe7f3;border-radius:24px;box-shadow:0 18px 44px rgba(15,23,42,.08);"><tr><td style="padding:22px 24px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;"><tr>
-        <td width="44" height="44" align="center" valign="middle" style="width:44px;height:44px;border-radius:50%;background:{accent};color:#ffffff;font-weight:950;font-size:14px;">{_email_escape(initials)}</td>
-        <td style="padding-left:13px;"><div style="font-size:15px;font-weight:950;color:#0f172a;">{_email_escape(mentioner_name)}</div><div style="font-size:12px;color:#667085;">mentioned you</div></td>
-      </tr></table>
-      <div style="background:#f8fbff;border:1px solid #e5edf7;border-left:4px solid {accent};border-radius:18px;padding:16px 18px;font-size:14px;line-height:22px;color:#334155;">{_email_escape(comment_text)}</div>
-    </td></tr></table>'''
-    html = _email_base(_header_strip(accent, "💬", "Mention"), body, "/?action=dashboard", "View Thread →", accent, "You were mentioned in Project Tracker")
+    """Premium email: @mention in a comment."""
+    accent   = "#a78bfa"
+    initials = "".join(p[0].upper() for p in mentioner_name.split()[:2])
+    subject  = f"\U0001f4ac {mentioner_name} mentioned you in: {context_title}"
+    header   = _header_strip(accent, "\U0001f4ac", "Mention")
+    body     = f"""
+      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Someone mentioned you \U0001f4ac</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        you were mentioned in <strong style="color:#fff;">{context_title}</strong>.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;">
+        <tr><td style="padding:20px 24px;">
+          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <table cellpadding="0" cellspacing="0" border="0">
+                  <tr><td width="38" height="38" style="width:38px;height:38px;border-radius:50%;background:{accent};text-align:center;vertical-align:middle;">
+                    <span style="font-size:14px;font-weight:800;color:#fff;line-height:38px;">{initials}</span>
+                  </td></tr>
+                </table>
+              </td>
+              <td style="vertical-align:middle;">
+                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{mentioner_name}</p>
+                <p style="margin:0;font-size:11px;color:#5a5a7a;">mentioned you</p>
+              </td>
+            </tr>
+          </table>
+          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
+            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
+          </div>
+        </td></tr>
+      </table>"""
+    html = _email_base(header, body, APP_URL, "View Thread \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_completed_email(user_email, user_name, task_title, completer_name, workspace_id):
+    """Premium completion email with confetti-dot celebration row."""
     accent = "#10b981"
-    subject = f"✅ Completed: {task_title}"
-    subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(completer_name)}</strong> completed this task.'
-    body = _email_hero("Task completed", subtitle)
-    body += _email_completion_banner("Completed successfully", "This task has reached 100%. Review the output or open the dashboard for the next action.", accent)
-    body += _email_notification_card(task_title, "Completed task", "Completed", accent, 100, f'Completed by <strong style="color:#0f172a;">{_email_escape(completer_name)}</strong>')
-    body += _email_meta_grid("Progress", "100%", "Status", "Completed", accent)
-    html = _email_base(_header_strip(accent, "✅", "Task Complete"), body, "/?action=dashboard", "View Project →", accent, "A task has been completed")
+    subject = f"\u2705 Done! {task_title}"
+    confetti_colors = ["#10b981","#6366f1","#f59e0b","#ef4444","#8b5cf6",
+                       "#06b6d4","#f97316","#10b981","#818cf8","#10b981"]
+    dots = "".join(
+        f'<td width="12" height="12" style="width:12px;height:12px;border-radius:50%;background:{c};">&nbsp;</td>'
+        f'<td width="5">&nbsp;</td>'
+        for c in confetti_colors
+    )
+    confetti = f'<table cellpadding="0" cellspacing="4" border="0" style="margin-bottom:20px;"><tr>{dots}</tr></table>'
+    header   = _header_strip(accent, "\u2705", "Task Complete")
+    body     = f"""
+      {confetti}
+      <p style="margin:0 0 6px;font-size:30px;font-weight:900;color:#fff;line-height:1.2;">Task complete! \U0001f389</p>
+      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
+        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+        <strong style="color:#fff;">{completer_name}</strong> just wrapped this one up.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Completed</p>
+            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
+          </td>
+          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
+            <span style="font-size:28px;">\u2705</span>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:16px 0 0;font-size:13px;color:#4a4a5a;text-align:center;">Great work by the team \U0001f91c</p>"""
+    html = _email_base(header, body, APP_URL, "View Project \u2192", accent)
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -2947,12 +3069,25 @@ def signout_redirect():
 
 def _send_verification_email(user_email, user_name, token, workspace_id=None):
     """Send email verification link."""
-    link = _email_abs_url(f"/api/auth/verify-email?token={token}")
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/api/auth/verify-email?token={token}"
     subject = "Project Tracker — Verify Your Email"
-    body = _email_hero("Verify your email", f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, confirm this address to activate your Project Tracker account.')
-    body += _email_notification_card("Email verification", "Security", "Action required", "#635bff", 50, "This link expires in 24 hours.")
-    html = _email_base(_header_strip("#635bff", "🔐", "Email Verification"), body, link, "Verify Email →", "#635bff", "Verify your Project Tracker email")
-    threading.Thread(target=send_email, args=(user_email, subject, html, workspace_id), daemon=True).start()
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
+        <p style="color:#555;margin:0 0 24px;">Click the button below to verify your email address and activate your account.</p>
+        <div style="text-align:center;margin:0 0 24px;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Verify Email</a>
+        </div>
+        <p style="color:#888;font-size:12px;">Link expires in 24 hours. If you didn't create an account, ignore this email.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
 
 @app.route("/api/auth/verify-email")
 def verify_email():
@@ -2992,12 +3127,25 @@ def resend_verification():
 
 def _send_password_reset_email(user_email, user_name, token, workspace_id=None):
     """Send password reset email. Token expires in 12 minutes."""
-    link = _email_abs_url(f"/?action=reset-password&token={token}")
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/?action=reset-password&token={token}"
     subject = "Project Tracker — Reset Your Password"
-    body = _email_hero("Reset your password", f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, use the secure button below to reset your password.')
-    body += _email_notification_card("Password reset request", "Security", "12 min expiry", "#f59e0b", 70, "If you did not request this, you can safely ignore the email.")
-    html = _email_base(_header_strip("#f59e0b", "🔑", "Password Reset"), body, link, "Reset Password →", "#f59e0b", "Reset your Project Tracker password")
-    threading.Thread(target=send_email, args=(user_email, subject, html, workspace_id), daemon=True).start()
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">Hi {user_name},</h2>
+        <p style="color:#555;margin:0 0 24px;">Click the button below to reset your password. This link expires in <b>12 minutes</b>.</p>
+        <div style="text-align:center;margin:0 0 24px;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Reset Password</a>
+        </div>
+        <p style="color:#888;font-size:12px;">If you didn't request a password reset, you can safely ignore this email.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(user_email, subject, body, workspace_id), daemon=True).start()
 
 @app.route("/api/auth/forgot-password", methods=["POST"])
 def forgot_password():
@@ -3127,12 +3275,25 @@ def logout_all_sessions():
 # ── Email Invites ─────────────────────────────────────────────────────────────
 
 def _send_workspace_invite_email(to_email, inviter_name, ws_name, token, role, workspace_id=None):
-    link = _email_abs_url(f"/?action=accept-invite&token={token}")
+    base = os.environ.get("APP_BASE_URL", "https://your-app.railway.app")
+    link = f"{base}/?action=accept-invite&token={token}"
     subject = f"You're invited to join {ws_name} on Project Tracker"
-    body = _email_hero("Workspace invitation", f'<strong style="color:#0f172a;">{_email_escape(inviter_name)}</strong> invited you to join <strong style="color:#0f172a;">{_email_escape(ws_name)}</strong>.')
-    body += _email_notification_card(ws_name, "Workspace", role.title(), "#635bff", 25, f'Role: <strong style="color:#0f172a;">{_email_escape(role.title())}</strong> · Invite expires in 7 days')
-    html = _email_base(_header_strip("#635bff", "👥", "Workspace Invite"), body, link, "Accept Invitation →", "#635bff", "You have been invited to a Project Tracker workspace")
-    threading.Thread(target=send_email, args=(to_email, subject, html, workspace_id), daemon=True).start()
+    body = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;">
+    <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+      <div style="background:#0a1a00;padding:24px 32px;text-align:center;">
+        <h1 style="color:#5a8cff;margin:0;font-size:22px;">Project Tracker</h1>
+      </div>
+      <div style="padding:32px;">
+        <h2 style="color:#111;margin:0 0 8px;">{inviter_name} invited you!</h2>
+        <p style="color:#555;margin:0 0 8px;">You've been invited to join the <b>{ws_name}</b> workspace as <b>{role.title()}</b>.</p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{link}" style="display:inline-block;background:#5a8cff;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Accept Invitation</a>
+        </div>
+        <p style="color:#888;font-size:12px;">Invite link expires in 7 days. If you weren't expecting this, ignore it.</p>
+      </div>
+    </div></body></html>"""
+    threading.Thread(target=send_email, args=(to_email, subject, body, workspace_id), daemon=True).start()
 
 @app.route("/api/workspace/invite", methods=["POST"])
 @login_required
@@ -3878,9 +4039,803 @@ def get_user_avatar(uid):
     resp.headers["ETag"] = etag
     return resp
 
-# ── Projects / Tasks / Files ────────────────────────────────────────────────
-# Phase 2 modularization: routes moved to blueprints/projects_tasks_files.py
-# Registered near the bottom of this file after legacy helpers are available.
+# ── Projects ──────────────────────────────────────────────────────────────────
+@app.route("/api/projects/all")
+@login_required
+def get_all_projects():
+    """Return ALL workspace projects — used by Channels so everyone can see all project status."""
+    with get_db() as db:
+        rows=db.execute("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC",(wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/projects/last-messages")
+@login_required
+def get_projects_last_messages():
+    """Return the latest message timestamp per project — used to sort channels by activity."""
+    with get_db() as db:
+        rows=db.execute(
+            "SELECT project, MAX(ts) as last_ts FROM messages WHERE workspace_id=? GROUP BY project",
+            (wid(),)).fetchall()
+        return jsonify({r["project"]: r["last_ts"] for r in rows})
+
+def _fetch_app_data_from_db(ws, team_id, uid):
+    """Execute all app-data queries in ONE round-trip using a single connection.
+    pg8000 is synchronous so we batch all SELECTs through the same connection
+    object — each .run() call reuses the same TCP socket, costing only the
+    server-side execution time instead of a full network round-trip per query.
+    With Postgres on Railway US-West and users in India (~180ms RTT),
+    going from 9 separate queries to 9 queries on ONE connection saves
+    ~8 × 180ms = ~1.44s per request."""
+    now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Get a single pooled connection and run ALL queries on it
+    conn = _get_pool_conn()
+    try:
+        def _q(sql, params=()):
+            pg_sql, pdict = _sql_compat(sql, params)
+            rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
+            cols = [c["name"] for c in (conn.columns or [])]
+            return [dict(zip(cols, r)) for r in (rows or [])]
+
+        # Exclude avatar_data from bulk fetch — it's 20-100KB per user as base64.
+        # Avatars are served separately via /api/users/<uid>/avatar with 24h browser cache.
+        users    = _q("SELECT id,name,email,role,avatar,color,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name", (ws,))
+
+        if team_id:
+            projects = _q("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 300", (ws, team_id))
+            # Exclude comments from bulk fetch — comments are a JSON blob stored inline
+            # and can be large. They are fetched on-demand when a task is opened.
+            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
+                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
+                             FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at=''
+                             ORDER BY created DESC LIMIT 500""", (ws, team_id))
+        else:
+            projects = _q("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 300", (ws,))
+            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
+                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
+                             FROM tasks WHERE workspace_id=? AND deleted_at=''
+                             ORDER BY created DESC LIMIT 500""", (ws,))
+
+        notifs   = _q("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY ts DESC LIMIT 50", (ws, uid))
+        dm_unread= _q("SELECT sender,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender", (ws, uid))
+        ws_rows  = _q("SELECT * FROM workspaces WHERE id=?", (ws,))
+        teams    = _q("SELECT * FROM teams WHERE workspace_id=?", (ws,))
+        tickets  = _q("SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 200", (ws,))
+        reminders= _q("SELECT * FROM reminders WHERE workspace_id=? AND user_id=? AND remind_at>=? ORDER BY remind_at", (ws, uid, now_str))
+
+        return {
+            "users": users, "projects": projects, "tasks": tasks,
+            "notifications": notifs, "dm_unread": dm_unread,
+            "workspace": ws_rows[0] if ws_rows else {},
+            "teams": teams, "tickets": tickets, "reminders": reminders,
+        }
+    finally:
+        _return_pool_conn(conn)
+
+
+def _etag_response(result):
+    """Return a jsonify response with ETag header; emit 304 if client has fresh copy."""
+    etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    resp = jsonify(result)
+    resp.headers["ETag"] = etag
+    return resp
+
+
+@app.route("/api/app-data")
+@login_required
+def get_app_data():
+    """Single endpoint that returns all dashboard data.
+
+    Caching strategy:
+    - bust=1 query param: skip all caches, hit DB directly (used post-mutation)
+    - Serve from in-memory cache instantly (0ms) when entry is fresh (<20s)
+    - Serve stale data instantly AND refresh in background when 20-120s old
+    - Only block on DB when cache is completely cold (first load after restart)
+    This means after the first load, every subsequent poll returns in <5ms.
+    Multi-worker note: bust=1 forces a fresh DB read on the receiving worker
+    and re-warms that worker's cache, solving cross-worker stale data issues.
+    """
+    ws      = wid()
+    uid     = session["user_id"]
+    team_id = request.args.get("team_id", "")
+    cache_key = f"appdata:{ws}:{uid}:{team_id}"
+    # Force-refresh: skip all caches (used right after mutations)
+    if request.args.get("bust") == "1":
+        result = _fetch_app_data_from_db(ws, team_id, uid)
+        _cache_set(cache_key, result)
+        etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+        resp = jsonify(result)
+        resp.headers["ETag"] = etag
+        return resp
+
+    now = _time.time()
+
+    # --- Redis SWR path ---
+    if _redis_client is not None:
+        try:
+            raw = _redis_client.get(f"ptcache:{cache_key}")
+            if raw:
+                entry = _json.loads(raw)
+                age = now - entry["ts"]
+                if age < _CACHE_TTL:
+                    return _etag_response(entry["val"])   # fresh
+                if age < _CACHE_STALE:
+                    # Try to become the one refresher using SET NX (atomic)
+                    lock_key = f"ptcache:lock:{cache_key}"
+                    acquired = _redis_client.set(lock_key, "1", nx=True, ex=30)
+                    if acquired:
+                        def _bg_refresh_redis():
+                            try:
+                                result = _fetch_app_data_from_db(ws, team_id, uid)
+                                _cache_set(cache_key, result)
+                            except Exception as _e:
+                                log.warning("[app-data bg-refresh] %s", _e)
+                            finally:
+                                try: _redis_client.delete(lock_key)
+                                except: pass
+                        _cthread.Thread(target=_bg_refresh_redis, daemon=True).start()
+                    return _etag_response(entry["val"])   # stale but fast
+        except Exception:
+            pass  # Redis blip — fall through to dict
+
+    # --- In-process dict SWR path ---
+    entry = _CACHE.get(cache_key)
+
+    if entry:
+        age = now - entry["ts"]
+        if age < _CACHE_TTL:
+            return _etag_response(entry["val"])
+        if age < _CACHE_STALE and not entry.get("refreshing"):
+            with _CACHE_LOCK:
+                if cache_key in _CACHE:
+                    _CACHE[cache_key]["refreshing"] = True
+            def _bg_refresh():
+                try:
+                    result = _fetch_app_data_from_db(ws, team_id, uid)
+                    _cache_set(cache_key, result)
+                except Exception as _e:
+                    log.warning("[app-data bg-refresh] %s", _e)
+                    with _CACHE_LOCK:
+                        if cache_key in _CACHE:
+                            _CACHE[cache_key]["refreshing"] = False
+            _cthread.Thread(target=_bg_refresh, daemon=True).start()
+            return _etag_response(entry["val"])   # stale but fast
+
+    # Cache cold or too stale — block on DB (first load only)
+    result = _fetch_app_data_from_db(ws, team_id, uid)
+    _cache_set(cache_key, result)
+    etag = hashlib.md5(json.dumps(result, sort_keys=True, default=str).encode()).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    resp = jsonify(result)
+    resp.headers["ETag"] = etag
+    return resp
+
+
+
+def _appdata_cache_get(ws, uid, key):
+    """Try to read a specific key from the appdata cache (any team_id variant).
+    Returns (data, found). Used by lightweight polling endpoints to avoid
+    duplicate DB queries — if app-data is cached, sub-endpoints are free."""
+    # Try no-team variant first (most common), then any team variant
+    for suffix in ["", ":"] :
+        for ckey, entry in list(_CACHE.items()):
+            if ckey.startswith(f"appdata:{ws}:{uid}") and not entry.get("refreshing", False):
+                age = _time.time() - entry["ts"]
+                if age < _CACHE_STALE:
+                    val = entry["val"]
+                    if key in val:
+                        return val[key], True
+    return None, False
+
+@app.route("/api/projects")
+@login_required
+def get_projects():
+    ws, uid = wid(), session["user_id"]
+    team_id = request.args.get("team_id", "")
+    bust    = request.args.get("bust", "0") == "1"   # bust=1 skips ALL caches (called after delete)
+
+    if not bust:
+        data, found = _appdata_cache_get(ws, uid, "projects")
+        if found:
+            if team_id:
+                return jsonify([p for p in data if p.get("team_id") == team_id])
+            return jsonify(data)
+        cache_key = f"projects:{ws}:{team_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    # bust=1 OR cache cold — always hit DB
+    with get_db() as db:
+        if team_id:
+            rows = db.execute(
+                "SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC",
+                (ws, team_id)).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC", (ws,)).fetchall()
+        result = [dict(r) for r in rows]
+        if not bust:
+            cache_key = f"projects:{ws}:{team_id}"
+            _cache_set(cache_key, result)
+        return jsonify(result)
+
+@app.route("/api/projects",methods=["POST"])
+@login_required
+@require_role("Admin", "Manager", "TeamLead")
+def create_project():
+    d=request.json or {}
+    if not d.get("name"): return jsonify({"error":"Name required"}),400
+    pid=f"p{int(datetime.now().timestamp()*1000)}"
+    members=d.get("members",[session["user_id"]])
+    if session["user_id"] not in members: members.insert(0,session["user_id"])
+    with get_db() as db:
+        db.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (pid,wid(),d["name"],d.get("description",""),session["user_id"],
+                    json.dumps(members),d.get("startDate",""),d.get("targetDate",""),0,
+                    d.get("color","#5a8cff"),ts(),d.get("team_id","")))
+        p=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?",(pid,wid())).fetchone()
+        creator=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        cname=creator["name"] if creator else "Someone"
+        for uid in members:
+            if uid != session["user_id"]:
+                nid=f"n{int(datetime.now().timestamp()*1000)}"
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                           (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts()))
+                threading.Thread(target=push_notification_to_user,
+                    args=(db,uid,f"📁 Added to project: {d['name']}",
+                          f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
+        # Inject into appdata cache FIRST so workers with stale cache get the new project immediately.
+        _cache_inject_item(wid(), "projects", dict(p))
+        # Bust the FULL workspace cache — this forces the next /api/app-data background
+        # refresh to re-fetch from DB with the new project included.
+        # Previously only busting 'notifs' left the appdata cache stale, causing the
+        # background SWR refresh to overwrite state and make the new project disappear.
+        _cache_bust_ws(wid())
+        # Push SSE event so connected clients update immediately without waiting for next poll
+        _sse_publish(wid(), "project_updated", {"id": pid, "action": "created"})
+        return jsonify(dict(p))
+
+@app.route("/api/projects/<pid>",methods=["PUT"])
+@login_required
+def update_project(pid):
+    d=request.json or {}
+    with get_db() as db:
+        p=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?",(pid,wid())).fetchone()
+        if not p: return jsonify({"error":"Not found"}),404
+        p_team = p["team_id"] if "team_id" in p.keys() else ""
+        try: old_mems=set(json.loads(p["members"] or "[]"))
+        except: old_mems=set()
+        new_mems=d.get("members", list(old_mems))
+        db.execute("""UPDATE projects SET name=?,description=?,start_date=?,target_date=?,color=?,members=?,team_id=?
+                      WHERE id=? AND workspace_id=?""",
+                   (d.get("name",p["name"]),d.get("description",p["description"]),
+                    d.get("start_date",p["start_date"]),d.get("target_date",p["target_date"]),
+                    d.get("color",p["color"]),
+                    json.dumps(new_mems),
+                    d.get("team_id",p_team),pid,wid()))
+        updated=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=?",(pid,wid())).fetchone()
+        actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        aname=actor["name"] if actor else "Someone"
+        # Only notify NEWLY ADDED members — not all members on every save (was slow + spammy)
+        newly_added=[uid for uid in new_mems if uid not in old_mems and uid!=session["user_id"]]
+        base_ts=int(datetime.now().timestamp()*1000)
+        if newly_added:
+            # Batch all notification inserts in ONE round-trip instead of N separate queries
+            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(newly_added))
+            flat=[v for i,uid in enumerate(newly_added)
+                  for v in (f"n{base_ts+i}",wid(),"project_added",
+                            f"{aname} added you to project '{updated['name']}'",uid,0,ts())]
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
+            for uid in newly_added:
+                threading.Thread(target=push_notification_to_user,
+                    args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
+                          f"{aname} added you to '{updated['name']}'","/"),daemon=True).start()
+    # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
+    # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
+    # that's why added members weren't visible until cache expired.
+    _cache_bust_ws(wid())
+    # Notify connected clients via SSE so they reload without waiting 30s
+    _sse_publish(wid(), "project_updated", {"id": pid, "action": "updated"})
+    return jsonify(dict(updated))
+@app.route("/api/projects/<pid>",methods=["DELETE"])
+@login_required
+@require_role("Admin", "Manager")
+def del_project(pid):
+    workspace_id = wid()
+    with get_db() as db:
+        cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        cu_role=cu["role"] if cu else "Viewer"
+        if cu_role not in ("Admin","Manager"):
+            return jsonify({"error":"Only Admin or Manager can delete projects."}),403
+        db.execute("DELETE FROM projects WHERE id=? AND workspace_id=?",(pid,workspace_id))
+        db.execute("DELETE FROM tasks WHERE project=? AND workspace_id=?",(pid,workspace_id))
+        db.execute("DELETE FROM files WHERE project_id=? AND workspace_id=?",(pid,workspace_id))
+    # Cache bust AFTER the with-block exits (i.e. after COMMIT).
+    # Busting inside caused a race: concurrent GET /api/projects could query Postgres
+    # while DELETE was still uncommitted, re-cache the stale row, making deleted
+    # projects reappear on next reload().
+    _cache_bust_ws(workspace_id)
+    return jsonify({"ok":True})
+
+@app.route("/api/projects/bulk-assign-team",methods=["POST"])
+@login_required
+def bulk_assign_team():
+    """Assign a team_id to multiple projects at once."""
+    d=request.json or {}
+    team_id=d.get("team_id","")
+    project_ids=d.get("project_ids",[])
+    if not project_ids: return jsonify({"error":"project_ids required"}),400
+    with get_db() as db:
+        cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        if not cu or cu["role"] not in ("Admin","Manager"):
+            return jsonify({"error":"Only Admin or Manager can assign teams to projects."}),403
+        for pid in project_ids:
+            db.execute("UPDATE projects SET team_id=? WHERE id=? AND workspace_id=?",(team_id,pid,wid()))
+        return jsonify({"ok":True,"updated":len(project_ids)})
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+@app.route("/api/tasks")
+@login_required
+def get_tasks():
+    team_id = request.args.get("team_id","")
+    ws, uid = wid(), session["user_id"]
+    bust = request.args.get("bust") == "1"
+    # Check shared appdata cache first — avoids DB entirely during polling.
+    # Skip cache entirely when bust=1 (called right after task creation) so the
+    # newly created task is always visible and never vanishes on the next reload.
+    if not bust:
+        data, found = _appdata_cache_get(ws, uid, "tasks")
+        if found:
+            if team_id:
+                return jsonify([t for t in data if t.get("team_id") == team_id])
+            return jsonify(data)
+        cache_key = f"tasks:{ws}:{team_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None: return jsonify(cached)
+    with get_db() as db:
+        if team_id:
+            team = db.execute("SELECT member_ids FROM teams WHERE id=? AND workspace_id=?",(team_id,wid())).fetchone()
+            member_ids = json.loads(team["member_ids"] if team else "[]")
+            team_projects = db.execute(
+                "SELECT id FROM projects WHERE workspace_id=? AND team_id=?",(wid(),team_id)).fetchall()
+            proj_ids = [p["id"] for p in team_projects]
+            # Use SQL WHERE IN instead of Python-side filtering — much faster
+            placeholders_p = ",".join("?" * len(proj_ids)) if proj_ids else "''"
+            placeholders_m = ",".join("?" * len(member_ids)) if member_ids else "''"
+            sql = f"""SELECT * FROM tasks WHERE workspace_id=? AND (
+                team_id=? OR
+                {f"project IN ({placeholders_p})" if proj_ids else "1=0"} OR
+                {f"assignee IN ({placeholders_m})" if member_ids else "1=0"}
+            ) ORDER BY created DESC LIMIT 500"""
+            params = [wid(), team_id] + proj_ids + member_ids
+            result = [dict(r) for r in db.execute(sql, params).fetchall()]
+            _cache_set(f"tasks:{wid()}:{team_id}", result)
+            return jsonify(result)
+        # Limit to 500 most recent — prevents huge payloads on large workspaces
+        result = [dict(r) for r in db.execute(
+            "SELECT * FROM tasks WHERE workspace_id=? ORDER BY created DESC LIMIT 500",(wid(),)).fetchall()]
+        _cache_set(f"tasks:{wid()}:", result)
+        return jsonify(result)
+
+def next_task_id(db, ws):
+    import time
+    base = int(time.time() * 1000)
+    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
+    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
+    return f"T-{base % 1000000:06d}"
+
+@app.route("/api/tasks",methods=["POST"])
+@login_required
+def create_task():
+    d=request.json or {}
+    if not d.get("title"): return jsonify({"error":"Title required"}),400
+    with get_db() as db:
+        tid=next_task_id(db,wid())
+        db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
+                    d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
+                    ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
+                    d.get("team_id","")))
+        # Batch: fetch creator + assignee info + project members in ONE round-trip each
+        creator=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        cname=creator["name"] if creator else "Someone"
+        base_ts=int(datetime.now().timestamp()*1000)
+        assignee_user=None
+        if d.get("assignee"):
+            assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
+        proj=None
+        proj_members=[]
+        if d.get("project"):
+            proj=db.execute("SELECT name,members FROM projects WHERE id=? AND workspace_id=?",(d["project"],wid())).fetchone()
+            if proj:
+                try: proj_members=json.loads(proj["members"] or "[]")
+                except: proj_members=[]
+        # Build ALL notification rows first, then batch-insert in ONE query
+        notif_rows=[]
+        if assignee_user:
+            notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
+                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
+        for i,uid in enumerate(proj_members):
+            if uid==session["user_id"] or uid==d.get("assignee"): continue
+            proj_name=proj["name"] if proj else ""
+            notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
+                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts()))
+        if notif_rows:
+            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(notif_rows))
+            flat=[v for row in notif_rows for v in row]
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
+        # Send emails + push notifications in background threads (non-blocking)
+        if assignee_user:
+            if assignee_user["email"]:
+                threading.Thread(target=send_task_assigned_email,
+                    args=(assignee_user["email"],assignee_user["name"],d["title"],cname,tid,wid()),
+                    daemon=True).start()
+            threading.Thread(target=push_notification_to_user,
+                args=(db,d["assignee"],f"✅ New task assigned: {d['title']}",
+                      f"{cname} assigned you this task [{d.get('priority','medium')}]","/"),
+                daemon=True).start()
+        for uid in proj_members:
+            if uid==session["user_id"] or uid==d.get("assignee"): continue
+            threading.Thread(target=push_notification_to_user,
+                args=(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
+                      f"{cname} created '{d['title']}'","/"),daemon=True).start()
+        t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
+        if d.get("project") and proj:
+            assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
+            sysmid=f"m{base_ts+1}"
+            msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+                       (sysmid,wid(),"system",d["project"],msg,ts(),1))
+        _cache_inject_item(wid(), "tasks", dict(t))
+        # Bust full workspace cache so app-data background refresh picks up the new task.
+        # Previously only busting 'notifs' left app-data stale, causing new tasks to vanish.
+        _cache_bust_ws(wid())
+        # Push SSE event — connected clients reload immediately without polling delay
+        _sse_publish(wid(), "task_updated", {"id": tid, "action": "created",
+                                              "project": d.get("project", ""),
+                                              "assignee": d.get("assignee", "")})
+        return jsonify(dict(t))
+
+
+@app.route("/api/tasks/<tid>/events", methods=["GET"])
+@login_required
+def get_task_events(tid):
+    """Get activity log for a task."""
+    with get_db() as db:
+        rows = db.execute(
+            """SELECT te.*, u.name as user_name, u.avatar as user_avatar, u.color as user_color
+               FROM task_events te LEFT JOIN users u ON te.user_id=u.id
+               WHERE te.task_id=? AND te.workspace_id=? ORDER BY te.ts DESC LIMIT 50""",
+            (tid, wid())).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+def log_task_event(db, workspace_id, task_id, user_id, event_type, old_val="", new_val=""):
+    """Insert a task activity event."""
+    try:
+        eid = f"te{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+        db.execute("INSERT INTO task_events VALUES (?,?,?,?,?,?,?,?)",
+                   (eid, workspace_id, task_id, user_id, event_type,
+                    str(old_val), str(new_val), ts()))
+    except Exception as e:
+        log.warning("[task_event] %s", e)
+
+@app.route("/api/tasks/<tid>",methods=["PUT"])
+@login_required
+def update_task(tid):
+    d=request.json or {}
+    with get_db() as db:
+        cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        cu_role=cu["role"] if cu else "Viewer"
+        t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
+        if not t: return jsonify({"error":"Not found"}),404
+
+        is_admin_manager = cu_role in ("Admin","Manager")
+        is_teamlead = cu_role == "TeamLead"
+        is_assignee = t["assignee"] == session["user_id"]
+        proj = db.execute("SELECT owner FROM projects WHERE id=? AND workspace_id=?",(t["project"],wid())).fetchone() if t["project"] else None
+        is_proj_owner = proj and proj["owner"] == session["user_id"]
+
+        if not (is_admin_manager or is_teamlead or is_proj_owner):
+            if is_assignee:
+                allowed={"stage","pct","comments"}
+                if any(k not in allowed for k in d.keys()):
+                    return jsonify({"error":"You can only update stage, progress, and comments on tasks assigned to you."}),403
+            else:
+                return jsonify({"error":"You do not have permission to edit this task. Only the assignee, project owner, or managers can edit tasks."}),403
+
+        old_stage=t["stage"]
+        old_assignee=t["assignee"]
+        def tf(key,default=''):
+            return t[key] if key in t.keys() else default
+        labels_val=d.get("labels",None)
+        if labels_val is not None and isinstance(labels_val,list): labels_val=json.dumps(labels_val)
+        elif labels_val is None: labels_val=tf("labels","[]")
+        comments_val=d.get("comments",None)
+        if comments_val is None: comments_val=json.loads(t["comments"] or "[]")
+        db.execute("""UPDATE tasks SET title=?,description=?,project=?,assignee=?,
+                      priority=?,stage=?,due=?,pct=?,comments=?,team_id=?,
+                      story_points=?,task_type=?,labels=?,sprint=? WHERE id=? AND workspace_id=?""",
+                   (d.get("title",t["title"]),d.get("description",t["description"]),
+                    d.get("project",t["project"]),d.get("assignee",t["assignee"]),
+                    d.get("priority",t["priority"]),d.get("stage",t["stage"]),
+                    d.get("due",t["due"]),d.get("pct",t["pct"]),
+                    json.dumps(comments_val),
+                    d.get("team_id",tf("team_id","")),
+                    d.get("story_points",tf("story_points",0)),
+                    d.get("task_type",tf("task_type","task")),
+                    labels_val,
+                    d.get("sprint",tf("sprint","")),
+                    tid,wid()))
+        # Log activity events
+        new_stage_val = d.get("stage", old_stage)
+        new_assignee_val = d.get("assignee", old_assignee)
+        if new_stage_val != old_stage:
+            log_task_event(db, wid(), tid, session["user_id"], "stage_change", old_stage, new_stage_val)
+        if new_assignee_val != old_assignee and new_assignee_val:
+            assignee_name = (db.execute("SELECT name FROM users WHERE id=?", (new_assignee_val,)).fetchone() or {}).get("name","?")
+            log_task_event(db, wid(), tid, session["user_id"], "assigned", old_assignee or "", assignee_name)
+            # Email the newly assigned person (including self-assignment)
+            new_assignee_row = db.execute("SELECT name,email FROM users WHERE id=?", (new_assignee_val,)).fetchone()
+            reassigner_row   = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            reassigner_name  = reassigner_row["name"] if reassigner_row else "Someone"
+            if new_assignee_row and new_assignee_row["email"]:
+                threading.Thread(target=send_task_reassigned_email,
+                    args=(new_assignee_row["email"], new_assignee_row["name"],
+                          d.get("title", t["title"]), reassigner_name, tid, wid()),
+                    daemon=True).start()
+        if d.get("stage") and d["stage"]!=old_stage:
+            base_ts2=int(datetime.now().timestamp()*1000)
+            # Notify project members when a task is marked completed
+            if d["stage"] in ("completed","production") and t["project"]:
+                _comp_proj = db.execute("SELECT members,owner FROM projects WHERE id=? AND workspace_id=?",
+                                        (t["project"],wid())).fetchone()
+                _comp_actor = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+                _comp_actor_name = _comp_actor["name"] if _comp_actor else "Someone"
+                if _comp_proj:
+                    try: _comp_members = json.loads(_comp_proj["members"] or "[]")
+                    except: _comp_members = []
+                    _notified_completed = set()
+                    for _cm_uid in _comp_members:
+                        if _cm_uid in _notified_completed:
+                            continue
+                        _cm_user = db.execute("SELECT name,email FROM users WHERE id=?", (_cm_uid,)).fetchone()
+                        if _cm_user and _cm_user["email"]:
+                            _notified_completed.add(_cm_uid)
+                            threading.Thread(target=send_task_completed_email,
+                                args=(_cm_user["email"], _cm_user["name"], t["title"], _comp_actor_name, wid()),
+                                daemon=True).start()
+            if t["assignee"]:
+                nid=f"n{base_ts2}"
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                           (nid,wid(),"status_change",f"Task '{t['title']}' moved to {d['stage']}",
+                            t["assignee"],0,ts()))
+                assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
+                changer_user=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+                changer_name=changer_user["name"] if changer_user else "Someone"
+                if assignee_user and assignee_user["email"]:
+                    threading.Thread(target=send_status_change_email,
+                        args=(assignee_user["email"],assignee_user["name"],t["title"],d["stage"],changer_name,wid()),
+                        daemon=True).start()
+                threading.Thread(target=push_notification_to_user,
+                    args=(db, t["assignee"], f"🔄 Task updated: {t['title']}",
+                          f"{changer_name} moved it to {d['stage']}", "/"),
+                    daemon=True).start()
+            if t["project"]:
+                proj=db.execute("SELECT members FROM projects WHERE id=? AND workspace_id=?",(t["project"],wid())).fetchone()
+                if proj:
+                    try: members=json.loads(proj["members"] or "[]")
+                    except: members=[]
+                    actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+                    aname=actor["name"] if actor else "Someone"
+                    for i2,uid in enumerate(members):
+                        if uid==session["user_id"] or uid==t["assignee"]: continue
+                        nid2=f"n{base_ts2+20+i2}"
+                        db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                                   (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts()))
+                        threading.Thread(target=push_notification_to_user,
+                            args=(db, uid, f"🔄 {t['title']} → {d['stage']}",
+                                  f"{aname} updated the task stage", "/"),
+                            daemon=True).start()
+                sysmid=f"m{base_ts2+2}"
+                db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+                           (sysmid,wid(),"system",t["project"],
+                            f"⚡ **{aname}** moved **{t['title']}** → {d['stage'].title()}",ts(),1))
+        new_comments=d.get("comments",[])
+        old_comments=json.loads(t["comments"] or "[]")
+        if len(new_comments)>len(old_comments) and t["project"]:
+            latest=new_comments[-1]
+            commenter=db.execute("SELECT name FROM users WHERE id=?",(latest.get("uid",""),)).fetchone()
+            cname=commenter["name"] if commenter else "Someone"
+            sysmid=f"m{int(datetime.now().timestamp()*1000)+3}"
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+                       (sysmid,wid(),"system",t["project"],
+                        f"💬 **{cname}** commented on **{t['title']}**: {latest.get('text','')}",ts(),1))
+            if t["assignee"] and t["assignee"]!=session["user_id"]:
+                nid2=f"n{int(datetime.now().timestamp()*1000)+4}"
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                           (nid2,wid(),"comment",f"{cname} commented on '{t['title']}': {latest.get('text','')}",
+                            t["assignee"],0,ts()))
+                assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
+                if assignee_user and assignee_user["email"]:
+                    threading.Thread(target=send_comment_email,
+                        args=(assignee_user["email"],assignee_user["name"],t["title"],cname,latest.get('text',''),wid()),
+                        daemon=True).start()
+            # @mention detection: notify any @mentioned user who isn't already the assignee
+            import re as _re_mention
+            comment_text_raw = latest.get("text","")
+            mentioned_names = _re_mention.findall(r'@([\w ]+)', comment_text_raw)
+            if mentioned_names:
+                all_users_ws = db.execute("SELECT id,name,email FROM users WHERE workspace_id=?", (wid(),)).fetchall()
+                commenter_row = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+                commenter_name_m = commenter_row["name"] if commenter_row else "Someone"
+                for mu in all_users_ws:
+                    for mn in mentioned_names:
+                        if mu["name"].strip().lower() == mn.strip().lower():
+                            if mu["id"] != t.get("assignee","") and mu["email"]:
+                                threading.Thread(target=send_mention_email,
+                                    args=(mu["email"], mu["name"], commenter_name_m,
+                                          t["title"], comment_text_raw, wid()),
+                                    daemon=True).start()
+                            break
+                threading.Thread(target=push_notification_to_user,
+                    args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
+                          f"{cname}: {latest.get('text','')[:80]}", "/"),
+                    daemon=True).start()
+        _cache_bust_ws(wid())
+        updated_task = dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
+        # Push SSE — all workspace clients get the new stage/assignee immediately
+        _sse_publish(wid(), "task_updated", {"id": tid, "action": "updated",
+                                              "stage": updated_task.get("stage",""),
+                                              "project": updated_task.get("project","")})
+        return jsonify(updated_task)
+
+
+@app.route("/api/subtasks/search")
+@login_required
+def search_subtasks():
+    q = request.args.get("q","").strip().lower()
+    if not q or len(q) < 2:
+        return jsonify([])
+    with get_db() as db:
+        rows = db.execute("""
+    SELECT s.*, t.title as task_title, t.project
+            FROM subtasks s
+            JOIN tasks t ON s.task_id = t.id
+            WHERE s.workspace_id = ?
+            AND (LOWER(s.id) LIKE ? OR LOWER(s.title) LIKE ?)
+            LIMIT 10
+        """, (wid(), f"%{q}%", f"%{q}%")).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/tasks/<tid>/subtasks", methods=["GET"])
+@login_required
+def get_subtasks(tid):
+    with get_db() as db:
+        rows=db.execute("SELECT * FROM subtasks WHERE task_id=? AND workspace_id=? ORDER BY created",(tid,wid())).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/tasks/<tid>/subtasks", methods=["POST"])
+@login_required
+def create_subtask(tid):
+    d=request.json or {}
+    sid=f"st{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
+    with get_db() as db:
+        db.execute("INSERT INTO subtasks VALUES (?,?,?,?,?,?,?)",
+                   (sid,wid(),tid,d.get("title","Untitled"),0,d.get("assignee",""),ts()))
+        return jsonify({"id":sid,"task_id":tid,"title":d.get("title",""),"done":0})
+
+@app.route("/api/subtasks/<sid>", methods=["PUT"])
+@login_required
+def update_subtask(sid):
+    d=request.json or {}
+    with get_db() as db:
+        st=db.execute("SELECT * FROM subtasks WHERE id=? AND workspace_id=?",(sid,wid())).fetchone()
+        if not st: return jsonify({"error":"Not found"}),404
+        done=d.get("done",st["done"])
+        title=d.get("title",st["title"])
+        assignee=d.get("assignee",st["assignee"])
+        db.execute("UPDATE subtasks SET done=?,title=?,assignee=? WHERE id=?",(done,title,assignee,sid))
+        return jsonify({"ok":True})
+
+@app.route("/api/subtasks/<sid>", methods=["DELETE"])
+@login_required
+def delete_subtask(sid):
+    with get_db() as db:
+        db.execute("DELETE FROM subtasks WHERE id=? AND workspace_id=?",(sid,wid()))
+        return jsonify({"ok":True})
+
+@app.route("/api/tasks/<tid>",methods=["DELETE"])
+@login_required
+def del_task(tid):
+    with get_db() as db:
+        cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        cu_role=cu["role"] if cu else "Viewer"
+        if cu_role not in ("Admin","Manager","TeamLead"):
+            return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
+        db.execute("DELETE FROM tasks WHERE id=? AND workspace_id=?",(tid,wid()))
+    _cache_bust_ws(wid())
+    return jsonify({"ok":True})
+
+# ── Files ─────────────────────────────────────────────────────────────────────
+@app.route("/api/files")
+@login_required
+def get_files():
+    task_id=request.args.get("task_id"); project_id=request.args.get("project_id")
+    with get_db() as db:
+        if task_id:
+            rows=db.execute("SELECT * FROM files WHERE task_id=? AND workspace_id=? ORDER BY ts DESC",(task_id,wid())).fetchall()
+        elif project_id:
+            rows=db.execute("SELECT * FROM files WHERE project_id=? AND workspace_id=? ORDER BY ts DESC",(project_id,wid())).fetchall()
+        else: rows=[]
+        return jsonify([dict(r) for r in rows])
+
+@app.route("/api/files",methods=["POST"])
+@login_required
+def upload_file():
+    f=request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error":"No file"}),400
+
+    original_name = os.path.basename(f.filename).strip()
+    data=f.read()
+    if not data:
+        return jsonify({"error":"Empty file"}),400
+    if len(data)>MAX_UPLOAD_BYTES:
+        return jsonify({"error":f"File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)"}),400
+
+    ok, mime_or_error = _looks_like_upload_mime(original_name, data, f.content_type)
+    if not ok:
+        return jsonify({"error":mime_or_error}),400
+
+    task_id=request.form.get("task_id","")
+    project_id=request.form.get("project_id","")
+    ws_id=wid()
+    fid=f"f{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
+    path=os.path.join(UPLOAD_DIR,fid)
+
+    with get_db() as db:
+        used=_workspace_upload_bytes(db, ws_id)
+        if used + len(data) > WORKSPACE_UPLOAD_QUOTA_BYTES:
+            return jsonify({"error":"Workspace upload quota exceeded"}),413
+
+    with open(path,"wb") as fp:
+        fp.write(data)
+
+    clean, scan_msg = scan_upload_for_virus(path, original_name)
+    if not clean:
+        try: os.remove(path)
+        except Exception: pass
+        return jsonify({"error":"Upload rejected by virus scanner", "details": scan_msg}),400
+
+    with get_db() as db:
+        db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?)",
+                   (fid,ws_id,original_name,len(data),mime_or_error,task_id,project_id,session["user_id"],ts()))
+        row=db.execute("SELECT * FROM files WHERE id=? AND workspace_id=?",(fid,ws_id)).fetchone()
+        return jsonify(dict(row))
+
+@app.route("/api/files/<fid>")
+@login_required
+def download_file(fid):
+    with get_db() as db:
+        row=db.execute("SELECT * FROM files WHERE id=? AND workspace_id=?",(fid,wid())).fetchone()
+        if not row: return jsonify({"error":"Not found"}),404
+    path=os.path.join(UPLOAD_DIR,fid)
+    if not os.path.exists(path): return jsonify({"error":"File missing"}),404
+    return send_file(path,download_name=row["name"],as_attachment=True,mimetype=row["mime"])
+
+@app.route("/api/files/<fid>",methods=["DELETE"])
+@login_required
+@require_role("Admin", "Manager", "TeamLead")
+def del_file(fid):
+    with get_db() as db:
+        db.execute("DELETE FROM files WHERE id=? AND workspace_id=?",(fid,wid()))
+    path=os.path.join(UPLOAD_DIR,fid)
+    if os.path.exists(path): os.remove(path)
+    return jsonify({"ok":True})
 
 # ── Messages ──────────────────────────────────────────────────────────────────
 @app.route("/api/messages")
@@ -7670,16 +8625,6 @@ def _run_v5_migrations():
     ]
     for ddl in new_ddls:
         _run_ddl(ddl)
-
-
-# ── Phase 2 blueprints ──────────────────────────────────────────────────────
-# Core projects/tasks/files APIs live outside the monolithic app.py now.
-try:
-    from blueprints.projects_tasks_files import bp as projects_tasks_files_bp
-    if "projects_tasks_files" not in app.blueprints:
-        app.register_blueprint(projects_tasks_files_bp)
-except Exception as _bp_err:
-    log.warning("[blueprints] projects_tasks_files registration failed: %s", _bp_err)
 
 try:
     _run_v5_migrations()
