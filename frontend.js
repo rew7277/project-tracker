@@ -335,6 +335,28 @@ body.dm .recharts-default-tooltip{background:#10172a!important;border:1px solid 
 body:not(.dm){background:#f6f8fb!important;color-scheme:light}
 
 
+
+
+/* === UI/UX polish v4: modal, avatars, kanban, dashboard cards === */
+.ov{position:fixed!important;inset:0!important;z-index:9000!important;background:rgba(15,23,42,.42)!important;backdrop-filter:blur(10px)!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:28px!important;overflow:auto!important}
+.mo{width:min(980px,calc(100vw - 56px))!important;max-height:calc(100vh - 56px)!important;background:var(--sf)!important;border:1px solid var(--bd)!important;border-radius:22px!important;box-shadow:0 28px 80px rgba(15,23,42,.28)!important;color:var(--tx)!important;overflow:hidden!important}
+.mo-xl{width:min(1120px,calc(100vw - 56px))!important}.mo.fi{background:var(--sf)!important}
+body.dm .ov{background:rgba(0,0,0,.58)!important}.ov .mo{animation:modal-pop .18s ease both}@keyframes modal-pop{from{opacity:.6;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+.av{display:inline-flex!important;align-items:center!important;justify-content:center!important;line-height:1!important;font-weight:800!important;text-transform:uppercase!important;letter-spacing:.02em!important;box-shadow:0 0 0 2px var(--sf),0 6px 18px rgba(15,23,42,.18)!important;overflow:hidden!important;vertical-align:middle!important;flex:0 0 auto!important}
+.badge{display:inline-flex!important;align-items:center!important;gap:4px!important;min-height:18px!important;padding:2px 7px!important;border-radius:999px!important;font-size:10px!important;font-weight:800!important;line-height:1!important;white-space:nowrap!important}
+.prog{height:8px!important;border-radius:999px!important;background:var(--sf3)!important;overflow:hidden!important;border:1px solid var(--bd)!important}.progf{height:100%!important;border-radius:999px!important;transition:width .25s ease!important}
+.tkc{background:var(--sf)!important;border:1px solid var(--bd)!important;border-radius:14px!important;padding:11px!important;box-shadow:0 8px 20px rgba(15,23,42,.06)!important;cursor:pointer!important;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease!important;min-height:112px!important}.tkc:hover{transform:translateY(-2px)!important;border-color:var(--ac)!important;box-shadow:0 14px 34px rgba(29,78,216,.14)!important}
+.kanban-scroll{background:linear-gradient(180deg,var(--bg),var(--sf2))!important}.kanban-scroll>div>div{min-height:calc(100vh - 245px)!important;background:linear-gradient(180deg,var(--sf),var(--sf2))!important;border:1px solid var(--bd)!important;border-top-width:4px!important;border-radius:18px!important;padding:12px!important;box-shadow:0 12px 28px rgba(15,23,42,.07)!important}.kanban-scroll>div>div>div:first-child{padding-bottom:10px!important;margin-bottom:4px!important}
+.card{border-radius:18px!important;background:linear-gradient(180deg,#fff,#f8fbff)!important;border:1px solid #dce6f4!important;box-shadow:0 12px 30px rgba(15,23,42,.08)!important}.card h3{font-size:14px!important}.card [style*="View all my tasks"]{height:36px!important}
+button.btn,.btn,.tb{border-radius:12px!important;font-weight:800!important}.tb{border:0!important;background:transparent!important;color:var(--tx2)!important;padding:6px 10px!important;cursor:pointer!important}.tb.act{background:var(--sf)!important;color:var(--ac)!important;box-shadow:0 4px 14px rgba(15,23,42,.10)!important}
+.sel,select{border:1px solid var(--bd)!important;background:var(--sf)!important;color:var(--tx)!important;border-radius:10px!important;padding:7px 10px!important;min-height:34px!important}.inp{min-height:36px!important}
+body:not(.dm) .fi{background:#f4f7fb!important}body:not(.dm) .page-enter{background:#f4f7fb!important;color:#0f172a!important}
+body:not(.dm) .kanban-scroll .tkc,body:not(.dm) .card{color:#0f172a!important}
+body.dm .mo,body.dm .tkc,body.dm .kanban-scroll>div>div,body.dm .card{background:linear-gradient(180deg,rgba(20,28,49,.96),rgba(12,18,34,.96))!important;border-color:#2b3654!important;color:#eaf0ff!important;box-shadow:0 22px 60px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.04)!important}
+body.dm .kanban-scroll{background:#070814!important}body.dm .tb.act{background:#10172a!important;color:#bcd0ff!important}
+@media(max-width:900px){.ov{padding:12px!important;align-items:flex-start!important}.mo,.mo-xl{width:calc(100vw - 24px)!important;max-height:calc(100vh - 24px)!important}.kanban-scroll>div>div{flex-basis:260px!important}}
+
+
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
       @keyframes ap-fadeIn{0%{opacity:0}100%{opacity:1}}
