@@ -282,6 +282,59 @@ function AuthScreen({onLogin}){
       .lbl{display:block;font-size:11px;font-weight:700;color:var(--tx3);margin-bottom:6px}button,input,select,textarea{font:inherit}button{font-family:inherit}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:999px;border:2px solid var(--bg)}::-webkit-scrollbar-track{background:var(--bg)}
 
 
+
+/* === Project Tracker Theme v3 — dark/glass UI cleanup === */
+html,body,#root{background:var(--bg)!important;color:var(--tx)!important}
+body.dm{color-scheme:dark;background:
+  radial-gradient(circle at 18% 0%,rgba(90,140,255,.16),transparent 28%),
+  radial-gradient(circle at 88% 12%,rgba(168,85,247,.13),transparent 30%),
+  #070814!important;
+}
+body.dm :where(.page-enter,.page-enter > div){background:transparent!important;color:var(--tx)!important}
+body.dm :where(input:not([type="file"]):not([type="range"]),select,textarea){
+  background:#10172a!important;color:#eaf0ff!important;border:1px solid #2b3654!important;border-radius:12px!important;
+  min-height:34px!important;padding:7px 11px!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)!important;
+}
+body.dm :where(input,textarea)::placeholder{color:#71809d!important}
+body.dm :where(option){background:#10172a!important;color:#eaf0ff!important}
+body.dm :where(button,.btn,[role="button"]):not(.ap-link){
+  background:linear-gradient(180deg,#151d33,#10172a)!important;color:#eaf0ff!important;border:1px solid #2b3654!important;
+  border-radius:12px!important;min-height:32px!important;padding:7px 12px!important;box-shadow:0 8px 22px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.05)!important;
+}
+body.dm :where(button,.btn,[role="button"]):not(.ap-link):hover{border-color:#5a8cff!important;color:#fff!important;transform:translateY(-1px)!important;box-shadow:0 12px 28px rgba(90,140,255,.16)!important}
+body.dm .card,
+body.dm .page-enter :where(section,article),
+body.dm .page-enter [style*="background: white"],
+body.dm .page-enter [style*="background: rgb(255"],
+body.dm .page-enter [style*="background:#fff"],
+body.dm .page-enter [style*="background: #fff"],
+body.dm .page-enter [style*="background:var(--sf)"],
+body.dm .page-enter [style*="background: var(--sf)"],
+body.dm .page-enter [style*="background:var(--sf2)"],
+body.dm .page-enter [style*="background: var(--sf2)"]{
+  background:linear-gradient(180deg,rgba(20,28,49,.94),rgba(12,18,34,.94))!important;
+  border-color:#283453!important;color:#eaf0ff!important;box-shadow:0 18px 44px rgba(0,0,0,.30),inset 0 1px 0 rgba(255,255,255,.04)!important;
+}
+body.dm .page-enter [style*="border: 1px solid"],
+body.dm .page-enter [style*="border:1px solid"]{border-color:#283453!important}
+body.dm .page-enter [style*="color: var(--tx3)"],
+body.dm .page-enter [style*="color:var(--tx3)"]{color:#95a3bd!important}
+body.dm .page-enter [style*="color: var(--tx2)"],
+body.dm .page-enter [style*="color:var(--tx2)"]{color:#c7d2ea!important}
+body.dm .page-enter [style*="color:#0f172a"],
+body.dm .page-enter [style*="color: #0f172a"],
+body.dm .page-enter [style*="color:black"],
+body.dm .page-enter [style*="color: black"]{color:#eaf0ff!important}
+body.dm .page-enter [style*="box-shadow"]{box-shadow:0 16px 40px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.04)!important}
+body.dm .page-enter [style*="borderRadius"], body.dm .page-enter [style*="border-radius"]{border-radius:16px!important}
+body.dm .badge{background:rgba(90,140,255,.16)!important;border:1px solid rgba(90,140,255,.28)!important;color:#bcd0ff!important}
+body.dm .prog{background:#202a43!important;border:1px solid #2b3654!important}
+body.dm .recharts-cartesian-grid line{stroke:#27314d!important}
+body.dm .recharts-text{fill:#9aa8c2!important}
+body.dm .recharts-default-tooltip{background:#10172a!important;border:1px solid #2b3654!important;color:#eaf0ff!important}
+body:not(.dm){background:#f6f8fb!important;color-scheme:light}
+
+
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
       @keyframes ap-fadeIn{0%{opacity:0}100%{opacity:1}}
@@ -8036,7 +8089,12 @@ function deepLinkFromSearch(){
 }
 
 function App(){
-  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
+  const [dark,setDark]=useState(()=>{try{
+    // Theme v3 migration: the dashboard is designed as a dark/glass workspace.
+    // Force dark once so older browsers with pf_dark=0 do not keep the broken light/default look.
+    if(localStorage.getItem('pf_theme_v3_applied')!=='1'){localStorage.setItem('pf_dark','1');localStorage.setItem('pf_theme_v3_applied','1');return true;}
+    return localStorage.getItem('pf_dark')!=='0';
+  }catch{return true;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
   const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
   const [loading,setLoading]=useState(_hadSession);
