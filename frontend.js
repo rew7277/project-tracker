@@ -267,6 +267,21 @@ function AuthScreen({onLogin}){
     s.textContent=`
       /* fonts loaded in <head> */
 
+      :root{
+        --bg:#f6f8fb;--sf:#ffffff;--sf2:#f1f5f9;--sf3:#e8eef7;--tx:#0f172a;--tx2:#334155;--tx3:#64748b;--bd:#e2e8f0;--bd2:#dbe4ef;--sh:0 10px 30px rgba(15,23,42,.08);
+        --ac:#1d4ed8;--ac2:#1e40af;--ac3:rgba(29,78,216,.10);--ac4:rgba(29,78,216,.06);--ac-tx:#fff;--gn:#15803d;--cy:#0e7490;--pu:#6d28d9;--am:#b45309;--rd:#b91c1c;--rd2:#dc2626;--or:#c2410c;
+      }
+      body.dm{
+        --bg:#070814;--sf:#0f1224;--sf2:#171a2f;--sf3:#20243d;--tx:#f8fafc;--tx2:#cbd5e1;--tx3:#94a3b8;--bd:#27304a;--bd2:#303a58;--sh:0 12px 36px rgba(0,0,0,.35);
+        --ac:#5a8cff;--ac2:#8b5cf6;--ac3:rgba(90,140,255,.14);--ac4:rgba(90,140,255,.08);--ac-tx:#fff;--gn:#22c55e;--cy:#22d3ee;--pu:#a78bfa;--am:#fbbf24;--rd:#f87171;--rd2:#ef4444;--or:#fb923c;
+      }
+      *{box-sizing:border-box}html,body,#root{width:100%;height:100%;margin:0}body{font-family:'Plus Jakarta Sans',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--tx);overflow:hidden}.fi{background:var(--bg)}
+      .card{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;box-shadow:var(--sh)}
+      .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:9px;font-weight:700;cursor:pointer;transition:all .15s ease;font-family:inherit}.btn.bg{background:var(--sf2);border-color:var(--bd);color:var(--tx2)}.btn.bg:hover{border-color:var(--ac);color:var(--ac);transform:translateY(-1px)}
+      .inp,input.inp,select.inp,textarea.inp{width:100%;border:1px solid var(--bd);background:var(--sf);color:var(--tx);border-radius:9px;padding:8px 10px;outline:none;font-family:inherit}.inp:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac4)}
+      .lbl{display:block;font-size:11px;font-weight:700;color:var(--tx3);margin-bottom:6px}button,input,select,textarea{font:inherit}button{font-family:inherit}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:999px;border:2px solid var(--bg)}::-webkit-scrollbar-track{background:var(--bg)}
+
+
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
       @keyframes ap-fadeIn{0%{opacity:0}100%{opacity:1}}
@@ -2288,7 +2303,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
+function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial,wsSlug}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -2318,17 +2333,20 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
 
   useEffect(()=>{if(detail){
     const fresh=safe(projects).find(p=>p.id===detail.id);if(fresh)setDetail(fresh);
-    // Push clean URL with project id
+    // Push clean URL with workspace slug + project id
     try{
-      const slug=detail.id;
-      history.pushState(null,'','/projects/'+slug);
+      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
+      const pid=detail.id;
+      history.pushState(null,'',(ws?'/'+ws:'')+'/projects/'+pid);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
-    // Back to /projects when detail closes
+    // Back to /{ws_slug}/projects when detail closes
     try{
-      if(window.location.pathname.startsWith('/projects/')){
-        history.pushState(null,'','/projects');
+      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
+      const projPath=(ws?'/'+ws:'')+'/projects';
+      if(window.location.pathname.includes('/projects/')){
+        history.pushState(null,'',projPath);
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -8036,9 +8054,12 @@ function App(){
       if(dl.taskId)setInitialTaskId(dl.taskId);
       if(dl.ticketId)setInitialTicketId(dl.ticketId);
       if(dl.projectId)setInitialProjectId(dl.projectId);
-      if(p.startsWith('/projects/')&&p.length>10){
-        const pid=p.split('/')[2];
-        if(pid)setInitialProjectId(pid);
+      // Handle /{ws_slug}/projects/{pid} or /projects/{pid}
+      const parts=p.replace(/^\//, '').split('/').filter(Boolean);
+      const projIdx=parts.indexOf('projects');
+      if(projIdx>=0&&parts.length>projIdx+1){
+        const pid=parts[projIdx+1];
+        if(pid){setInitialProjectId(pid);}
         setView('projects');
       }
     }catch(e){}
@@ -8046,7 +8067,8 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
+      const p=parts.length>=2?parts[1]:(parts[0]||'');
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -8056,7 +8078,9 @@ function App(){
     try{
       const dl=deepLinkFromSearch();
       if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      // Path may be /{ws-slug}/{view} or /{view} — skip first segment if it's not a view name
+      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
+      const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
@@ -8076,16 +8100,18 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        const slug=wsSlug||(cu&&cu.workspace_slug)||'';
+        history.pushState(null,'',(slug?'/'+slug:'')+'/'+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[]);
+  },[wsSlug,cu]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+        const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
+        const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -8123,7 +8149,7 @@ function App(){
   const [dmUnread,setDmUnread]=useState([]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
-  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
+  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsSlug,setWsSlug]=useState(()=>{try{return localStorage.getItem('pf_ws_slug')||'';}catch{return '';}});const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
@@ -8258,6 +8284,7 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
+      if(ws&&ws.workspace_slug){setWsSlug(ws.workspace_slug);try{localStorage.setItem('pf_ws_slug',ws.workspace_slug);}catch{}}
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
@@ -8267,7 +8294,7 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} if(u.workspace_slug){setWsSlug(u.workspace_slug);try{localStorage.setItem('pf_ws_slug',u.workspace_slug);}catch{}} setLoading(false); }
       else {
         // Got a response but errored (e.g. 401 not logged in) — show login instantly
         try{localStorage.removeItem('pf_had_session');}catch{}
@@ -8603,7 +8630,11 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
+    setCu(u);
+    const slug=u.workspace_slug||'';
+    if(slug){setWsSlug(slug);try{localStorage.setItem('pf_ws_slug',slug);history.replaceState(null,'','/'+slug+'/dashboard');}catch{}}
+  }}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
@@ -8691,7 +8722,7 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)} wsSlug=${wsSlug}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
