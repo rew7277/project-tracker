@@ -1245,8 +1245,27 @@ def _email_pill(label, color="#635bff"):
     return f'''<span style="display:inline-block;padding:7px 12px;border-radius:999px;background:{color}16;color:{color};font-size:11px;line-height:13px;font-weight:900;text-transform:uppercase;letter-spacing:.6px;">{label}</span>'''
 
 
+def _get_ws_slug_for_email(workspace_id):
+    """Return the URL-safe workspace slug for deep-link email URLs."""
+    import re as _re_slug
+    try:
+        with get_db() as _db:
+            _ws = _db.execute("SELECT name, workspace_slug FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        if _ws:
+            return _ws["workspace_slug"] or _re_slug.sub(r"[^a-z0-9]+", "-", (_ws["name"] or "").lower().strip()).strip("-") or ""
+    except Exception:
+        pass
+    return ""
+
+def _email_deep_url(action, item_id, workspace_id):
+    """Build a workspace-scoped deep-link URL for email notifications.
+    Format: /{ws_slug}/?action={action}&id={item_id}"""
+    import urllib.parse as _up
+    slug = _get_ws_slug_for_email(workspace_id)
+    qs = f"?action={_up.quote(action)}&id={_up.quote(str(item_id))}"
+    return (f"/{slug}/{qs}") if slug else qs
+
 def _email_base(header_html, body_html, cta_url=None, cta_text="View Dashboard", cta_color="#4f46e5", preheader="Project Tracker update"):
-    """Email shell tuned for real inboxes: table-first, inline styles, no fragile glass/CSS-only effects."""
     cta_url = _email_escape(_email_abs_url(cta_url or "/?action=login"))
     cta_text = _email_escape(cta_text or "View Dashboard")
     cta_color = _email_escape(cta_color or "#4f46e5")
@@ -1387,7 +1406,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
     body = _email_hero("You’ve got a new task", subtitle)
     body += _email_notification_card(task_title, "Task", "New", accent, 12, f'Status: <strong style="color:{accent};">New</strong> · Assigned by {_email_escape(assigner_name)}')
     body += _email_meta_grid("Priority", "Normal", "Next step", "Review & update", accent)
-    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A new task has been assigned to you")
+    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, _email_deep_url("task", task_id, workspace_id), "Open Task →", accent, "A new task has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1424,7 +1443,7 @@ def send_task_reassigned_email(user_email, user_name, task_title, assigner_name,
     subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> reassigned this task to you.'
     body = _email_hero("Task reassigned to you", subtitle)
     body += _email_notification_card(task_title, "Task", "Reassigned", accent, 20, f'Reassigned by <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong>')
-    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A task was reassigned to you")
+    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, _email_deep_url("task", task_id, workspace_id), "Open Task →", accent, "A task was reassigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1435,7 +1454,7 @@ def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_i
     body = _email_hero("Deadline coming up", subtitle)
     body += _email_notification_card(task_title, "Due soon", "Due soon", accent, 72, f'Deadline: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Focus", "Finish or update", "Reminder", "Due within 24 hours", accent)
-    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is due soon")
+    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, _email_deep_url("task", task_id, workspace_id), "Update Task →", accent, "A task is due soon")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1446,7 +1465,7 @@ def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id
     body = _email_hero("This task is overdue", subtitle)
     body += _email_notification_card(task_title, "Overdue task", "Overdue", accent, 88, f'Was due: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Risk", "Schedule impact", "Next step", "Update status today", accent)
-    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is overdue")
+    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, _email_deep_url("task", task_id, workspace_id), "Update Task →", accent, "A task is overdue")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1459,7 +1478,7 @@ def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_nam
     body = _email_hero("New ticket assigned", subtitle)
     body += _email_notification_card(ticket_title, "Support ticket", priority_key.title(), accent, 10, f'Priority: <strong style="color:{accent};">{_email_escape(priority_key.title())}</strong>')
     body += _email_meta_grid("Owner", user_name, "Reporter", reporter_name, accent)
-    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, "A support ticket has been assigned to you")
+    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, _email_deep_url("ticket", ticket_id, workspace_id), "View Ticket →", accent, "A support ticket has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1473,7 +1492,7 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     if progress == 100:
         body += _email_completion_banner("Ticket resolved", "The ticket is now complete/resolved and ready for review or closure.", accent)
     body += _email_notification_card(ticket_title, "Support ticket", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, f"Ticket {label}")
+    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, _email_deep_url("ticket", ticket_id, workspace_id), "View Ticket →", accent, f"Ticket {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -2425,7 +2444,7 @@ def login():
             if ws_row:
                 import re as _re
                 slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -2880,7 +2899,7 @@ def totp_verify_login():
             ).fetchone()
             if ws_row:
                 slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -3253,7 +3272,7 @@ def accept_workspace_invite():
         slug = "".join(c2 for c2 in ws_name.lower().replace(" ","-") if c2.isalnum() or c2=="-")[:30] or ws_id
     _register_session(uid, ws_id, session_id)
     _audit("invite_accepted", email, f"Joined workspace {ws_id} as {role}")
-    return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id}/dashboard"})
+    return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/dashboard"})
 
 @app.route("/api/workspace/invites", methods=["GET"])
 @login_required
@@ -3399,7 +3418,7 @@ def domain_join_request():
             _set_logged_out_at(new_uid, "")
             _register_session(new_uid, ws_id_req, session_id)
             _audit("domain_join", email, f"Auto-joined {ws_id_req} via domain {domain}")
-            return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id_req}/dashboard"})
+            return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/dashboard"})
         else:
             # Notify admins
             _audit("domain_join_request", email, f"Requested access to {ws_id_req} via domain {domain}")
@@ -3466,7 +3485,7 @@ def register():
             result = {"id":uid,"workspace_id":ws_id,"name":d["name"],"email":d["email"],
                       "role":d.get("role","Developer"),"avatar":av,"color":c}
             if slug:
-                result["workspace_dashboard_url"] = f"/{slug}/{ws_id}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
             return jsonify(result)
     except Exception as e:
         if "UNIQUE" in str(e): return jsonify({"error":"Email already registered"}),400
@@ -3572,7 +3591,7 @@ def me():
         ws_slug = u.get("_ws_slug","")
         if ws_name or ws_slug:
             slug = ws_slug or _re.sub(r"[^a-z0-9]+", "-", ws_name.lower().strip()).strip("-") or "workspace"
-            result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+            result["workspace_dashboard_url"] = f"/{slug}/dashboard"
             result["workspace_slug"] = slug
             result["workspace_id_from_me"] = u["workspace_id"]
         _cache_set(me_cache_key, result)
@@ -5362,7 +5381,7 @@ def ws_sso_callback(ws_name, ws_id):
 
     # Redirect to workspace-scoped dashboard URL
     slug = _slugify(ws["name"])
-    return redirect(f"/{slug}/{ws_id}/dashboard")
+    return redirect(f"/{slug}/dashboard")
 
 
 # ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
@@ -6060,6 +6079,22 @@ def root_app():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     return _serve_html()
+
+@app.route("/<ws_slug>/", methods=["GET", "HEAD"])
+@app.route("/<ws_slug>/<view_name>", methods=["GET", "HEAD"])
+def ws_slug_routes(ws_slug, view_name=None):
+    """Serve the SPA for workspace-slug-based URLs like /{ws_slug}/dashboard."""
+    if request.method == "HEAD":
+        return Response(status=200, headers={"Cache-Control": "no-store"})
+    # Block obvious non-SPA paths (static files etc.)
+    if ws_slug.startswith(".") or (view_name and "." in view_name):
+        return "", 404
+    # These are well-known static/API paths that shouldn't be caught here
+    _static_prefixes = ("api", "static", "favicon", "icon", "manifest", "sw.js", "_")
+    if ws_slug.lower() in _static_prefixes:
+        return "", 404
+    return _serve_html()
+
 
 @app.route("/<path:path>")
 def catch_all(path):
