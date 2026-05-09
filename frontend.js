@@ -73,31 +73,14 @@ const _apiCleanMessage = (message, status) => {
   if (!msg || msg.length > 180 || /^doctype html/i.test(msg)) msg = status ? `Server returned HTTP ${status}` : 'Network error';
   return msg;
 };
-const _API_SILENT_PREFIXES = [
-  '/api/auth/me',          // expected on logged-out/expired sessions
-  '/api/app-data',         // background refresh; show banner in UI, not toast spam
-  '/api/presence',         // heartbeat/polling
-  '/api/notifications',    // SSE/fallback polling
-  '/api/reminders/due',    // reminder polling
-  '/api/dm/unread',        // DM polling
-  '/api/timelogs'          // dashboard background poll
-];
-const _apiShouldToast = (url, status) => {
-  const u = String(url || '').split('?')[0];
-  if (_API_SILENT_PREFIXES.some(p => u === p || u.startsWith(p + '/'))) return false;
-  if (status === 401 || status === 403) return false;
-  return true;
-};
 const _apiNotifyError = (url, message, status) => {
   message = _apiCleanMessage(message, status);
-  const key = `${status || 0}:${String(url || '').split('?')[0]}:${message || ''}`;
+  const key = `${status || 0}:${url}:${message || ''}`;
   const now = Date.now();
-  // One visible toast per unique API problem every 2 minutes. Background polls are console-only.
-  if ((now - (_apiErrorSeen.get(key) || 0)) < 120000) return;
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
   _apiErrorSeen.set(key, now);
-  console.warn('[API]', status || 'network', url, message);
-  if (!_apiShouldToast(url, status)) return;
   window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
+  console.warn('[API]', status || 'network', url, message);
 };
 const _apiRequest = async (u, opts = {}) => {
   try {
@@ -110,7 +93,7 @@ const _apiRequest = async (u, opts = {}) => {
     const data = await _apiRead(r);
     if (!r.ok) {
       const message = data?.error || data?.message || `HTTP ${r.status}`;
-      if(!opts.quiet) _apiNotifyError(u, message, r.status);
+      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
       return { ok:false, error:message, status:r.status, data };
     }
     const etag = r.headers.get('ETag');
@@ -118,17 +101,17 @@ const _apiRequest = async (u, opts = {}) => {
     return data;
   } catch (e) {
     if (e.name === 'AbortError') return null;
-    if(!opts.quiet) _apiNotifyError(u, e.message || 'Network error', 0);
+    _apiNotifyError(u, e.message || 'Network error', 0);
     return { ok:false, error:e.message || 'Network error', status:0 };
   }
 };
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:(u,opts={})=>_apiRequest(u,opts),
-  post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
-  put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
-  del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
-  upload:(u,fd,opts={})=>_apiRequest(u,{...opts,method:'POST',body:fd}),
+  get:u=>_apiRequest(u),
+  post:(u,b)=>_apiRequest(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  put:(u,b)=>_apiRequest(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
+  del:u=>_apiRequest(u,{method:'DELETE'}),
+  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
 };
 
 const STAGES={
@@ -266,96 +249,6 @@ function AuthScreen({onLogin}){
     s.id=id;
     s.textContent=`
       /* fonts loaded in <head> */
-
-      :root{
-        --bg:#f6f8fb;--sf:#ffffff;--sf2:#f1f5f9;--sf3:#e8eef7;--tx:#0f172a;--tx2:#334155;--tx3:#64748b;--bd:#e2e8f0;--bd2:#dbe4ef;--sh:0 10px 30px rgba(15,23,42,.08);
-        --ac:#1d4ed8;--ac2:#1e40af;--ac3:rgba(29,78,216,.10);--ac4:rgba(29,78,216,.06);--ac-tx:#fff;--gn:#15803d;--cy:#0e7490;--pu:#6d28d9;--am:#b45309;--rd:#b91c1c;--rd2:#dc2626;--or:#c2410c;
-      }
-      body.dm{
-        --bg:#070814;--sf:#0f1224;--sf2:#171a2f;--sf3:#20243d;--tx:#f8fafc;--tx2:#cbd5e1;--tx3:#94a3b8;--bd:#27304a;--bd2:#303a58;--sh:0 12px 36px rgba(0,0,0,.35);
-        --ac:#5a8cff;--ac2:#8b5cf6;--ac3:rgba(90,140,255,.14);--ac4:rgba(90,140,255,.08);--ac-tx:#fff;--gn:#22c55e;--cy:#22d3ee;--pu:#a78bfa;--am:#fbbf24;--rd:#f87171;--rd2:#ef4444;--or:#fb923c;
-      }
-      *{box-sizing:border-box}html,body,#root{width:100%;height:100%;margin:0}body{font-family:'Plus Jakarta Sans',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--tx);overflow:hidden}.fi{background:var(--bg)}
-      .card{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;box-shadow:var(--sh)}
-      .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:9px;font-weight:700;cursor:pointer;transition:all .15s ease;font-family:inherit}.btn.bg{background:var(--sf2);border-color:var(--bd);color:var(--tx2)}.btn.bg:hover{border-color:var(--ac);color:var(--ac);transform:translateY(-1px)}
-      .inp,input.inp,select.inp,textarea.inp{width:100%;border:1px solid var(--bd);background:var(--sf);color:var(--tx);border-radius:9px;padding:8px 10px;outline:none;font-family:inherit}.inp:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac4)}
-      .lbl{display:block;font-size:11px;font-weight:700;color:var(--tx3);margin-bottom:6px}button,input,select,textarea{font:inherit}button{font-family:inherit}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:999px;border:2px solid var(--bg)}::-webkit-scrollbar-track{background:var(--bg)}
-
-
-
-/* === Project Tracker Theme v3 — dark/glass UI cleanup === */
-html,body,#root{background:var(--bg)!important;color:var(--tx)!important}
-body.dm{color-scheme:dark;background:
-  radial-gradient(circle at 18% 0%,rgba(90,140,255,.16),transparent 28%),
-  radial-gradient(circle at 88% 12%,rgba(168,85,247,.13),transparent 30%),
-  #070814!important;
-}
-body.dm :where(.page-enter,.page-enter > div){background:transparent!important;color:var(--tx)!important}
-body.dm :where(input:not([type="file"]):not([type="range"]),select,textarea){
-  background:#10172a!important;color:#eaf0ff!important;border:1px solid #2b3654!important;border-radius:12px!important;
-  min-height:34px!important;padding:7px 11px!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)!important;
-}
-body.dm :where(input,textarea)::placeholder{color:#71809d!important}
-body.dm :where(option){background:#10172a!important;color:#eaf0ff!important}
-body.dm :where(button,.btn,[role="button"]):not(.ap-link){
-  background:linear-gradient(180deg,#151d33,#10172a)!important;color:#eaf0ff!important;border:1px solid #2b3654!important;
-  border-radius:12px!important;min-height:32px!important;padding:7px 12px!important;box-shadow:0 8px 22px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.05)!important;
-}
-body.dm :where(button,.btn,[role="button"]):not(.ap-link):hover{border-color:#5a8cff!important;color:#fff!important;transform:translateY(-1px)!important;box-shadow:0 12px 28px rgba(90,140,255,.16)!important}
-body.dm .card,
-body.dm .page-enter :where(section,article),
-body.dm .page-enter [style*="background: white"],
-body.dm .page-enter [style*="background: rgb(255"],
-body.dm .page-enter [style*="background:#fff"],
-body.dm .page-enter [style*="background: #fff"],
-body.dm .page-enter [style*="background:var(--sf)"],
-body.dm .page-enter [style*="background: var(--sf)"],
-body.dm .page-enter [style*="background:var(--sf2)"],
-body.dm .page-enter [style*="background: var(--sf2)"]{
-  background:linear-gradient(180deg,rgba(20,28,49,.94),rgba(12,18,34,.94))!important;
-  border-color:#283453!important;color:#eaf0ff!important;box-shadow:0 18px 44px rgba(0,0,0,.30),inset 0 1px 0 rgba(255,255,255,.04)!important;
-}
-body.dm .page-enter [style*="border: 1px solid"],
-body.dm .page-enter [style*="border:1px solid"]{border-color:#283453!important}
-body.dm .page-enter [style*="color: var(--tx3)"],
-body.dm .page-enter [style*="color:var(--tx3)"]{color:#95a3bd!important}
-body.dm .page-enter [style*="color: var(--tx2)"],
-body.dm .page-enter [style*="color:var(--tx2)"]{color:#c7d2ea!important}
-body.dm .page-enter [style*="color:#0f172a"],
-body.dm .page-enter [style*="color: #0f172a"],
-body.dm .page-enter [style*="color:black"],
-body.dm .page-enter [style*="color: black"]{color:#eaf0ff!important}
-body.dm .page-enter [style*="box-shadow"]{box-shadow:0 16px 40px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.04)!important}
-body.dm .page-enter [style*="borderRadius"], body.dm .page-enter [style*="border-radius"]{border-radius:16px!important}
-body.dm .badge{background:rgba(90,140,255,.16)!important;border:1px solid rgba(90,140,255,.28)!important;color:#bcd0ff!important}
-body.dm .prog{background:#202a43!important;border:1px solid #2b3654!important}
-body.dm .recharts-cartesian-grid line{stroke:#27314d!important}
-body.dm .recharts-text{fill:#9aa8c2!important}
-body.dm .recharts-default-tooltip{background:#10172a!important;border:1px solid #2b3654!important;color:#eaf0ff!important}
-body:not(.dm){background:#f6f8fb!important;color-scheme:light}
-
-
-
-
-/* === UI/UX polish v4: modal, avatars, kanban, dashboard cards === */
-.ov{position:fixed!important;inset:0!important;z-index:9000!important;background:rgba(15,23,42,.42)!important;backdrop-filter:blur(10px)!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:28px!important;overflow:auto!important}
-.mo{width:min(980px,calc(100vw - 56px))!important;max-height:calc(100vh - 56px)!important;background:var(--sf)!important;border:1px solid var(--bd)!important;border-radius:22px!important;box-shadow:0 28px 80px rgba(15,23,42,.28)!important;color:var(--tx)!important;overflow:hidden!important}
-.mo-xl{width:min(1120px,calc(100vw - 56px))!important}.mo.fi{background:var(--sf)!important}
-body.dm .ov{background:rgba(0,0,0,.58)!important}.ov .mo{animation:modal-pop .18s ease both}@keyframes modal-pop{from{opacity:.6;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
-.av{display:inline-flex!important;align-items:center!important;justify-content:center!important;line-height:1!important;font-weight:800!important;text-transform:uppercase!important;letter-spacing:.02em!important;box-shadow:0 0 0 2px var(--sf),0 6px 18px rgba(15,23,42,.18)!important;overflow:hidden!important;vertical-align:middle!important;flex:0 0 auto!important}
-.badge{display:inline-flex!important;align-items:center!important;gap:4px!important;min-height:18px!important;padding:2px 7px!important;border-radius:999px!important;font-size:10px!important;font-weight:800!important;line-height:1!important;white-space:nowrap!important}
-.prog{height:8px!important;border-radius:999px!important;background:var(--sf3)!important;overflow:hidden!important;border:1px solid var(--bd)!important}.progf{height:100%!important;border-radius:999px!important;transition:width .25s ease!important}
-.tkc{background:var(--sf)!important;border:1px solid var(--bd)!important;border-radius:14px!important;padding:11px!important;box-shadow:0 8px 20px rgba(15,23,42,.06)!important;cursor:pointer!important;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease!important;min-height:112px!important}.tkc:hover{transform:translateY(-2px)!important;border-color:var(--ac)!important;box-shadow:0 14px 34px rgba(29,78,216,.14)!important}
-.kanban-scroll{background:linear-gradient(180deg,var(--bg),var(--sf2))!important}.kanban-scroll>div>div{min-height:calc(100vh - 245px)!important;background:linear-gradient(180deg,var(--sf),var(--sf2))!important;border:1px solid var(--bd)!important;border-top-width:4px!important;border-radius:18px!important;padding:12px!important;box-shadow:0 12px 28px rgba(15,23,42,.07)!important}.kanban-scroll>div>div>div:first-child{padding-bottom:10px!important;margin-bottom:4px!important}
-.card{border-radius:18px!important;background:linear-gradient(180deg,#fff,#f8fbff)!important;border:1px solid #dce6f4!important;box-shadow:0 12px 30px rgba(15,23,42,.08)!important}.card h3{font-size:14px!important}.card [style*="View all my tasks"]{height:36px!important}
-button.btn,.btn,.tb{border-radius:12px!important;font-weight:800!important}.tb{border:0!important;background:transparent!important;color:var(--tx2)!important;padding:6px 10px!important;cursor:pointer!important}.tb.act{background:var(--sf)!important;color:var(--ac)!important;box-shadow:0 4px 14px rgba(15,23,42,.10)!important}
-.sel,select{border:1px solid var(--bd)!important;background:var(--sf)!important;color:var(--tx)!important;border-radius:10px!important;padding:7px 10px!important;min-height:34px!important}.inp{min-height:36px!important}
-body:not(.dm) .fi{background:#f4f7fb!important}body:not(.dm) .page-enter{background:#f4f7fb!important;color:#0f172a!important}
-body:not(.dm) .kanban-scroll .tkc,body:not(.dm) .card{color:#0f172a!important}
-body.dm .mo,body.dm .tkc,body.dm .kanban-scroll>div>div,body.dm .card{background:linear-gradient(180deg,rgba(20,28,49,.96),rgba(12,18,34,.96))!important;border-color:#2b3654!important;color:#eaf0ff!important;box-shadow:0 22px 60px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.04)!important}
-body.dm .kanban-scroll{background:#070814!important}body.dm .tb.act{background:#10172a!important;color:#bcd0ff!important}
-@media(max-width:900px){.ov{padding:12px!important;align-items:flex-start!important}.mo,.mo-xl{width:calc(100vw - 24px)!important;max-height:calc(100vh - 24px)!important}.kanban-scroll>div>div{flex-basis:260px!important}}
-
 
       /* ── Apple keyframes ── */
       @keyframes ap-fadeUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}}
@@ -1853,14 +1746,6 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
       payload={title:title.trim(),description:desc,project:pid,assignee:ass,priority:pri,stage,due,pct,comments:cmts,team_id:teamId,story_points:storyPoints,task_type:taskType,labels:taskLabels,sprint};
     }
     if(task&&task.id)payload.id=task.id;
-    if(!isEdit&&!rmEnabled){
-      // New task creation is optimistic in the parent view. Close immediately so the
-      // user does not wait for notification/email side effects on the server.
-      Promise.resolve(onSave(payload)).catch(()=>{});
-      setSaving(false);
-      onClose();
-      return payload;
-    }
     const result=await onSave(payload);
     setSaving(false);
     if(result&&result.error){setErr(result.error);return null;}
@@ -2378,7 +2263,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
 }
 
 /* ─── ProjectsView ────────────────────────────────────────────────────────── */
-function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial,wsSlug}){
+function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,teams,activeTeam,initialProjectId,onClearInitial}){
   const [showNew,setShowNew]=useState(false);const [detail,setDetail]=useState(null);
 
   // Open project from initialProjectId prop OR directly from URL path /projects/<id>
@@ -2408,20 +2293,17 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
 
   useEffect(()=>{if(detail){
     const fresh=safe(projects).find(p=>p.id===detail.id);if(fresh)setDetail(fresh);
-    // Push clean URL with workspace slug + project id
+    // Push clean URL with project id
     try{
-      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
-      const pid=detail.id;
-      history.pushState(null,'',(ws?'/'+ws:'')+'/projects/'+pid);
+      const slug=detail.id;
+      history.pushState(null,'','/projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
-    // Back to /{ws_slug}/projects when detail closes
+    // Back to /projects when detail closes
     try{
-      const ws=wsSlug||localStorage.getItem('pf_ws_slug')||'';
-      const projPath=(ws?'/'+ws:'')+'/projects';
-      if(window.location.pathname.includes('/projects/')){
-        history.pushState(null,'',projPath);
+      if(window.location.pathname.startsWith('/projects/')){
+        history.pushState(null,'','/projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2715,7 +2597,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,initialTaskId,onClearInitialTask,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2743,30 +2625,6 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     document.addEventListener('keydown',h);
     return()=>document.removeEventListener('keydown',h);
   },[]);
-
-  useEffect(()=>{
-    if(!initialTaskId)return;
-    let cancelled=false;
-    const openTask=(t)=>{
-      if(!t||cancelled)return;
-      setEditT(t);
-      if(t.project)setPid(t.project);
-      setShowResolved(true);
-      onClearInitialTask&&onClearInitialTask();
-      try{history.replaceState(null,'','/tasks');}catch(e){}
-    };
-    const existing=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
-    if(existing){openTask(existing);return;}
-    // Deep links from email can arrive before app-data has this task.
-    // Fetch the exact task by ID, inject it into state, then open the modal.
-    api.get('/api/tasks/'+encodeURIComponent(initialTaskId),{quiet:true}).then(t=>{
-      if(t&&t.id&&!cancelled){
-        setData&&setData(prev=>({ ...prev, tasks:[t,...safe(prev.tasks).filter(x=>String(x.id)!==String(t.id))] }));
-        openTask(t);
-      }
-    }).catch(()=>{});
-    return()=>{cancelled=true;};
-  },[initialTaskId,tasks]);
 
   useEffect(()=>{
     if(initialStage){setStageF(initialStage);setShowFilters(true);}
@@ -2856,18 +2714,15 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         _localTs:Date.now(),_pending:true
       };
       setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
-      // API call in background. Do not block the modal/button on email/push side effects.
-      api.post('/api/tasks',p,{quiet:true}).then(real=>{
-        if(real&&real.id){
-          setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...real,_localTs:Date.now()}:t)}));
-          setTimeout(()=>reload(),1200);
-        } else {
-          setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
-        }
-      }).catch(()=>{
+      // API call in background
+      r=await api.post('/api/tasks',p);
+      if(r&&r.id){
+        // Replace temp with real task from server
+        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
+      } else {
+        // Rollback temp task on error
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
-      });
-      r=tempTask;
+      }
     }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
@@ -4788,7 +4643,7 @@ function TeamView({users,cu,reload,projects}){
 }
 
 /* ─── TicketsView ────────────────────────────────────────────────────────── */
-function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus,initialTicketId,onClearInitialTicket}){
+function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus}){
   const [tickets,setTickets]=useState([]);
   const [busy,setBusy]=useState(true);
   const [filterStatus,setFilterStatus]=useState(initialStatus||'');
@@ -4822,17 +4677,6 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     setTickets(Array.isArray(d)?d:[]);
     setBusy(false);
   },[activeTeam]);
-
-  useEffect(()=>{
-    if(!initialTicketId||!tickets.length)return;
-    const t=tickets.find(x=>String(x.id)===String(initialTicketId));
-    if(t){
-      setDetailTicket(t);
-      setShowResolved(true);
-      onClearInitialTicket&&onClearInitialTicket();
-      try{history.replaceState(null,'','/tickets');}catch(e){}
-    }
-  },[initialTicketId,tickets]);
   useEffect(()=>{load();},[load]);
 
   const visibleTickets=useMemo(()=>{
@@ -8096,50 +7940,20 @@ function VaultView({cu}){
 
 
 
-
-function deepLinkFromSearch(){
-  try{
-    const sp=new URLSearchParams(window.location.search);
-    const action=(sp.get('action')||'').toLowerCase();
-    const id=sp.get('id')||sp.get('task_id')||sp.get('ticket_id')||sp.get('project_id')||'';
-    if(action==='task')return {view:'tasks',taskId:id};
-    if(action==='ticket')return {view:'tickets',ticketId:id};
-    if(action==='project')return {view:'projects',projectId:id};
-    if(['dashboard','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action};
-  }catch(e){}
-  return {};
-}
-
 function App(){
-  const [dark,setDark]=useState(()=>{try{
-    // Theme v3 migration: the dashboard is designed as a dark/glass workspace.
-    // Force dark once so older browsers with pf_dark=0 do not keep the broken light/default look.
-    if(localStorage.getItem('pf_theme_v3_applied')!=='1'){localStorage.setItem('pf_dark','1');localStorage.setItem('pf_theme_v3_applied','1');return true;}
-    return localStorage.getItem('pf_dark')!=='0';
-  }catch{return true;}});const [cu,setCu]=useState(null);
+  const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
   const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
   const [loading,setLoading]=useState(_hadSession);
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
-  const [initialProjectId,setInitialProjectId]=useState(()=>deepLinkFromSearch().projectId||null);
-  const [initialTaskId,setInitialTaskId]=useState(()=>deepLinkFromSearch().taskId||null);
-  const [initialTicketId,setInitialTicketId]=useState(()=>deepLinkFromSearch().ticketId||null);
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      const dl=deepLinkFromSearch();
-      if(dl.view)setView(dl.view);
-      if(dl.taskId)setInitialTaskId(dl.taskId);
-      if(dl.ticketId)setInitialTicketId(dl.ticketId);
-      if(dl.projectId)setInitialProjectId(dl.projectId);
-      // Handle /{ws_slug}/projects/{pid} or /projects/{pid}
-      const parts=p.replace(/^\//, '').split('/').filter(Boolean);
-      const projIdx=parts.indexOf('projects');
-      if(projIdx>=0&&parts.length>projIdx+1){
-        const pid=parts[projIdx+1];
-        if(pid){setInitialProjectId(pid);}
+      if(p.startsWith('/projects/')&&p.length>10){
+        const pid=p.split('/')[2];
+        if(pid)setInitialProjectId(pid);
         setView('projects');
       }
     }catch(e){}
@@ -8147,8 +7961,7 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-      const p=parts.length>=2?parts[1]:(parts[0]||'');
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -8156,11 +7969,7 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const dl=deepLinkFromSearch();
-      if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
-      // Path may be /{ws-slug}/{view} or /{view} — skip first segment if it's not a view name
-      const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-      const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
+      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
@@ -8180,18 +7989,16 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        const slug=wsSlug||(cu&&cu.workspace_slug)||'';
-        history.pushState(null,'',(slug?'/'+slug:'')+'/'+base);
+        history.pushState(null,'','/'+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[wsSlug,cu]);
+  },[]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const parts=window.location.pathname.replace(/^\//, '').split('/').filter(Boolean);
-        const p=parts.length>=2?parts[1]:(VALID_VIEWS.includes(parts[0])?parts[0]:'');
+        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -8200,6 +8007,7 @@ function App(){
     return()=>window.removeEventListener('popstate',onPop);
   },[]);
   const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
+  const [initialProjectId,setInitialProjectId]=useState(null);
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -8229,7 +8037,7 @@ function App(){
   const [dmUnread,setDmUnread]=useState([]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
-  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsSlug,setWsSlug]=useState(()=>{try{return localStorage.getItem('pf_ws_slug')||'';}catch{return '';}});const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
+  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
@@ -8350,11 +8158,9 @@ function App(){
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] app-data failed; keeping current screen to avoid toast/refresh loops', d && d.error);
-        if(d && (d.status===401 || d.status===403)){
-          setCu(null);
-          setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
-        }
+        console.warn('[Load] Authentication failed or server error, clearing session');
+        setCu(null);
+        setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
@@ -8364,7 +8170,6 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      if(ws&&ws.workspace_slug){setWsSlug(ws.workspace_slug);try{localStorage.setItem('pf_ws_slug',ws.workspace_slug);}catch{}}
       if(ws)setWsDmEnabled(ws.dm_enabled!==0);
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
@@ -8374,7 +8179,7 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} if(u.workspace_slug){setWsSlug(u.workspace_slug);try{localStorage.setItem('pf_ws_slug',u.workspace_slug);}catch{}} setLoading(false); }
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
       else {
         // Got a response but errored (e.g. 401 not logged in) — show login instantly
         try{localStorage.removeItem('pf_had_session');}catch{}
@@ -8710,11 +8515,7 @@ function App(){
   },[data.users,activeTeam,teamMemberIds]);
 
   if(loading)return html`<${AppLoader}/>`;
-  if(!cu)return html`<${AuthScreen} onLogin=${u=>{
-    setCu(u);
-    const slug=u.workspace_slug||'';
-    if(slug){setWsSlug(slug);try{localStorage.setItem('pf_ws_slug',slug);history.replaceState(null,'','/'+slug+'/dashboard');}catch{}}
-  }}/>`;
+  if(!cu)return html`<${AuthScreen} onLogin=${u=>{setCu(u);}}/>`;
 
   if(isDevRole && devNoTeam && safe(data.teams).length>0) return html`
     <div style=${{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'var(--bg)',flexDirection:'column',gap:16,padding:24}}>
@@ -8802,19 +8603,17 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
-            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)} wsSlug=${wsSlug}/>`:null}
+            ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
-              initialTaskId=${initialTaskId}
-              onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
             ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} onNavigate=${setView}/>`:null}
-            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
+            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}

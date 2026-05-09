@@ -507,7 +507,7 @@ def add_security_headers(response):
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob: https:; "
-        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com https://unpkg.com; "
+        "connect-src 'self' wss: https://api.anthropic.com https://accounts.google.com; "
         "frame-ancestors 'self'; "
         "frame-src https://accounts.google.com;"
     )
@@ -758,38 +758,6 @@ def _cache_bust_ws(workspace_id):
             if workspace_id in key:
                 _CACHE.pop(key, None)
 
-
-
-def _appdata_cache_key(workspace_id, user_id, table):
-    return f"appdata:{workspace_id}:{user_id}:{table}"
-
-def _appdata_cache_get(workspace_id, user_id, table):
-    """Small compatibility cache used by noisy dashboard poll endpoints.
-
-    The frontend asks reminders/notifications/dm-unread on every refresh and
-    at intervals. Older code called this helper but it was never defined, which
-    caused NameError -> HTTP 500 on /api/reminders/due, /api/notifications and
-    /api/dm/unread. Return (data, True) only when a real cached value exists;
-    otherwise callers safely fall back to DB.
-    """
-    try:
-        key = _appdata_cache_key(workspace_id, user_id, table)
-        cached = _cache_get(key)
-        if cached is not None:
-            return cached, True
-    except Exception as e:
-        try: log.warning("[appdata cache get] %s", e)
-        except Exception: pass
-    return None, False
-
-def _appdata_cache_set(workspace_id, user_id, table, data):
-    """Set the compatibility cache. Non-critical: never break a request."""
-    try:
-        _cache_set(_appdata_cache_key(workspace_id, user_id, table), data)
-    except Exception as e:
-        try: log.warning("[appdata cache set] %s", e)
-        except Exception: pass
-    return data
 
 def _cache_inject_item(workspace_id, table, item_dict):
     """After a create, inject the new item into existing cache entries
@@ -1245,155 +1213,152 @@ def _email_pill(label, color="#635bff"):
     return f'''<span style="display:inline-block;padding:7px 12px;border-radius:999px;background:{color}16;color:{color};font-size:11px;line-height:13px;font-weight:900;text-transform:uppercase;letter-spacing:.6px;">{label}</span>'''
 
 
-def _get_ws_slug_for_email(workspace_id):
-    """Return the URL-safe workspace slug for deep-link email URLs."""
-    import re as _re_slug
-    try:
-        with get_db() as _db:
-            _ws = _db.execute("SELECT name, workspace_slug FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-        if _ws:
-            return _ws["workspace_slug"] or _re_slug.sub(r"[^a-z0-9]+", "-", (_ws["name"] or "").lower().strip()).strip("-") or ""
-    except Exception:
-        pass
-    return ""
-
-def _email_deep_url(action, item_id, workspace_id):
-    """Build a workspace-scoped deep-link URL for email notifications.
-    Format: /{ws_slug}/?action={action}&id={item_id}"""
-    import urllib.parse as _up
-    slug = _get_ws_slug_for_email(workspace_id)
-    qs = f"?action={_up.quote(action)}&id={_up.quote(str(item_id))}"
-    return (f"/{slug}/{qs}") if slug else qs
-
-def _email_base(header_html, body_html, cta_url=None, cta_text="View Dashboard", cta_color="#4f46e5", preheader="Project Tracker update"):
+def _email_base(header_html, body_html, cta_url=None, cta_text="View Dashboard", cta_color="#635bff", preheader="Project Tracker update"):
+    # Production email shell: table-first, inline styles, readable in Gmail/Outlook.
     cta_url = _email_escape(_email_abs_url(cta_url or "/?action=login"))
     cta_text = _email_escape(cta_text or "View Dashboard")
-    cta_color = _email_escape(cta_color or "#4f46e5")
+    cta_color = _email_escape(cta_color or "#635bff")
     preheader = _email_escape(preheader or "Project Tracker update")
     return f'''<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
 <title>Project Tracker</title>
 <style>
-@media only screen and (max-width:680px){{
-  .pt-wrap{{padding:18px 10px!important}} .pt-shell{{width:100%!important;border-radius:22px!important}}
-  .pt-pad{{padding:26px 20px!important}} .pt-title{{font-size:26px!important;line-height:32px!important}}
-  .pt-two td{{display:block!important;width:100%!important;padding:0 0 10px!important}}
-  .pt-cta a{{display:block!important;text-align:center!important}}
-  .pt-hide-sm{{display:none!important}}
-}}
-@keyframes ptDone{{0%{{transform:scale(1)}}50%{{transform:scale(1.02)}}100%{{transform:scale(1)}}}}
-.pt-done{{animation:ptDone 2.5s ease-in-out infinite}}
+  @media only screen and (max-width:680px) {{
+    .pt-shell {{ padding:18px 10px !important; }}
+    .pt-card {{ width:100% !important; border-radius:24px !important; }}
+    .pt-pad {{ padding:26px 20px !important; }}
+    .pt-title {{ font-size:27px !important; line-height:33px !important; }}
+    .pt-hide-sm {{ display:none !important; }}
+    .pt-col {{ display:block !important; width:100% !important; padding-left:0 !important; padding-right:0 !important; }}
+    .pt-button a {{ display:block !important; text-align:center !important; }}
+  }}
+  @keyframes ptPulse {{ 0%{{transform:scale(1)}} 50%{{transform:scale(1.04)}} 100%{{transform:scale(1)}} }}
+  .pt-animate {{ animation:ptPulse 2.8s ease-in-out infinite; }}
+  .pt-link:hover {{ opacity:.92; }}
 </style>
 </head>
-<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;line-height:1px;font-size:1px;">{preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f7fb;">
-<tr><td class="pt-wrap" align="center" style="padding:36px 14px;">
-  <table role="presentation" class="pt-shell" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:#ffffff;border:1px solid #e4e9f2;border-radius:28px;overflow:hidden;box-shadow:0 18px 48px rgba(31,41,55,.12);">
-    {header_html}
-    <tr><td class="pt-pad" style="padding:34px 38px 8px;background:#ffffff;">
-      {body_html}
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 12px;"><tr>
-        <td class="pt-cta" bgcolor="{cta_color}" style="border-radius:14px;background:{cta_color};box-shadow:0 10px 22px rgba(79,70,229,.22);">
-          <a href="{cta_url}" style="display:inline-block;padding:14px 24px;color:#ffffff!important;text-decoration:none;font-size:14px;line-height:18px;font-weight:800;border-radius:14px;">{cta_text}</a>
-        </td>
-      </tr></table>
-    </td></tr>
-    <tr><td style="padding:18px 38px 28px;background:#fbfcff;border-top:1px solid #edf1f7;">
-      <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#64748b;">Project Tracker · Project, task and ticket intelligence</p>
-      <p style="margin:6px 0 0;text-align:center;font-size:11px;line-height:16px;color:#94a3b8;">You received this because notifications are enabled for your workspace.</p>
-    </td></tr>
-  </table>
-</td></tr>
-</table>
-</body></html>'''
-
-
-def _header_strip(accent="#4f46e5", icon="📌", label="Project Update"):
-    accent = _email_escape(accent or "#4f46e5")
-    icon = _email_escape(icon or "📌")
-    label = _email_escape(label or "Project Update")
-    return f'''
-    <tr><td style="background:#101828;padding:0;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td style="padding:28px 36px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-            <td width="48" valign="middle"><div style="width:42px;height:42px;border-radius:14px;background:#ffffff1f;text-align:center;line-height:42px;font-size:21px;color:#ffffff;">{icon}</div></td>
-            <td valign="middle" style="padding-left:12px;">
-              <div style="font-size:22px;line-height:26px;font-weight:900;color:#ffffff;letter-spacing:-.5px;">Project<span style="color:#c7d2fe;">Tracker</span></div>
-              <div style="font-size:11px;line-height:15px;color:#dbeafe;font-weight:800;letter-spacing:.9px;text-transform:uppercase;margin-top:2px;">{label}</div>
-            </td>
-            <td class="pt-hide-sm" align="right" valign="middle"><span style="display:inline-block;padding:8px 12px;border-radius:999px;background:#ffffff1c;color:#ffffff;font-size:12px;font-weight:800;">Notification</span></td>
-          </tr></table>
+<body style="margin:0;padding:0;background:#eef3fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eef3fb;background-image:linear-gradient(135deg,#eef6ff 0%,#f2edff 50%,#f8fbff 100%);">
+    <tr><td class="pt-shell" align="center" style="padding:42px 16px;">
+      <table role="presentation" class="pt-card" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px;max-width:680px;background:#ffffff;border:1px solid #dfe7f3;border-radius:34px;overflow:hidden;box-shadow:0 26px 70px rgba(15,23,42,.16);">
+        {header_html}
+        <tr><td class="pt-pad" style="padding:38px 40px 12px;background:#ffffff;">
+          {body_html}
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:30px 0 12px;">
+            <tr>
+              <td class="pt-button" bgcolor="{cta_color}" style="border-radius:18px;background:{cta_color};background-image:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 14px 30px rgba(99,91,255,.28);">
+                <a class="pt-link" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:900;text-decoration:none;border-radius:18px;">{cta_text}</a>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:22px 40px 30px;background:#f8fbff;border-top:1px solid #e7eef8;">
+          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#667085;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#635bff;text-decoration:none;font-weight:800;">Open dashboard</a></p>
         </td></tr>
       </table>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="4" style="height:4px;background:{accent};font-size:0;line-height:0;">&nbsp;</td></tr></table>
+    </td></tr>
+  </table>
+</body>
+</html>'''
+
+
+def _header_strip(accent="#635bff", icon="✨", label="Project Update"):
+    accent = _email_escape(accent or "#635bff")
+    icon = _email_escape(icon or "✨")
+    label = _email_escape(label or "Project Update")
+    return f'''
+    <tr><td style="background:#111b3f;background-image:linear-gradient(135deg,#0f172a 0%,#17326d 52%,#6d4aff 100%);padding:0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr><td style="padding:30px 38px 28px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr>
+              <td width="54" style="vertical-align:middle;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td width="46" height="46" align="center" valign="middle" style="width:46px;height:46px;border-radius:17px;background:#ffffff22;color:#ffffff;font-size:22px;box-shadow:inset 0 1px 0 #ffffff44;">{icon}</td></tr></table>
+              </td>
+              <td style="vertical-align:middle;padding-left:12px;">
+                <div style="font-size:24px;line-height:28px;font-weight:950;letter-spacing:-.8px;color:#ffffff;">Project<span style="color:#b9d4ff;">Tracker</span></div>
+                <div style="font-size:12px;line-height:16px;color:#d9e6ff;font-weight:900;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
+              </td>
+              <td align="right" class="pt-hide-sm" style="vertical-align:middle;">
+                <span style="display:inline-block;padding:9px 13px;border-radius:999px;background:#ffffff24;color:#ffffff;font-size:12px;font-weight:900;">Live Summary</span>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="5" style="height:5px;background:{accent};background-image:linear-gradient(90deg,{accent},#9b5cff,#38d5ff);font-size:0;line-height:0;">&nbsp;</td></tr></table>
     </td></tr>'''
 
 
-def _email_notification_card(title, eyebrow="Task", badge="New", accent="#4f46e5", progress=0, meta=""):
+def _email_notification_card(title, eyebrow="Task", badge="New", accent="#635bff", progress=0, meta=""):
     safe_title = _email_escape(title)
     safe_eyebrow = _email_escape(eyebrow)
-    safe_badge = _email_escape(badge)
-    pct = max(0, min(100, int(progress or 0)))
+    safe_meta = meta
     return f'''
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #e5eaf3;border-radius:20px;margin:0 0 18px;box-shadow:0 10px 28px rgba(15,23,42,.07);">
-        <tr><td style="padding:22px 24px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-            <td valign="top" style="padding-right:12px;">
-              <div style="font-size:11px;line-height:14px;color:#64748b;letter-spacing:.9px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">{safe_eyebrow}</div>
-              <div style="font-size:22px;line-height:28px;color:#111827;font-weight:900;letter-spacing:-.35px;">{safe_title}</div>
-            </td>
-            <td width="92" align="right" valign="top"><span style="display:inline-block;padding:7px 12px;border-radius:999px;background:#eef2ff;color:{accent};font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.3px;">{safe_badge}</span></td>
-          </tr></table>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;background:#edf2f7;border-radius:999px;"><tr>
-            <td width="{pct}%" height="9" style="height:9px;background:{accent};border-radius:999px;font-size:0;line-height:0;">&nbsp;</td><td style="font-size:0;line-height:0;">&nbsp;</td>
-          </tr></table>
-          <div style="margin-top:11px;font-size:13px;line-height:20px;color:#475569;">{meta}</div>
-        </td></tr>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fbfdff;border:1px solid #dfe7f3;border-radius:24px;box-shadow:0 18px 44px rgba(15,23,42,.08);overflow:hidden;margin:0 0 18px;">
+        <tr>
+          <td style="padding:24px 24px 22px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="vertical-align:top;padding-right:12px;">
+                  <div style="font-size:11px;line-height:14px;color:#64748b;letter-spacing:1px;text-transform:uppercase;font-weight:950;margin-bottom:9px;">{safe_eyebrow}</div>
+                  <div style="font-size:22px;line-height:29px;font-weight:950;color:#0f172a;letter-spacing:-.4px;">{safe_title}</div>
+                </td>
+                <td width="84" align="right" style="vertical-align:top;">{_email_pill(badge, accent)}</td>
+              </tr>
+            </table>
+            <div style="margin-top:18px;">{_email_progress_bar(progress, accent, 10)}</div>
+            <div style="margin-top:11px;font-size:13px;line-height:19px;color:#667085;">{safe_meta}</div>
+          </td>
+        </tr>
       </table>'''
 
 
-def _email_meta_grid(left_label, left_value, right_label, right_value, accent="#4f46e5"):
+def _email_meta_grid(left_label, left_value, right_label, right_value, accent="#635bff"):
     return f'''
-      <table role="presentation" class="pt-two" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 4px;"><tr>
-        <td width="50%" style="padding-right:8px;vertical-align:top;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e5eaf3;border-radius:16px;"><tr><td style="padding:14px 16px;">
-          <div style="font-size:11px;color:#64748b;font-weight:900;text-transform:uppercase;letter-spacing:.7px;">{_email_escape(left_label)}</div>
-          <div style="font-size:16px;color:#111827;font-weight:850;margin-top:5px;">{_email_escape(left_value)}</div>
-        </td></tr></table></td>
-        <td width="50%" style="padding-left:8px;vertical-align:top;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e5eaf3;border-radius:16px;"><tr><td style="padding:14px 16px;">
-          <div style="font-size:11px;color:#64748b;font-weight:900;text-transform:uppercase;letter-spacing:.7px;">{_email_escape(right_label)}</div>
-          <div style="font-size:16px;color:#111827;font-weight:850;margin-top:5px;">{_email_escape(right_value)}</div>
-        </td></tr></table></td>
-      </tr></table>'''
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 2px;">
+        <tr>
+          <td class="pt-col" width="50%" style="padding-right:8px;vertical-align:top;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:18px;"><tr><td style="padding:15px 16px;">
+              <div style="font-size:11px;color:#64748b;font-weight:950;text-transform:uppercase;letter-spacing:.8px;">{_email_escape(left_label)}</div>
+              <div style="font-size:16px;color:#0f172a;font-weight:900;margin-top:5px;">{_email_escape(left_value)}</div>
+            </td></tr></table>
+          </td>
+          <td class="pt-col" width="50%" style="padding-left:8px;vertical-align:top;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fbff;border:1px solid #e5edf7;border-radius:18px;"><tr><td style="padding:15px 16px;">
+              <div style="font-size:11px;color:#64748b;font-weight:950;text-transform:uppercase;letter-spacing:.8px;">{_email_escape(right_label)}</div>
+              <div style="font-size:16px;color:#0f172a;font-weight:900;margin-top:5px;">{_email_escape(right_value)}</div>
+            </td></tr></table>
+          </td>
+        </tr>
+      </table>'''
 
 
 def _email_hero(title, subtitle):
     return f'''
-      <h1 class="pt-title" style="margin:0 0 10px;font-size:31px;line-height:38px;color:#111827;letter-spacing:-.9px;font-weight:900;">{_email_escape(title)}</h1>
-      <p style="margin:0 0 24px;font-size:15px;line-height:24px;color:#475569;">{subtitle}</p>'''
+      <h1 class="pt-title" style="margin:0 0 10px;font-size:33px;line-height:39px;color:#0f172a;letter-spacing:-1.1px;font-weight:950;">{_email_escape(title)}</h1>
+      <p style="margin:0 0 26px;font-size:15px;line-height:24px;color:#5f6b7a;">{subtitle}</p>'''
 
 
 def _email_completion_banner(title, note, accent="#10b981"):
-    """Premium celebration block with inbox-safe fallback and CSS animation where supported."""
-    safe_title = _email_escape(title)
-    safe_note = _email_escape(note)
     return f'''
-      <table role="presentation" class="pt-done" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:22px;margin:0 0 20px;box-shadow:0 14px 36px rgba(16,185,129,.14);overflow:hidden;">
-        <tr><td height="5" style="height:5px;background:linear-gradient(90deg,#22c55e,#06b6d4,#8b5cf6,#f59e0b);font-size:0;line-height:0;">&nbsp;</td></tr>
-        <tr><td style="padding:22px 24px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-            <td width="54" valign="top"><div style="width:48px;height:48px;border-radius:16px;background:{accent};color:#ffffff;text-align:center;line-height:48px;font-size:25px;font-weight:900;box-shadow:0 10px 22px rgba(16,185,129,.28);">✓</div></td>
-            <td style="padding-left:14px;">
-              <div style="font-size:12px;line-height:15px;color:#047857;font-weight:900;letter-spacing:.9px;text-transform:uppercase;margin-bottom:5px;">Completed milestone</div>
-              <div style="font-size:22px;line-height:28px;color:#052e16;font-weight:950;letter-spacing:-.45px;">{safe_title}</div>
-              <div style="font-size:14px;line-height:22px;color:#047857;margin-top:5px;">{safe_note}</div>
-            </td>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="pt-animate" style="background:#ecfdf5;border:1px solid #bbf7d0;border-radius:24px;margin:0 0 20px;box-shadow:0 16px 38px rgba(16,185,129,.14);">
+        <tr><td style="padding:20px 22px;">
+          <table role="presentation" width="100%"><tr>
+            <td width="52" valign="top"><div style="width:44px;height:44px;border-radius:16px;background:{accent};color:#ffffff;text-align:center;line-height:44px;font-size:23px;font-weight:900;">✓</div></td>
+            <td style="padding-left:12px;"><div style="font-size:20px;line-height:25px;color:#064e3b;font-weight:950;letter-spacing:-.3px;">{_email_escape(title)}</div><div style="font-size:13px;line-height:20px;color:#047857;margin-top:3px;">{_email_escape(note)}</div></td>
           </tr></table>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;"><tr>
-            <td align="center" style="font-size:20px;letter-spacing:8px;line-height:24px;color:#10b981;">✦ 🎉 ✦ ⭐ ✦</td>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;"><tr>
+            <td style="width:9px;height:9px;background:#10b981;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
+            <td style="width:9px;height:9px;background:#6366f1;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
+            <td style="width:9px;height:9px;background:#f59e0b;border-radius:50%;font-size:0;">&nbsp;</td><td width="7">&nbsp;</td>
+            <td style="width:9px;height:9px;background:#ec4899;border-radius:50%;font-size:0;">&nbsp;</td>
           </tr></table>
         </td></tr>
       </table>'''
@@ -1406,7 +1371,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
     body = _email_hero("You’ve got a new task", subtitle)
     body += _email_notification_card(task_title, "Task", "New", accent, 12, f'Status: <strong style="color:{accent};">New</strong> · Assigned by {_email_escape(assigner_name)}')
     body += _email_meta_grid("Priority", "Normal", "Next step", "Review & update", accent)
-    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, _email_deep_url("task", task_id, workspace_id), "Open Task →", accent, "A new task has been assigned to you")
+    html = _email_base(_header_strip(accent, "📋", "Task Assignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A new task has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1443,7 +1408,7 @@ def send_task_reassigned_email(user_email, user_name, task_title, assigner_name,
     subtitle = f'Hi <strong style="color:#0f172a;">{_email_escape(user_name)}</strong>, <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong> reassigned this task to you.'
     body = _email_hero("Task reassigned to you", subtitle)
     body += _email_notification_card(task_title, "Task", "Reassigned", accent, 20, f'Reassigned by <strong style="color:#0f172a;">{_email_escape(assigner_name)}</strong>')
-    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, _email_deep_url("task", task_id, workspace_id), "Open Task →", accent, "A task was reassigned to you")
+    html = _email_base(_header_strip(accent, "🔁", "Task Reassignment"), body, f"/?action=task&id={_email_escape(task_id)}", "Open Task →", accent, "A task was reassigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1454,7 +1419,7 @@ def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_i
     body = _email_hero("Deadline coming up", subtitle)
     body += _email_notification_card(task_title, "Due soon", "Due soon", accent, 72, f'Deadline: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Focus", "Finish or update", "Reminder", "Due within 24 hours", accent)
-    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, _email_deep_url("task", task_id, workspace_id), "Update Task →", accent, "A task is due soon")
+    html = _email_base(_header_strip(accent, "⏰", "Due Soon"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is due soon")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1465,7 +1430,7 @@ def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id
     body = _email_hero("This task is overdue", subtitle)
     body += _email_notification_card(task_title, "Overdue task", "Overdue", accent, 88, f'Was due: <strong style="color:#0f172a;">{_email_escape(due_date)}</strong>')
     body += _email_meta_grid("Risk", "Schedule impact", "Next step", "Update status today", accent)
-    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, _email_deep_url("task", task_id, workspace_id), "Update Task →", accent, "A task is overdue")
+    html = _email_base(_header_strip(accent, "🚨", "Overdue Alert"), body, f"/?action=task&id={_email_escape(task_id)}", "Update Task →", accent, "A task is overdue")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1478,7 +1443,7 @@ def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_nam
     body = _email_hero("New ticket assigned", subtitle)
     body += _email_notification_card(ticket_title, "Support ticket", priority_key.title(), accent, 10, f'Priority: <strong style="color:{accent};">{_email_escape(priority_key.title())}</strong>')
     body += _email_meta_grid("Owner", user_name, "Reporter", reporter_name, accent)
-    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, _email_deep_url("ticket", ticket_id, workspace_id), "View Ticket →", accent, "A support ticket has been assigned to you")
+    html = _email_base(_header_strip(accent, "🎫", "Support Ticket"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, "A support ticket has been assigned to you")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -1492,7 +1457,7 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     if progress == 100:
         body += _email_completion_banner("Ticket resolved", "The ticket is now complete/resolved and ready for review or closure.", accent)
     body += _email_notification_card(ticket_title, "Support ticket", label, accent, progress, f'Status: <strong style="color:{accent};">{_email_escape(label)}</strong>')
-    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, _email_deep_url("ticket", ticket_id, workspace_id), "View Ticket →", accent, f"Ticket {label}")
+    html = _email_base(_header_strip(accent, icon, "Ticket Update"), body, f"/?action=ticket&id={_email_escape(ticket_id)}", "View Ticket →", accent, f"Ticket {label}")
     send_email(user_email, subject, html, workspace_id)
 
 
@@ -2444,7 +2409,7 @@ def login():
             if ws_row:
                 import re as _re
                 slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -2899,7 +2864,7 @@ def totp_verify_login():
             ).fetchone()
             if ws_row:
                 slug = ws_row["workspace_slug"] or                        _re_t.sub(r"[^a-z0-9]+", "-", ws_row["name"].lower().strip()).strip("-") or                        "workspace"
-                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
                 result["workspace_slug"] = slug
         except Exception:
             pass
@@ -3272,7 +3237,7 @@ def accept_workspace_invite():
         slug = "".join(c2 for c2 in ws_name.lower().replace(" ","-") if c2.isalnum() or c2=="-")[:30] or ws_id
     _register_session(uid, ws_id, session_id)
     _audit("invite_accepted", email, f"Joined workspace {ws_id} as {role}")
-    return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/dashboard"})
+    return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id}/dashboard"})
 
 @app.route("/api/workspace/invites", methods=["GET"])
 @login_required
@@ -3418,7 +3383,7 @@ def domain_join_request():
             _set_logged_out_at(new_uid, "")
             _register_session(new_uid, ws_id_req, session_id)
             _audit("domain_join", email, f"Auto-joined {ws_id_req} via domain {domain}")
-            return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/dashboard"})
+            return jsonify({"ok": True, "workspace_dashboard_url": f"/{slug}/{ws_id_req}/dashboard"})
         else:
             # Notify admins
             _audit("domain_join_request", email, f"Requested access to {ws_id_req} via domain {domain}")
@@ -3485,7 +3450,7 @@ def register():
             result = {"id":uid,"workspace_id":ws_id,"name":d["name"],"email":d["email"],
                       "role":d.get("role","Developer"),"avatar":av,"color":c}
             if slug:
-                result["workspace_dashboard_url"] = f"/{slug}/dashboard"
+                result["workspace_dashboard_url"] = f"/{slug}/{ws_id}/dashboard"
             return jsonify(result)
     except Exception as e:
         if "UNIQUE" in str(e): return jsonify({"error":"Email already registered"}),400
@@ -3557,117 +3522,6 @@ def meet_notify():
                 (nid, wid(), "call", msg, target_id, 0, ts()))
         return jsonify({"ok": True, "caller": cname, "room": room_name})
 
-@app.route("/api/app-data")
-@login_required
-def get_app_data():
-    """Combined data endpoint — returns all data the React app needs in one request.
-    Replaces the old pattern of 9+ parallel API calls on load.
-    Supports ?team_id=... for team-scoped views and ?bust=1 to skip cache."""
-    uid  = session.get("user_id", "")
-    ws   = wid()
-    team_id = request.args.get("team_id", "").strip()
-    bust    = request.args.get("bust", "") == "1"
-
-    cache_key = f"appdata:{ws}:{uid}:{team_id}"
-    if not bust:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-    try:
-        with get_db() as db:
-            # Users (no passwords, no totp_secret)
-            users_rows = db.execute(
-                "SELECT id,workspace_id,name,email,role,avatar,color,created,"
-                "two_fa_enabled,last_active,google_picture,auth_provider,email_verified "
-                "FROM users WHERE workspace_id=? AND deleted_at='' ORDER BY name",
-                (ws,)
-            ).fetchall()
-            users = [dict(r) for r in users_rows]
-
-            # Projects
-            proj_q = ("SELECT * FROM projects WHERE workspace_id=? AND deleted_at='' "
-                      "ORDER BY created DESC")
-            proj_params = (ws,)
-            if team_id:
-                proj_q = ("SELECT * FROM projects WHERE workspace_id=? AND team_id=? "
-                          "AND deleted_at='' ORDER BY created DESC")
-                proj_params = (ws, team_id)
-            projects = [dict(r) for r in db.execute(proj_q, proj_params).fetchall()]
-
-            # Tasks (active only — no deleted)
-            task_q = ("SELECT * FROM tasks WHERE workspace_id=? AND deleted_at='' "
-                      "ORDER BY created DESC LIMIT 2000")
-            task_params = (ws,)
-            if team_id:
-                task_q = ("SELECT * FROM tasks WHERE workspace_id=? AND team_id=? "
-                          "AND deleted_at='' ORDER BY created DESC LIMIT 2000")
-                task_params = (ws, team_id)
-            tasks = [dict(r) for r in db.execute(task_q, task_params).fetchall()]
-
-            # Notifications for this user
-            notifs = [dict(r) for r in db.execute(
-                "SELECT * FROM notifications WHERE workspace_id=? AND user_id=? "
-                "ORDER BY ts DESC LIMIT 50",
-                (ws, uid)
-            ).fetchall()]
-
-            # DM unread counts
-            dm_unread = [dict(r) for r in db.execute(
-                "SELECT sender, COUNT(*) as count FROM direct_messages "
-                "WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",
-                (ws, uid)
-            ).fetchall()]
-
-            # Workspace info
-            ws_row = db.execute(
-                "SELECT id,name,workspace_slug,dm_enabled,required_hours_per_day,"
-                "plan,onboarding_done,onboarding_step "
-                "FROM workspaces WHERE id=?", (ws,)
-            ).fetchone()
-            workspace = dict(ws_row) if ws_row else {}
-
-            # Teams
-            teams = [dict(r) for r in db.execute(
-                "SELECT * FROM teams WHERE workspace_id=? ORDER BY name",
-                (ws,)
-            ).fetchall()]
-
-            # Tickets (latest 200)
-            ticket_q = ("SELECT * FROM tickets WHERE workspace_id=? "
-                        "ORDER BY created DESC LIMIT 200")
-            ticket_params = (ws,)
-            if team_id:
-                ticket_q = ("SELECT * FROM tickets WHERE workspace_id=? AND team_id=? "
-                            "ORDER BY created DESC LIMIT 200")
-                ticket_params = (ws, team_id)
-            tickets = [dict(r) for r in db.execute(ticket_q, ticket_params).fetchall()]
-
-            # Reminders for this user (upcoming + recent)
-            reminders = [dict(r) for r in db.execute(
-                "SELECT * FROM reminders WHERE workspace_id=? AND user_id=? "
-                "ORDER BY remind_at ASC LIMIT 100",
-                (ws, uid)
-            ).fetchall()]
-
-            result = {
-                "users": users,
-                "projects": projects,
-                "tasks": tasks,
-                "notifications": notifs,
-                "dm_unread": dm_unread,
-                "workspace": workspace,
-                "teams": teams,
-                "tickets": tickets,
-                "reminders": reminders,
-            }
-            _cache_set(cache_key, result)
-            return jsonify(result)
-    except Exception as e:
-        log.error("[app-data] %s", e)
-        return jsonify({"error": "Failed to load app data"}), 500
-
-
 @app.route("/api/auth/me")
 def me():
     if "user_id" not in session: return jsonify({"error":"Not logged in"}),401
@@ -3702,7 +3556,7 @@ def me():
         ws_slug = u.get("_ws_slug","")
         if ws_name or ws_slug:
             slug = ws_slug or _re.sub(r"[^a-z0-9]+", "-", ws_name.lower().strip()).strip("-") or "workspace"
-            result["workspace_dashboard_url"] = f"/{slug}/dashboard"
+            result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
             result["workspace_slug"] = slug
             result["workspace_id_from_me"] = u["workspace_id"]
         _cache_set(me_cache_key, result)
@@ -4104,19 +3958,12 @@ def send_dm():
 def dm_unread():
     ws, uid = wid(), session["user_id"]
     data, found = _appdata_cache_get(ws, uid, "dm_unread")
-    if found:
-        return jsonify(data)
-    try:
-        with get_db() as db:
-            rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
-                WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
-                (ws, uid)).fetchall()
-            result = [dict(r) for r in rows]
-            _appdata_cache_set(ws, uid, "dm_unread", result)
-            return jsonify(result)
-    except Exception as e:
-        log.error("[dm/unread] %s", e)
-        return jsonify([])
+    if found: return jsonify(data)
+    with get_db() as db:
+        rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
+            WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
+            (ws, uid)).fetchall()
+        return jsonify([dict(r) for r in rows])
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 @app.route("/api/reminders", methods=["GET"])
@@ -4631,59 +4478,49 @@ def required_hours():
 @app.route("/api/reminders/due", methods=["GET"])
 @login_required
 def due_reminders():
-    """Return reminders due now. Never lets background polling crash the UI."""
+    """Return reminders due now. Checks appdata cache first; only hits DB to mark fired."""
     ws, uid = wid(), session["user_id"]
     now_str = ts()
+    # Get all reminders from cache
     cached_reminders, found = _appdata_cache_get(ws, uid, "reminders")
     if found:
-        due = [r for r in cached_reminders if not r.get("fired") and r.get("remind_at", "") <= now_str]
+        due = [r for r in cached_reminders
+               if not r.get("fired") and r.get("remind_at","") <= now_str]
         if due:
-            ids = [r.get("id") for r in due if r.get("id")]
-            if ids:
-                try:
-                    with get_db() as db:
-                        db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-                    _cache_bust(ws, "reminders")
-                except Exception as e:
-                    log.warning("[reminders/due mark fired] %s", e)
+            ids = [r["id"] for r in due]
+            try:
+                with get_db() as db:
+                    db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
+                # Bust reminders cache so next poll gets updated fired status
+                _cache_bust(ws, "reminders")
+            except Exception: pass
         return jsonify(due)
-    try:
-        with get_db() as db:
-            rows = db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
-                AND fired=0 AND remind_at <= ?""", (ws, uid, now_str)).fetchall()
-            result = [dict(r) for r in rows]
-            ids = [r["id"] for r in rows]
-            if ids:
-                db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
-            _appdata_cache_set(ws, uid, "reminders_due", result)
-            return jsonify(result)
-    except Exception as e:
-        log.error("[reminders/due] %s", e)
-        return jsonify([])
+    # Fallback: hit DB directly
+    with get_db() as db:
+        rows = db.execute("""SELECT * FROM reminders WHERE workspace_id=? AND user_id=?
+            AND fired=0 AND remind_at <= ?""", (ws, uid, now_str)).fetchall()
+        ids  = [r["id"] for r in rows]
+        if ids:
+            db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
+        return jsonify([dict(r) for r in rows])
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 @app.route("/api/notifications")
 @login_required
 def get_notifs():
     ws, uid = wid(), session["user_id"]
+    # Serve from shared appdata cache — avoids a separate DB round-trip
     data, found = _appdata_cache_get(ws, uid, "notifications")
-    if found:
-        return jsonify(data)
+    if found: return jsonify(data)
     cache_key = f"notifs:{ws}:{uid}"
     cached = _cache_get(cache_key)
-    if cached is not None:
-        return jsonify(cached)
-    try:
-        with get_db() as db:
-            rows = db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
-                ORDER BY ts DESC LIMIT 50""", (ws, uid)).fetchall()
-            result = [dict(r) for r in rows]
-            _cache_set(cache_key, result)
-            _appdata_cache_set(ws, uid, "notifications", result)
-            return jsonify(result)
-    except Exception as e:
-        log.error("[notifications] %s", e)
-        return jsonify([])
+    if cached is not None: return jsonify(cached)
+    with get_db() as db:
+        rows = db.execute("""SELECT * FROM notifications WHERE workspace_id=? AND user_id=?
+            ORDER BY ts DESC LIMIT 50""", (ws, uid)).fetchall()
+        result = [dict(r) for r in rows]
+        _cache_set(cache_key, result)
+        return jsonify(result)
 
 @app.route("/api/notifications/read-all",methods=["PUT"])
 @login_required
@@ -5492,7 +5329,7 @@ def ws_sso_callback(ws_name, ws_id):
 
     # Redirect to workspace-scoped dashboard URL
     slug = _slugify(ws["name"])
-    return redirect(f"/{slug}/dashboard")
+    return redirect(f"/{slug}/{ws_id}/dashboard")
 
 
 # ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
@@ -6169,16 +6006,7 @@ def public_landing():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     action = (request.args.get("action") or "").strip().lower()
-    # Email/deep-link actions must load the SPA, not the public landing page.
-    # The React app reads ?action=task&id=... / ?action=ticket&id=... and opens
-    # the correct authenticated screen after /api/auth/me confirms the session.
-    app_actions = {
-        "login", "signin", "sign-in", "signup", "register",
-        "dashboard", "app", "task", "ticket", "project", "projects",
-        "tasks", "tickets", "reminders", "messages", "dm",
-        "reset-password", "accept-invite"
-    }
-    if action in app_actions:
+    if action in {"login", "signin", "sign-in", "signup", "register"}:
         return _serve_html()
     return _serve_landing()
 
@@ -6190,22 +6018,6 @@ def root_app():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     return _serve_html()
-
-@app.route("/<ws_slug>/", methods=["GET", "HEAD"])
-@app.route("/<ws_slug>/<view_name>", methods=["GET", "HEAD"])
-def ws_slug_routes(ws_slug, view_name=None):
-    """Serve the SPA for workspace-slug-based URLs like /{ws_slug}/dashboard."""
-    if request.method == "HEAD":
-        return Response(status=200, headers={"Cache-Control": "no-store"})
-    # Block obvious non-SPA paths (static files etc.)
-    if ws_slug.startswith(".") or (view_name and "." in view_name):
-        return "", 404
-    # These are well-known static/API paths that shouldn't be caught here
-    _static_prefixes = ("api", "static", "favicon", "icon", "manifest", "sw.js", "_")
-    if ws_slug.lower() in _static_prefixes:
-        return "", 404
-    return _serve_html()
-
 
 @app.route("/<path:path>")
 def catch_all(path):
@@ -6267,9 +6079,6 @@ def _load_template(filename, fallback=''):
         return fallback
 
 HTML                    = _load_template('template.html')
-LANDING_HTML            = _load_template('landing.html', fallback=HTML)  # fallback to SPA if landing.html missing
-PASSWORD_GENERATOR_HTML = _load_template('password-generator.html', fallback='')
-ADMIN_HTML              = _load_template('adminpanel.html', fallback='')
 
 _RE_SCRIPT_TAG = __import__('re').compile(r'<script([^>]*)>', __import__('re').IGNORECASE)
 
@@ -6303,7 +6112,9 @@ def _serve_landing():
         return LANDING_HTML
     return _inject_nonce(LANDING_HTML)
 
-# (LANDING_HTML, PASSWORD_GENERATOR_HTML, ADMIN_HTML already loaded above _serve_landing)
+LANDING_HTML            = _load_template('landing.html')
+PASSWORD_GENERATOR_HTML = _load_template('password-generator.html')
+ADMIN_HTML              = _load_template('adminpanel.html')
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
