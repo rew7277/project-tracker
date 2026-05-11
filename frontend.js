@@ -5030,24 +5030,25 @@ function TeamView({users,cu,reload,projects}){
 }
 
 /* ─── TicketsView ────────────────────────────────────────────────────────── */
-function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus}){
+function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus,initialTicketId,onClearInitialTicket}){
   const [tickets,setTickets]=useState([]);
   const [busy,setBusy]=useState(true);
   const [filterStatus,setFilterStatus]=useState(initialStatus||'');
   const [filterPriority,setFilterPriority]=useState('');
   const [filterType,setFilterType]=useState('');
   const [filterAssignee,setFilterAssignee]=useState(()=>initialAssignee==='me'&&cu?cu.id:'');
+  const [ticketSearch,setTicketSearch]=useState('');
   const [showNew,setShowNew]=useState(false);
   const [editTicket,setEditTicket]=useState(null);
   const [detailTicket,setDetailTicket]=useState(null);
   const [comments,setComments]=useState([]);
   const [newComment,setNewComment]=useState('');
+  const [internalNote,setInternalNote]=useState('');
   const [savingComment,setSavingComment]=useState(false);
   const [showResolved,setShowResolved]=useState(false);
-  const [ticketSearch,setTicketSearch]=useState('');
-
-  const canEdit=cu&&cu.role!=='Developer'&&cu.role!=='Viewer';
-  const canDelete=cu&&['Admin','Manager','TeamLead'].includes(cu.role);
+  const [viewMode,setViewMode]=useState('board');
+  const [dragTicketId,setDragTicketId]=useState(null);
+  const [copilotOpen,setCopilotOpen]=useState(true);
 
   const [nTitle,setNTitle]=useState('');
   const [nDesc,setNDesc]=useState('');
@@ -5058,309 +5059,233 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   const [nStatus,setNStatus]=useState('open');
   const [saving,setSaving]=useState(false);
 
+  const canEdit=cu&&cu.role!=='Developer'&&cu.role!=='Viewer';
+  const canDelete=cu&&['Admin','Manager','TeamLead'].includes(cu.role);
+  const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
+
+  const TYPE_CFG={
+    bug:{icon:'🐛',color:'var(--rd)',bg:'rgba(248,113,113,.12)',label:'Bug'},
+    feature:{icon:'✨',color:'var(--ac)',bg:'rgba(90,140,255,.10)',label:'Feature'},
+    improvement:{icon:'🔧',color:'var(--cy)',bg:'rgba(34,211,238,.12)',label:'Improvement'},
+    task:{icon:'✅',color:'var(--gn)',bg:'rgba(74,222,128,.12)',label:'Task'},
+    question:{icon:'❓',color:'var(--pu)',bg:'rgba(167,139,250,.12)',label:'Question'},
+  };
+  const PRIORITY_CFG={
+    critical:{icon:'🔴',color:'#ef4444',label:'Critical',slaH:4},
+    high:{icon:'🟠',color:'#f97316',label:'High',slaH:12},
+    medium:{icon:'🟡',color:'#eab308',label:'Medium',slaH:24},
+    low:{icon:'🟢',color:'#22c55e',label:'Low',slaH:72},
+  };
+  const STATUS_CFG={
+    open:{icon:'🔵',color:'var(--cy)',label:'Open'},
+    'in-progress':{icon:'🟡',color:'var(--am)',label:'In Progress'},
+    review:{icon:'🟣',color:'var(--pu)',label:'In Review'},
+    resolved:{icon:'🟢',color:'var(--gn)',label:'Resolved'},
+    closed:{icon:'⚫',color:'var(--tx3)',label:'Closed'},
+  };
+  const STATUS_ORDER=['open','in-progress','review','resolved','closed'];
+
   const load=useCallback(async()=>{
     setBusy(true);
-    const url=activeTeam?'/api/tickets?team_id='+activeTeam.id:'/api/tickets';
-    const d=await api.get(url);
-    setTickets(Array.isArray(d)?d:[]);
-    setBusy(false);
+    try{
+      const url=activeTeam?'/api/tickets?team_id='+activeTeam.id:'/api/tickets';
+      const d=await api.get(url);
+      setTickets(Array.isArray(d)?d:[]);
+    }finally{setBusy(false);}
   },[activeTeam]);
   useEffect(()=>{load();},[load]);
+  useEffect(()=>{
+    if(!initialTicketId||!tickets.length)return;
+    const t=tickets.find(x=>String(x.id)===String(initialTicketId));
+    if(t){openDetail(t);onClearInitialTicket&&onClearInitialTicket();try{history.replaceState(null,'',workspaceBasePath(cu)+'tickets');}catch(e){}}
+  },[initialTicketId,tickets]);
 
-  const visibleTickets=useMemo(()=>{
-    return tickets.filter(t=>{
-      const isResolved=t.status==='resolved'||t.status==='closed';
-      if(isResolved&&!showResolved&&filterStatus!=='resolved'&&filterStatus!=='closed')return false;
-      if(filterStatus&&t.status!==filterStatus)return false;
-      if(filterPriority&&t.priority!==filterPriority)return false;
-      if(filterType&&t.type!==filterType)return false;
-      if(filterAssignee&&t.assignee!==filterAssignee)return false;
-      const q=ticketSearch.trim().toLowerCase();
-      if(q&&!String([t.id,t.title,t.description,t.type,t.priority,t.status].join(' ')).toLowerCase().includes(q))return false;
-      return true;
-    });
-  },[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee,ticketSearch]);
+  const slaInfo=(t)=>{
+    const cfg=PRIORITY_CFG[t.priority]||PRIORITY_CFG.medium;
+    const created=new Date(t.created||Date.now()).getTime();
+    const due=created+(cfg.slaH*60*60*1000);
+    const left=due-Date.now();
+    const done=['resolved','closed'].includes(t.status);
+    const mins=Math.round(Math.abs(left)/60000);
+    const label=done?'Completed':left<0?('Breached '+(mins>=60?Math.floor(mins/60)+'h':mins+'m')):(mins>=60?Math.floor(mins/60)+'h left':mins+'m left');
+    return {due,left,done,label,risk:!done&&(left<0?'breach':left<2*60*60*1000?'hot':left<6*60*60*1000?'warn':'ok')};
+  };
+  const riskScore=(t)=>{const s=slaInfo(t);return s.risk==='breach'?100:s.risk==='hot'?85:s.risk==='warn'?60:(t.priority==='critical'?50:t.priority==='high'?35:15);};
+  const suggestedAssignee=()=>safe(users).find(u=>['Developer','Tester','TeamLead'].includes(u.role))||safe(users)[0];
+  const aiSummary=(t)=>{
+    const p=(PRIORITY_CFG[t.priority]||{}).label||t.priority;
+    const s=slaInfo(t);
+    const owner=t.assignee&&umap[t.assignee]?umap[t.assignee].name:'No owner';
+    return `${p} ${t.type||'ticket'} · ${owner} · SLA ${s.label}. ${t.description?String(t.description).slice(0,130):'No description yet.'}`;
+  };
+
+  const visibleTickets=useMemo(()=>tickets.filter(t=>{
+    const isResolved=t.status==='resolved'||t.status==='closed';
+    if(isResolved&&!showResolved&&filterStatus!=='resolved'&&filterStatus!=='closed')return false;
+    if(filterStatus&&t.status!==filterStatus)return false;
+    if(filterPriority&&t.priority!==filterPriority)return false;
+    if(filterType&&t.type!==filterType)return false;
+    if(filterAssignee&&t.assignee!==filterAssignee)return false;
+    const q=ticketSearch.trim().toLowerCase();
+    if(q&&!String([t.id,t.title,t.description,t.type,t.priority,t.status,(umap[t.assignee]||{}).name].join(' ')).toLowerCase().includes(q))return false;
+    return true;
+  }),[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee,ticketSearch,users]);
 
   const saveTicket=async()=>{
     if(!nTitle.trim())return;
     setSaving(true);
-    const payload={title:nTitle,description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);}
-    else{await api.post('/api/tickets',payload);}
-    setSaving(false);setShowNew(false);setEditTicket(null);
-    setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
-    load();
+    const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
+    try{ if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);} else {await api.post('/api/tickets',payload);} }
+    finally{setSaving(false);setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');load();}
   };
-
-  const openEdit=(t)=>{
-    setEditTicket(t);setNTitle(t.title);setNDesc(t.description||'');setNType(t.type||'bug');
-    setNPriority(t.priority||'medium');setNAssignee(t.assignee||'');setNProject(t.project||'');setNStatus(t.status||'open');
-    setShowNew(true);
-  };
-
-  const openDetail=async(t)=>{
-    setDetailTicket(t);
-    const c=await api.get('/api/tickets/'+t.id+'/comments');
-    setComments(Array.isArray(c)?c:[]);
-  };
-
-  const postComment=async()=>{
-    if(!newComment.trim()||!detailTicket)return;
+  const openEdit=(t)=>{setEditTicket(t);setNTitle(t.title||'');setNDesc(t.description||'');setNType(t.type||'bug');setNPriority(t.priority||'medium');setNAssignee(t.assignee||'');setNProject(t.project||'');setNStatus(t.status||'open');setShowNew(true);};
+  const openDetail=async(t)=>{setDetailTicket(t);setCopilotOpen(true);try{const c=await api.get('/api/tickets/'+t.id+'/comments');setComments(Array.isArray(c)?c:[]);}catch(e){setComments([]);}};
+  const postComment=async(internal=false)=>{
+    const content=(internal?internalNote:newComment).trim();
+    if(!content||!detailTicket)return;
     setSavingComment(true);
-    await api.post('/api/tickets/'+detailTicket.id+'/comments',{content:newComment});
-    setNewComment('');
-    const c=await api.get('/api/tickets/'+detailTicket.id+'/comments');
-    setComments(Array.isArray(c)?c:[]);
-    setSavingComment(false);
+    try{await api.post('/api/tickets/'+detailTicket.id+'/comments',{content:internal?'[internal] '+content:content});if(internal)setInternalNote('');else setNewComment('');const c=await api.get('/api/tickets/'+detailTicket.id+'/comments');setComments(Array.isArray(c)?c:[]);}finally{setSavingComment(false);}
   };
-
-  const quickStatus=async(t,status)=>{
-    await api.put('/api/tickets/'+t.id,{status});
-    load();
-    if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prev=>({...prev,status}));
-  };
-
-  const del=async(id)=>{
-    if(!window.confirm('Delete this ticket?'))return;
-    await api.del('/api/tickets/'+id);
-    setDetailTicket(null);load();
-  };
-
-  const TYPE_CFG={
-    bug:{icon:'🐛',color:'var(--rd)',bg:'rgba(248,113,113,.12)',label:'Bug'}, feature:{icon:'✨',color:'var(--ac)',bg:'rgba(90,140,255,.10)',label:'Feature'}, improvement:{icon:'🔧',color:'var(--cy)',bg:'rgba(34,211,238,.12)',label:'Improvement'}, task:{icon:'✅',color:'var(--gn)',bg:'rgba(74,222,128,.12)',label:'Task'}, question:{icon:'❓',color:'var(--pu)',bg:'rgba(167,139,250,.12)',label:'Question'}, };
-  const PRIORITY_CFG={
-    critical:{icon:'🔴',color:'#ef4444',label:'Critical'}, high:{icon:'🟠',color:'#f97316',label:'High'}, medium:{icon:'🟡',color:'#eab308',label:'Medium'}, low:{icon:'🟢',color:'#22c55e',label:'Low'}, };
-  const STATUS_CFG={
-    open:{icon:'🔵',color:'var(--cy)',label:'Open'}, 'in-progress':{icon:'🟡',color:'var(--am)',label:'In Progress'}, review:{icon:'🟣',color:'var(--pu)',label:'In Review'}, resolved:{icon:'🟢',color:'var(--gn)',label:'Resolved'}, closed:{icon:'⚫',color:'var(--tx3)',label:'Closed'}, };
+  const quickStatus=async(t,status)=>{setTickets(prev=>prev.map(x=>x.id===t.id?{...x,status}:x));if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prev=>({...prev,status}));await api.put('/api/tickets/'+t.id,{status});load();};
+  const del=async(id)=>{if(!window.confirm('Delete this ticket?'))return;await api.del('/api/tickets/'+id);setDetailTicket(null);load();};
 
   const statCounts=Object.keys(STATUS_CFG).reduce((a,s)=>{a[s]=tickets.filter(t=>t.status===s).length;return a;},{});
-  const myTicketsCount=tickets.filter(t=>t.assignee===cu.id&&t.status!=='closed'&&t.status!=='resolved').length;
   const unresolvedTickets=tickets.filter(t=>!['resolved','closed'].includes(t.status)).length;
   const criticalTickets=tickets.filter(t=>t.priority==='critical'&&!['resolved','closed'].includes(t.status)).length;
   const unassignedTickets=tickets.filter(t=>!t.assignee&&!['resolved','closed'].includes(t.status)).length;
+  const myTicketsCount=tickets.filter(t=>t.assignee===cu.id&&t.status!=='closed'&&t.status!=='resolved').length;
+  const breachedTickets=tickets.filter(t=>slaInfo(t).risk==='breach').length;
+  const atRiskTickets=tickets.filter(t=>['hot','warn'].includes(slaInfo(t).risk)).length;
+  const velocity=tickets.filter(t=>['resolved','closed'].includes(t.status)).length;
+  const reopenRisk=tickets.filter(t=>String(t.description||'').toLowerCase().includes('again')||String(t.title||'').toLowerCase().includes('reopen')).length;
+  const suggested=suggestedAssignee();
 
-  const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
-
-  const FORM=html`
-    <div class="ov" onClick=${e=>e.target===e.currentTarget&&(setShowNew(false),setEditTicket(null))}>
-      <div class="mo fi" style=${{maxWidth:560}}>
-        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:18}}>
-          <h2 style=${{fontSize:16,fontWeight:700,color:'var(--tx)'}}>${editTicket?'✏️ Edit Ticket':'🎫 New Ticket'}</h2>
-          <button class="btn bg" style=${{padding:'7px 10px'}} onClick=${()=>{setShowNew(false);setEditTicket(null);}}>✕</button>
+  const TicketCard=({t,compact})=>{
+    const tc=TYPE_CFG[t.type]||TYPE_CFG.bug, pc=PRIORITY_CFG[t.priority]||PRIORITY_CFG.medium, sc=STATUS_CFG[t.status]||STATUS_CFG.open;
+    const assignee=t.assignee?umap[t.assignee]:null, sla=slaInfo(t), risk=riskScore(t);
+    return html`<div draggable=${true} onDragStart=${()=>setDragTicketId(t.id)} onClick=${()=>openDetail(t)}
+      style=${{position:'relative',padding:compact?'10px':'13px',border:'1px solid '+(sla.risk==='breach'?'rgba(239,68,68,.55)':sla.risk==='hot'?'rgba(249,115,22,.50)':'var(--bd)'),borderRadius:16,background:'linear-gradient(135deg,rgba(255,255,255,.055),rgba(255,255,255,.018))',boxShadow:sla.risk==='breach'?'0 0 28px rgba(239,68,68,.12)':'0 12px 32px rgba(0,0,0,.18)',cursor:'pointer',overflow:'hidden',transition:'transform .16s ease,border-color .16s ease'}}
+      onMouseEnter=${e=>{e.currentTarget.style.transform='translateY(-2px)';e.currentTarget.style.borderColor='var(--ac)';}}
+      onMouseLeave=${e=>{e.currentTarget.style.transform='';e.currentTarget.style.borderColor=(sla.risk==='breach'?'rgba(239,68,68,.55)':sla.risk==='hot'?'rgba(249,115,22,.50)':'var(--bd)');}}>
+      <div style=${{position:'absolute',inset:'0 0 auto 0',height:3,background:`linear-gradient(90deg,${pc.color},transparent)`,opacity:.9}}></div>
+      <div style=${{display:'flex',gap:10,alignItems:'flex-start'}}>
+        <div style=${{width:34,height:34,borderRadius:12,background:tc.bg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>${tc.icon}</div>
+        <div style=${{flex:1,minWidth:0}}>
+          <div style=${{display:'flex',alignItems:'center',gap:6,marginBottom:5}}><span class="id-badge id-ticket" style=${{fontSize:9}}>${t.id}</span><span style=${{fontSize:12,fontWeight:900,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${t.title}</span></div>
+          ${!compact?html`<div style=${{fontSize:11,color:'var(--tx3)',lineHeight:1.35,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden',marginBottom:8}}>${t.description||'No description provided'}</div>`:null}
+          <div style=${{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>
+            <span style=${{fontSize:10,padding:'2px 7px',borderRadius:99,background:pc.color+'22',color:pc.color,fontWeight:800}}>${pc.icon} ${pc.label}</span>
+            <span style=${{fontSize:10,padding:'2px 7px',borderRadius:99,background:sc.color+'22',color:sc.color,fontWeight:800}}>${sc.icon} ${sc.label}</span>
+            <span style=${{fontSize:10,padding:'2px 7px',borderRadius:99,background:sla.risk==='breach'?'rgba(239,68,68,.16)':sla.risk==='hot'?'rgba(249,115,22,.16)':'rgba(59,130,246,.12)',color:sla.risk==='breach'?'#f87171':sla.risk==='hot'?'#fb923c':'var(--tx3)',fontWeight:800}}>⏱ ${sla.label}</span>
+          </div>
         </div>
-        <div style=${{display:'flex',flexDirection:'column',gap:13}}>
-          <div>
-            <label class="lbl">Title *</label>
-            <input class="inp" value=${nTitle} onInput=${e=>setNTitle(e.target.value)} placeholder="Brief description of the issue"/>
+        ${assignee?html`<${Av} u=${assignee} size=${26}/>`:html`<div title="Unassigned" style=${{width:26,height:26,borderRadius:99,display:'grid',placeItems:'center',background:'rgba(245,158,11,.16)',fontSize:13}}>👤</div>`}
+      </div>
+      <div style=${{marginTop:10,height:4,borderRadius:99,background:'rgba(255,255,255,.06)',overflow:'hidden'}}><div style=${{width:Math.min(100,risk)+'%',height:'100%',background:risk>80?'#ef4444':risk>50?'#f59e0b':'var(--ac)',borderRadius:99}}></div></div>
+    </div>`;
+  };
+
+  const FORM=html`<div class="ov" onClick=${e=>e.target===e.currentTarget&&(setShowNew(false),setEditTicket(null))}>
+    <div class="mo fi" style=${{maxWidth:620}}>
+      <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}><h2 style=${{fontSize:16,fontWeight:900,color:'var(--tx)'}}>${editTicket?'✏️ Edit Ticket':'🎫 New Ticket'}</h2><button class="btn bg" onClick=${()=>{setShowNew(false);setEditTicket(null);}}>✕</button></div>
+      <div style=${{display:'grid',gap:12}}>
+        <div><label class="lbl">Title *</label><input class="inp" value=${nTitle} onInput=${e=>setNTitle(e.target.value)} placeholder="Brief description of the issue"/></div>
+        <div><label class="lbl">Description</label><textarea class="inp" rows="4" style=${{resize:'vertical'}} value=${nDesc} onInput=${e=>setNDesc(e.target.value)} placeholder="Steps, impact, expected vs actual, logs…"></textarea></div>
+        <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
+          <div><label class="lbl">Type</label><select class="inp" value=${nType} onChange=${e=>setNType(e.target.value)}>${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select></div>
+          <div><label class="lbl">Priority</label><select class="inp" value=${nPriority} onChange=${e=>setNPriority(e.target.value)}>${Object.entries(PRIORITY_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select></div>
+          <div><label class="lbl">Status</label><select class="inp" value=${nStatus} onChange=${e=>setNStatus(e.target.value)}>${Object.entries(STATUS_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select></div>
+        </div>
+        <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+          <div><label class="lbl">Assignee</label><select class="inp" value=${nAssignee} onChange=${e=>setNAssignee(e.target.value)}><option value="">— Unassigned —</option>${safe(users).map(u=>html`<option key=${u.id} value=${u.id}>${u.name}</option>`)}</select></div>
+          <div><label class="lbl">Project</label><select class="inp" value=${nProject} onChange=${e=>setNProject(e.target.value)}><option value="">— No project —</option>${safe(projects).map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}</select></div>
+        </div>
+        ${!nAssignee&&suggested?html`<button class="btn bg" style=${{justifySelf:'start'}} onClick=${()=>setNAssignee(suggested.id)}>🤖 Assign suggested owner: ${suggested.name}</button>`:null}
+        <div style=${{display:'flex',gap:9,justifyContent:'flex-end'}}><button class="btn bg" onClick=${()=>{setShowNew(false);setEditTicket(null);}}>Cancel</button><button class="btn bp" disabled=${saving||!nTitle.trim()} onClick=${saveTicket}>${saving?'Saving…':editTicket?'Save Changes':'Create Ticket'}</button></div>
+      </div>
+    </div>
+  </div>`;
+
+  const DETAIL=detailTicket?html`<div class="ov" onClick=${e=>e.target===e.currentTarget&&setDetailTicket(null)}>
+    <div class="mo fi" style=${{width:'min(1040px,94vw)',maxHeight:'88vh',display:'grid',gridTemplateColumns:copilotOpen?'1fr 300px':'1fr',gap:0,padding:0,overflow:'hidden'}}>
+      <div style=${{display:'flex',flexDirection:'column',minHeight:0}}>
+        <div style=${{padding:'18px 20px',borderBottom:'1px solid var(--bd)',display:'flex',justifyContent:'space-between',gap:12}}>
+          <div style=${{minWidth:0}}><div style=${{display:'flex',gap:8,alignItems:'center',marginBottom:7}}><span class="id-badge id-ticket">${detailTicket.id}</span><span style=${{fontSize:11,color:(PRIORITY_CFG[detailTicket.priority]||{}).color,fontWeight:900}}>${(PRIORITY_CFG[detailTicket.priority]||{}).icon} ${(PRIORITY_CFG[detailTicket.priority]||{}).label}</span></div><h2 style=${{fontSize:18,fontWeight:900,color:'var(--tx)',margin:0}}>${detailTicket.title}</h2></div>
+          <div style=${{display:'flex',gap:8,alignItems:'start'}}><button class="btn bg" onClick=${()=>setCopilotOpen(!copilotOpen)}>🤖 AI</button>${canEdit?html`<button class="btn bg" onClick=${()=>openEdit(detailTicket)}>Edit</button>`:null}${canDelete?html`<button class="btn bg" style=${{color:'var(--rd)'}} onClick=${()=>del(detailTicket.id)}>Delete</button>`:null}<button class="btn bg" onClick=${()=>setDetailTicket(null)}>✕</button></div>
+        </div>
+        <div style=${{padding:20,overflow:'auto',display:'grid',gap:16}}>
+          <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:8}}>
+            <div class="card"><div class="lbl">Status</div><select class="inp" value=${detailTicket.status} onChange=${e=>quickStatus(detailTicket,e.target.value)}>${Object.entries(STATUS_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select></div>
+            <div class="card"><div class="lbl">SLA</div><div style=${{fontSize:13,fontWeight:900,color:slaInfo(detailTicket).risk==='breach'?'#ef4444':'var(--tx)'}}>⏱ ${slaInfo(detailTicket).label}</div></div>
+            <div class="card"><div class="lbl">Assignee</div><div style=${{display:'flex',alignItems:'center',gap:8}}>${detailTicket.assignee&&umap[detailTicket.assignee]?html`<${Av} u=${umap[detailTicket.assignee]} size=${24}/><span style=${{fontSize:12,fontWeight:800}}>${umap[detailTicket.assignee].name}</span>`:html`<span style=${{fontSize:12,color:'var(--tx3)'}}>Unassigned</span>`}</div></div>
           </div>
-          <div>
-            <label class="lbl">Description</label>
-            <textarea class="inp" rows="3" style=${{resize:'vertical'}} value=${nDesc} onInput=${e=>setNDesc(e.target.value)} placeholder="Steps to reproduce, expected vs actual behaviour..."></textarea>
-          </div>
-          <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
-            <div>
-              <label class="lbl">Type</label>
-              <select class="inp" value=${nType} onChange=${e=>setNType(e.target.value)}>
-                ${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-              </select>
-            </div>
-            <div>
-              <label class="lbl">Priority</label>
-              <select class="inp" value=${nPriority} onChange=${e=>setNPriority(e.target.value)}>
-                ${Object.entries(PRIORITY_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-              </select>
-            </div>
-            <div>
-              <label class="lbl">Status</label>
-              <select class="inp" value=${nStatus} onChange=${e=>setNStatus(e.target.value)}>
-                ${Object.entries(STATUS_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-              </select>
+          <div class="card"><div class="lbl">Description</div><div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.55,whiteSpace:'pre-wrap'}}>${detailTicket.description||'No description yet.'}</div></div>
+          <div class="card"><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><b style=${{fontSize:13}}>Activity timeline</b><span style=${{fontSize:11,color:'var(--tx3)'}}>${comments.length} update${comments.length!==1?'s':''}</span></div>
+            <div style=${{display:'grid',gap:10,maxHeight:230,overflow:'auto'}}>
+              <div style=${{display:'flex',gap:9}}><div style=${{width:8,height:8,borderRadius:99,background:'var(--ac)',marginTop:5}}></div><div><div style=${{fontSize:11,fontWeight:900}}>Ticket created</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${new Date(detailTicket.created).toLocaleString()}</div></div></div>
+              ${comments.map(c=>{const internal=String(c.content||'').startsWith('[internal]');return html`<div key=${c.id||c.created} style=${{display:'flex',gap:9}}><div style=${{width:8,height:8,borderRadius:99,background:internal?'#f59e0b':'var(--gn)',marginTop:5}}></div><div style=${{flex:1}}><div style=${{fontSize:11,fontWeight:900}}>${internal?'Internal note':'Comment'} · ${(umap[c.user_id]||{}).name||'User'}</div><div style=${{fontSize:12,color:'var(--tx2)',whiteSpace:'pre-wrap'}}>${internal?String(c.content).replace('[internal] ',''):c.content}</div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${new Date(c.created||Date.now()).toLocaleString()}</div></div></div>`})}
             </div>
           </div>
           <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <div>
-              <label class="lbl">Assignee</label>
-              <select class="inp" value=${nAssignee} onChange=${e=>setNAssignee(e.target.value)}>
-                <option value="">— Unassigned —</option>
-                ${safe(users).map(u=>html`<option key=${u.id} value=${u.id}>${u.name}</option>`)}
-              </select>
-            </div>
-            <div>
-              <label class="lbl">Project</label>
-              <select class="inp" value=${nProject} onChange=${e=>setNProject(e.target.value)}>
-                <option value="">— No project —</option>
-                ${safe(projects).map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-              </select>
-            </div>
-          </div>
-          <div style=${{display:'flex',gap:9,justifyContent:'flex-end',paddingTop:4}}>
-            <button class="btn bg" onClick=${()=>{setShowNew(false);setEditTicket(null);}}>Cancel</button>
-            <button class="btn bp" onClick=${saveTicket} disabled=${saving||!nTitle.trim()}>
-              ${saving?'Saving...':editTicket?'Save Changes':'Create Ticket'}
-            </button>
+            <div class="card"><div class="lbl">Customer / public reply</div><textarea class="inp" rows="3" value=${newComment} onInput=${e=>setNewComment(e.target.value)} placeholder="Add reply…"></textarea><button class="btn bp" style=${{marginTop:8}} disabled=${savingComment||!newComment.trim()} onClick=${()=>postComment(false)}>Send reply</button></div>
+            <div class="card"><div class="lbl">Internal note</div><textarea class="inp" rows="3" value=${internalNote} onInput=${e=>setInternalNote(e.target.value)} placeholder="Private investigation note…"></textarea><button class="btn bg" style=${{marginTop:8}} disabled=${savingComment||!internalNote.trim()} onClick=${()=>postComment(true)}>Save internal note</button></div>
           </div>
         </div>
       </div>
-    </div>`;
+      ${copilotOpen?html`<aside style=${{borderLeft:'1px solid var(--bd)',background:'linear-gradient(180deg,rgba(90,140,255,.10),rgba(255,255,255,.02))',padding:16,overflow:'auto'}}>
+        <div style=${{fontSize:13,fontWeight:900,marginBottom:10}}>🤖 Ticket Copilot</div>
+        <div class="card" style=${{marginBottom:10}}><div class="lbl">Smart summary</div><div style=${{fontSize:12,lineHeight:1.5,color:'var(--tx2)'}}>${aiSummary(detailTicket)}</div></div>
+        <div class="card" style=${{marginBottom:10}}><div class="lbl">Recommended next action</div><div style=${{fontSize:12,color:'var(--tx2)'}}>${!detailTicket.assignee?'Assign an owner first.':slaInfo(detailTicket).risk==='breach'?'Escalate immediately and add an update.':detailTicket.status==='open'?'Move to In Progress when work starts.':'Keep timeline updated.'}</div></div>
+        <div class="card"><div class="lbl">Similar resolved ticket hints</div><div style=${{fontSize:12,color:'var(--tx2)'}}>${tickets.filter(x=>x.id!==detailTicket.id&&['resolved','closed'].includes(x.status)&&x.type===detailTicket.type).slice(0,3).map(x=>x.title).join(' · ')||'No similar resolved tickets yet.'}</div></div>
+      </aside>`:null}
+    </div>
+  </div>`:null;
 
-  const DETAIL=detailTicket?html`
-    <div class="ov" onClick=${e=>e.target===e.currentTarget&&setDetailTicket(null)}>
-      <div class="mo fi" style=${{maxWidth:620,maxHeight:'85vh',display:'flex',flexDirection:'column'}}>
-        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16,flexShrink:0}}>
-          <div style=${{flex:1,minWidth:0,marginRight:12}}>
-            <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
-              <span style=${{fontSize:18}}>${(TYPE_CFG[detailTicket.type]||TYPE_CFG.bug).icon}</span>
-              <span style=${{fontSize:11,padding:'2px 8px',borderRadius:6,background:(PRIORITY_CFG[detailTicket.priority]||PRIORITY_CFG.medium).color+'22',color:(PRIORITY_CFG[detailTicket.priority]||PRIORITY_CFG.medium).color,fontWeight:700}}>${(PRIORITY_CFG[detailTicket.priority]||PRIORITY_CFG.medium).label}</span>
-              <select value=${detailTicket.status} onChange=${e=>quickStatus(detailTicket,e.target.value)}
-                style=${{fontSize:11,padding:'2px 8px',borderRadius:6,background:'var(--sf2)',border:'1px solid var(--bd)',color:'var(--tx)',cursor:'pointer'}}>
-                ${Object.entries(STATUS_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-              </select>
-            </div>
-            <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
-              <span class="id-badge id-ticket">${detailTicket.id}</span>
-              ${detailTicket.type?html`<span class="id-badge" style=${{background:({'bug':'rgba(185,28,28,0.10)','feature':'rgba(29,78,216,0.10)','improvement':'rgba(14,116,144,0.10)','task':'rgba(21,128,61,0.10)','question':'rgba(109,40,217,0.10)'})[detailTicket.type]||'var(--ac3)',color:({'bug':'var(--rd)','feature':'var(--ac)','improvement':'var(--cy)','task':'var(--gn)','question':'var(--pu)'})[detailTicket.type]||'var(--ac)'}}>${detailTicket.type}</span>`:null}
-            </div>
-            <h2 style=${{fontSize:16,fontWeight:700,color:'var(--tx)',marginBottom:4}}>${detailTicket.title}</h2>
-            <div class="tx3-11">
-              Reported by ${(umap[detailTicket.reporter]||{name:'Unknown'}).name} · ${new Date(detailTicket.created).toLocaleDateString()}
-              ${detailTicket.assignee?html` · Assigned to <b style=${{color:'var(--tx2)'}}>${(umap[detailTicket.assignee]||{name:'?'}).name}</b>`:null}
-            </div>
-          </div>
-          <div style=${{display:'flex',gap:6,flexShrink:0}}>
-            ${canEdit?html`<button class="btn bg" style=${{fontSize:11,padding:'5px 9px'}} onClick=${()=>openEdit(detailTicket)}>✏️ Edit</button>`:null}
-            ${canDelete?html`<button class="btn brd" style=${{fontSize:11,padding:'5px 9px',color:'var(--rd)'}} onClick=${()=>del(detailTicket.id)}>🗑</button>`:null}
-            <button class="btn bg" style=${{padding:'7px 10px'}} onClick=${()=>setDetailTicket(null)}>✕</button>
-          </div>
-        </div>
-        ${detailTicket.description?html`
-          <div style=${{background:'var(--sf2)',borderRadius:9,padding:'12px 14px',marginBottom:14,fontSize:13,color:'var(--tx2)',lineHeight:1.6,flexShrink:0,border:'1px solid var(--bd)'}}>
-            ${detailTicket.description}
-          </div>`:null}
-        <div style=${{flex:1,overflowY:'auto',paddingBottom:8}}>
-          <div style=${{fontWeight:700,fontSize:12,color:'var(--tx2)',marginBottom:10}}>💬 Comments (${comments.length})</div>
-          ${comments.length===0?html`<p style=${{color:'var(--tx3)',fontSize:12,textAlign:'center',padding:'16px 0'}}>No comments yet. Be the first!</p>`:null}
-          <div style=${{display:'flex',flexDirection:'column',gap:8}}>
-            ${comments.map(c=>html`
-              <div key=${c.id} style=${{display:'flex',gap:10,padding:'10px 12px',background:'var(--sf2)',borderRadius:10,border:'1px solid var(--bd)'}}>
-                <${Av} u=${umap[c.user_id]||{name:'?',color:'#888'}} size=${30}/>
-                <div style=${{flex:1}}>
-                  <div style=${{display:'flex',gap:8,alignItems:'center',marginBottom:4}}>
-                    <span style=${{fontSize:12,fontWeight:700,color:'var(--tx)'}}>${(umap[c.user_id]||{name:'?'}).name}</span>
-                    <span style=${{fontSize:10,color:'var(--tx3)'}}>${new Date(c.created).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</span>
-                  </div>
-                  <div style=${{fontSize:12,color:'var(--tx2)',lineHeight:1.5}}>${c.content}</div>
-                </div>
-              </div>`)}
-          </div>
-        </div>
-        <div style=${{display:'flex',gap:9,paddingTop:12,borderTop:'1px solid var(--bd)',flexShrink:0}}>
-          <input class="inp" style=${{flex:1}} value=${newComment} onInput=${e=>setNewComment(e.target.value)}
-            onKeyDown=${e=>e.key==='Enter'&&!e.shiftKey&&postComment()}
-            placeholder="Add a comment… (Enter to submit)"/>
-          <button class="btn bp" onClick=${postComment} disabled=${savingComment||!newComment.trim()}>
-            ${savingComment?html`<span class="spin"></span>`:'Send'}
-          </button>
-        </div>
-      </div>
-    </div>`:null;
+  return html`<div class="fi" style=${{height:'100%',overflowY:'auto',padding:'14px 18px',background:'var(--bg)'}}>
+    <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(135px,1fr))',gap:8,marginBottom:10}}>
+      ${[
+        {label:'Open workload',val:unresolvedTickets,sub:'active queue',icon:'⚡',tone:'rgba(59,130,246,.14)'},
+        {label:'SLA breach',val:breachedTickets,sub:'needs escalation',icon:'⏱️',tone:'rgba(239,68,68,.16)'},
+        {label:'At risk',val:atRiskTickets,sub:'watch closely',icon:'🔥',tone:'rgba(249,115,22,.16)'},
+        {label:'Unassigned',val:unassignedTickets,sub:'needs owner',icon:'👤',tone:'rgba(245,158,11,.14)'},
+        {label:'Resolved',val:velocity,sub:'delivery velocity',icon:'✅',tone:'rgba(34,197,94,.14)'},
+        {label:'Reopen risk',val:reopenRisk,sub:'possible repeats',icon:'♻️',tone:'rgba(139,92,246,.14)'}
+      ].map(card=>html`<div style=${{border:'1px solid var(--bd)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,boxShadow:'0 10px 30px rgba(0,0,0,.12)'}}><div style=${{width:30,height:30,borderRadius:11,display:'grid',placeItems:'center',background:card.tone,fontSize:16}}>${card.icon}</div><div><div style=${{fontSize:17,fontWeight:900,color:'var(--tx)',lineHeight:1}}>${card.val}</div><div style=${{fontSize:10,fontWeight:900,color:'var(--tx2)'}}>${card.label}</div><div style=${{fontSize:9,color:'var(--tx3)'}}>${card.sub}</div></div></div>`)}
+    </div>
 
-  return html`
-    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'14px 18px',background:'var(--bg)'}}>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:8,marginBottom:10}}>
-        ${[
-          {label:'Open workload',val:unresolvedTickets,sub:'not closed/resolved',icon:'⚡',tone:'rgba(59,130,246,.14)'},
-          {label:'Critical',val:criticalTickets,sub:'needs immediate action',icon:'🚨',tone:'rgba(239,68,68,.14)'},
-          {label:'Unassigned',val:unassignedTickets,sub:'needs owner',icon:'👤',tone:'rgba(245,158,11,.14)'},
-          {label:'My queue',val:myTicketsCount,sub:'assigned to me',icon:'🎯',tone:'rgba(139,92,246,.14)'}
-        ].map(card=>html`<div style=${{border:'1px solid var(--bd)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:12,boxShadow:'0 10px 30px rgba(0,0,0,.12)'}}>
-          <div style=${{width:32,height:32,borderRadius:11,display:'flex',alignItems:'center',justifyContent:'center',background:card.tone,fontSize:17}}>${card.icon}</div>
-          <div><div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',lineHeight:1}}>${card.val}</div><div style=${{fontSize:11,fontWeight:800,color:'var(--tx2)'}}>${card.label}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${card.sub}</div></div>
-        </div>`)}
+    <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+      <div style=${{display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
+        ${Object.entries(STATUS_CFG).map(([s,c])=>html`<button key=${s} class=${'chip'+(filterStatus===s?' on':'')} onClick=${()=>setFilterStatus(filterStatus===s?'':s)} style=${{fontSize:11,display:'flex',alignItems:'center',gap:4}}>${c.icon} ${c.label} <span style=${{fontWeight:800,color:c.color}}>${statCounts[s]||0}</span></button>`)}
       </div>
+      <div style=${{display:'flex',gap:7}}><button class=${'chip'+(viewMode==='board'?' on':'')} onClick=${()=>setViewMode('board')}>▦ Board</button><button class=${'chip'+(viewMode==='list'?' on':'')} onClick=${()=>setViewMode('list')}>☰ List</button><button class=${'chip'+(viewMode==='analytics'?' on':'')} onClick=${()=>setViewMode('analytics')}>📊 Analytics</button><button class="btn bp" style=${{fontSize:12}} onClick=${()=>{setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');setShowNew(true);}}>+ New Ticket</button></div>
+    </div>
 
-            <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-        <div style=${{display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
-          ${Object.entries(STATUS_CFG).map(([s,c])=>html`
-            <button key=${s} class=${'chip'+(filterStatus===s?' on':'')} onClick=${()=>setFilterStatus(filterStatus===s?'':s)}
-              style=${{fontSize:11,display:'flex',alignItems:'center',gap:4}}>
-              ${c.icon} ${c.label} <span style=${{fontWeight:700,color:c.color}}>${statCounts[s]||0}</span>
-            </button>`)}
-        </div>
-        <button class="btn bp" style=${{fontSize:12}} onClick=${()=>{setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');setShowNew(true);}}>
-          + New Ticket
-        </button>
-      </div>
+    <div style=${{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap',alignItems:'center',padding:'8px 10px',border:'1px solid var(--bd)',background:'linear-gradient(135deg,rgba(255,255,255,.045),rgba(255,255,255,.018))',borderRadius:16}}>
+      <button class=${'chip'+(filterAssignee===cu.id?' on':'')} style=${{fontSize:11,flexShrink:0}} onClick=${()=>setFilterAssignee(filterAssignee===cu.id?'':cu.id)}>👤 My Tickets ${myTicketsCount>0?html`<span style=${{fontWeight:800,marginLeft:3}}>(${myTicketsCount})</span>`:null}</button>
+      <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:130,flex:'0 0 130px'}} value=${filterPriority} onChange=${e=>setFilterPriority(e.target.value)}><option value="">All priorities</option>${Object.entries(PRIORITY_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select>
+      <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:115,flex:'0 0 115px'}} value=${filterType} onChange=${e=>setFilterType(e.target.value)}><option value="">All types</option>${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}</select>
+      <input class="inp" value=${ticketSearch} onInput=${e=>setTicketSearch(e.target.value)} placeholder="Search id, title, owner…" style=${{fontSize:11,height:30,minWidth:170,maxWidth:280,flex:'1 1 210px'}}/>
+      <label class="chip" style=${{fontSize:11}}><input type="checkbox" checked=${showResolved} onChange=${e=>setShowResolved(e.target.checked)} style=${{marginRight:5}}/>Show closed</label>
+      <span style=${{fontSize:11,color:'var(--tx3)',marginLeft:'auto'}}>${visibleTickets.length} ticket${visibleTickets.length!==1?'s':''}</span>
+    </div>
 
-            <div style=${{display:'flex',gap:8,marginBottom:10,flexWrap:'wrap',alignItems:'center',padding:'8px 10px',border:'1px solid var(--bd)',background:'linear-gradient(135deg,rgba(255,255,255,.045),rgba(255,255,255,.018))',borderRadius:16,boxShadow:'inset 0 1px 0 rgba(255,255,255,.04)'}}>
-        ${filterStatus?html`
-          <div style=${{display:'flex',alignItems:'center',gap:6,padding:'4px 10px 4px 8px',background:'var(--sf2)',border:'1px solid var(--bd)',borderRadius:20,flexShrink:0}}>
-            <span style=${{fontSize:11,color:'var(--tx2)',fontWeight:600}}>${(STATUS_CFG[filterStatus]||{label:filterStatus}).icon} ${(STATUS_CFG[filterStatus]||{label:filterStatus}).label}</span>
-            <button onClick=${()=>setFilterStatus('')}
-              style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:13,lineHeight:1,padding:'0 2px'}}>×</button>
-          </div>`:null}
-        ${filterAssignee?html`
-          <div style=${{display:'flex',alignItems:'center',gap:6,padding:'4px 10px 4px 8px',background:'var(--ac3)',border:'1px solid var(--ac)',borderRadius:20,flexShrink:0}}>
-            <div style=${{width:6,height:6,borderRadius:'50%',background:'var(--ac)',flexShrink:0}}></div>
-            <span style=${{fontSize:11,fontWeight:700,color:'var(--ac)'}}>Assigned to me</span>
-            <button onClick=${()=>setFilterAssignee('')}
-              style=${{background:'none',border:'none',cursor:'pointer',color:'var(--ac)',fontSize:13,lineHeight:1,padding:'0 2px',marginLeft:2}}
-              title="Clear filter">×</button>
-          </div>`:null}
-        <button class=${'chip'+(filterAssignee===cu.id?' on':'')} style=${{fontSize:11,flexShrink:0}}
-          onClick=${()=>setFilterAssignee(filterAssignee===cu.id?'':cu.id)}>
-          👤 My Tickets ${myTicketsCount>0?html`<span style=${{fontWeight:700,marginLeft:3}}>(${myTicketsCount})</span>`:null}
-        </button>
-        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:132,flex:'0 0 132px'}} value=${filterPriority} onChange=${e=>setFilterPriority(e.target.value)}>
-          <option value="">All Priorities</option>
-          ${Object.entries(PRIORITY_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-        </select>
-        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:120,flex:'0 0 120px'}} value=${filterType} onChange=${e=>setFilterType(e.target.value)}>
-          <option value="">All Types</option>
-          ${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
-        </select>
-        <input class="inp" value=${ticketSearch} onInput=${e=>setTicketSearch(e.target.value)} placeholder="Search tickets..." style=${{fontSize:11,height:30,minWidth:180,maxWidth:320,flex:'1 1 220px'}}/>
-        <span style=${{fontSize:11,color:'var(--tx3)',alignSelf:'center',marginLeft:4}}>${visibleTickets.length} ticket${visibleTickets.length!==1?'s':''}</span>
-      </div>
+    ${busy?html`<div style=${{textAlign:'center',padding:40}}><div class="spin" style=${{margin:'0 auto'}}></div></div>`:null}
+    ${!busy&&visibleTickets.length===0?html`<div style=${{textAlign:'center',padding:'48px 16px',color:'var(--tx3)',fontSize:13,background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:18,border:'1px solid var(--bd)'}}><div style=${{fontSize:36,marginBottom:12}}>🎫</div><div style=${{fontWeight:900,marginBottom:6,color:'var(--tx2)'}}>No tickets match this command center view</div><div style=${{marginBottom:14}}>Clear filters or create a new ticket to track work.</div><button class="btn bp" onClick=${()=>setShowNew(true)}>+ Create Ticket</button></div>`:null}
 
-            ${busy?html`<div style=${{textAlign:'center',padding:40}}><div class="spin" style=${{margin:'0 auto'}}></div></div>`:null}
-      ${!busy&&visibleTickets.length===0?html`
-        <div style=${{textAlign:'center',padding:'48px 16px',color:'var(--tx3)',fontSize:13,background:'var(--sf)',borderRadius:12,border:'1px solid var(--bd)'}}>
-          <div style=${{fontSize:36,marginBottom:12}}>🎫</div>
-          <div style=${{fontWeight:700,marginBottom:6,color:'var(--tx2)'}}>${ticketSearch||filterStatus||filterPriority||filterType||filterAssignee?'No tickets match these filters':'No tickets yet'}</div>
-          <div style=${{marginBottom:14}}>${ticketSearch||filterStatus||filterPriority||filterType||filterAssignee?'Try clearing filters or search text.':'Create a ticket to track bugs, features, and tasks'}</div>
-          <button class="btn bp" onClick=${()=>{setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');setShowNew(true);}}>+ Create Ticket</button>
-        </div>`:null}
-      <div style=${{display:'flex',flexDirection:'column',gap:8}}>
-        ${visibleTickets.map(t=>{
-          const tc=TYPE_CFG[t.type]||TYPE_CFG.bug;
-          const pc=PRIORITY_CFG[t.priority]||PRIORITY_CFG.medium;
-          const sc=STATUS_CFG[t.status]||STATUS_CFG.open;
-          const assignee=t.assignee?umap[t.assignee]:null;
-          return html`
-          <div key=${t.id} onClick=${()=>openDetail(t)}
-            style=${{display:'flex',gap:12,padding:'12px 15px',background:'var(--sf)',borderRadius:11,border:'1px solid var(--bd)',alignItems:'center',cursor:'pointer',transition:'all .14s'}}
-            onMouseEnter=${e=>{e.currentTarget.style.borderColor='var(--ac)';e.currentTarget.style.background='var(--sf2)';}}
-            onMouseLeave=${e=>{e.currentTarget.style.borderColor='var(--bd)';e.currentTarget.style.background='var(--sf)';}}>
-                        <div style=${{width:36,height:36,borderRadius:9,background:tc.bg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>${tc.icon}</div>
-                        <div style=${{flex:1,minWidth:0}}>
-              <div style=${{display:'flex',alignItems:'center',gap:7,marginBottom:3}}>
-                <span class="id-badge id-ticket" style=${{fontSize:9,flexShrink:0}}>${t.id}</span>
-                <span style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>${t.title}</span>
-                <span style=${{fontSize:10,padding:'1px 7px',borderRadius:5,background:sc.color+'22',color:sc.color,fontWeight:700,flexShrink:0}}>${sc.icon} ${sc.label}</span>
-              </div>
-              <div style=${{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                <span style=${{fontSize:10,padding:'1px 6px',borderRadius:4,background:pc.color+'22',color:pc.color,fontWeight:600}}>${pc.icon} ${pc.label}</span>
-                <span style=${{fontSize:10,color:'var(--tx3)'}}>${tc.label}</span>
-                ${t.project?html`<span style=${{fontSize:10,color:'var(--tx3)'}}>📁 ${(safe(projects).find(p=>p.id===t.project)||{name:t.project}).name}</span>`:null}
-                <span style=${{fontSize:10,color:'var(--tx3)',marginLeft:'auto'}}>${new Date(t.created).toLocaleDateString()}</span>
-              </div>
-            </div>
-                        ${assignee?html`<div style=${{flexShrink:0}}><${Av} u=${assignee} size=${28}/></div>`:null}
-          </div>`;})}
-      </div>
-      ${showNew?FORM:null}
-      ${DETAIL}
-    </div>`;
+    ${!busy&&viewMode==='analytics'?html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+      <div class="card"><b>Resolution velocity</b><div style=${{fontSize:28,fontWeight:900,marginTop:8}}>${velocity}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>Resolved / closed tickets</div></div>
+      <div class="card"><b>Agent workload</b><div style=${{display:'grid',gap:8,marginTop:10}}>${safe(users).slice(0,6).map(u=>{const n=tickets.filter(t=>t.assignee===u.id&&!['closed','resolved'].includes(t.status)).length;return html`<div style=${{display:'flex',alignItems:'center',gap:8}}><${Av} u=${u} size=${22}/><span style=${{fontSize:12,flex:1}}>${u.name}</span><b>${n}</b></div>`})}</div></div>
+      <div class="card"><b>SLA heatmap</b><div style=${{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginTop:12}}>${['critical','high','medium','low'].map(p=>html`<div style=${{padding:10,borderRadius:12,background:(PRIORITY_CFG[p]||{}).color+'22',textAlign:'center'}}><div>${(PRIORITY_CFG[p]||{}).icon}</div><b>${tickets.filter(t=>t.priority===p&&slaInfo(t).risk==='breach').length}</b><div style=${{fontSize:10,color:'var(--tx3)'}}>${p}</div></div>`)}</div></div>
+      <div class="card"><b>Automation ideas</b><div style=${{fontSize:12,color:'var(--tx2)',lineHeight:1.7,marginTop:8}}>• Auto-assign unowned critical tickets<br/>• Escalate SLA breaches<br/>• Auto-close inactive resolved tickets<br/>• Create task from feature ticket</div></div>
+    </div>`:null}
+
+    ${!busy&&viewMode==='board'?html`<div style=${{display:'grid',gridTemplateColumns:'repeat(5,minmax(210px,1fr))',gap:10,alignItems:'start',overflowX:'auto',paddingBottom:8}}>
+      ${STATUS_ORDER.map(st=>{const cfg=STATUS_CFG[st];const items=visibleTickets.filter(t=>t.status===st);return html`<div key=${st} onDragOver=${e=>e.preventDefault()} onDrop=${()=>{const t=tickets.find(x=>x.id===dragTicketId);if(t)quickStatus(t,st);setDragTicketId(null);}} style=${{minHeight:180,border:'1px solid var(--bd)',borderRadius:18,background:'rgba(255,255,255,.025)',padding:10}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><b style=${{fontSize:12,color:cfg.color}}>${cfg.icon} ${cfg.label}</b><span class="chip" style=${{fontSize:10}}>${items.length}</span></div><div style=${{display:'grid',gap:9}}>${items.map(t=>html`<${TicketCard} key=${t.id} t=${t} compact=${false}/>`)}${items.length===0?html`<div style=${{border:'1px dashed var(--bd)',borderRadius:14,padding:18,textAlign:'center',fontSize:11,color:'var(--tx3)'}}>Drop tickets here</div>`:null}</div></div>`})}
+    </div>`:null}
+
+    ${!busy&&viewMode==='list'?html`<div style=${{display:'grid',gap:8}}>${visibleTickets.map(t=>html`<${TicketCard} key=${t.id} t=${t} compact=${true}/>` )}</div>`:null}
+    ${showNew?FORM:null}${DETAIL}
+  </div>`;
 }
 
 /* ─── Reusable ToggleSwitch ───────────────────────────────────────────────── */
