@@ -3859,6 +3859,12 @@ function renderChatContent(text){
   if(fileUrl&&isImg){
     return safe.replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open image</a>').replace(/\n/g,'<br>');
   }
+  const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[A-Za-z0-9-]+/i);
+  if(meetMatch){
+    const url=meetMatch[0];
+    const code=(raw.match(/Code:\s*([A-Za-z0-9-]+)/i)||[])[1]||url.split('/').pop();
+    return `<div style="min-width:240px;display:grid;gap:8px"><div style="display:flex;align-items:center;gap:8px;font-weight:900"><span style="width:30px;height:30px;border-radius:999px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center">📹</span><span>Google Meet call</span></div><div style="font-size:11px;opacity:.82;font-family:monospace">Invite code: ${escapeHtml(code)}</div><a href="${url}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:12px;padding:9px 12px;background:#2563eb;color:#fff;text-decoration:none;font-weight:900">Join Google Meet ↗</a></div>`;
+  }
   return safe
     .replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:700">$1</a>')
     .replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open attachment</a>')
@@ -4307,6 +4313,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [previewImage,setPreviewImage]=useState('');
   const [remoteTyping,setRemoteTyping]=useState(false);
   const [recording,setRecording]=useState(false);
+  const [startingMeet,setStartingMeet]=useState(false);
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
   const typingTimerRef=useRef(null);
@@ -4514,6 +4521,32 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const uploaded=await api.upload('/api/files',fd);
     if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
   };
+  const startGoogleMeetCall=async()=>{
+    if(!toId||startingMeet)return;
+    const peer=toUser&&toUser.name?toUser.name:'teammate';
+    setStartingMeet(true);
+    try{
+      const data=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`});
+      if(data&&data.ok===false){
+        if(data.needsGoogleAuth||data.status===409||(data.data&&data.data.needsGoogleAuth)){
+          if(confirm('Google Calendar permission is required to auto-create Meet links. Connect Google now?')){
+            window.open((data.data&&data.data.authUrl)||'/api/auth/google/login','_blank','noopener,noreferrer');
+          }
+          return;
+        }
+        alert(data.error||'Unable to start Google Meet. Please try again.');
+        return;
+      }
+      if(data&&data.message){
+        setMsgs(prev=>{const next=[...prev,data.message];threadCache.current.set(toId,next);return next;});
+      }
+      if(data&&data.meetUrl){
+        window.open(data.meetUrl,'_blank','noopener,noreferrer');
+      }
+    }catch(e){
+      alert('Unable to start Google Meet. Please try again.');
+    }finally{setStartingMeet(false);}
+  };
   const toggleRecording=async()=>{
     if(recording){try{mediaRecorderRef.current&&mediaRecorderRef.current.stop();}catch{}setRecording(false);return;}
     try{
@@ -4683,6 +4716,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         </div>
         ${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
         ${editingId?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>✎ Editing message <button style=${{float:'right'}} onClick=${()=>{setEditingId('');setTxt('');}}>×</button></div>`:null}
+        <button title="Start Google Meet" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(37,99,235,.18)':'linear-gradient(135deg,#2563eb,#7c3aed)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
         <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>

@@ -2713,9 +2713,9 @@ def google_login():
         "client_id":     _GOOGLE_CLIENT_ID,
         "redirect_uri":  redirect_uri,
         "response_type": "code",
-        "scope":         "openid email profile",
+        "scope":         "openid email profile https://www.googleapis.com/auth/calendar.events",
         "state":         state,
-        "access_type":   "online",
+        "access_type":   "offline",
         "prompt":        "select_account",
     })
     return redirect(f"{_GOOGLE_AUTH_URL}?{params}")
@@ -2841,6 +2841,7 @@ def google_callback():
         session["login_at"]     = login_ts
         session_id = secrets.token_hex(16)
         session["session_id"] = session_id
+        session["google_access_token"] = access_token
 
         db.execute(
             "UPDATE users SET last_active=?, logged_out_at='' WHERE id=?",
@@ -5446,6 +5447,119 @@ def get_dm(other_id):
         data=_attach_dm_reactions(db, ws_id, rows)
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     return jsonify(data)
+
+
+
+def _create_google_meet_event(access_token, title, attendee_emails=None):
+    """Create a real Google Meet link using Google Calendar API.
+
+    Requires the current session to have a Google OAuth access token with
+    https://www.googleapis.com/auth/calendar.events scope.
+    """
+    attendee_emails = [e for e in (attendee_emails or []) if e]
+    from datetime import timezone, timedelta
+    start_dt = datetime.now(timezone.utc)
+    end_dt = start_dt + timedelta(hours=1)
+    payload = {
+        "summary": title or "Workspace call",
+        "description": "Started from the Project Tracker Direct Messages call button.",
+        "start": {"dateTime": start_dt.isoformat()},
+        "end": {"dateTime": end_dt.isoformat()},
+        "attendees": [{"email": e} for e in attendee_emails],
+        "conferenceData": {
+            "createRequest": {
+                "requestId": f"meet-{secrets.token_hex(12)}",
+                "conferenceSolutionKey": {"type": "hangoutsMeet"}
+            }
+        }
+    }
+    body = _json_mod.dumps(payload).encode("utf-8")
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events?conferenceDataVersion=1&sendUpdates=all"
+    req = _urlrequest.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    })
+    with _urlrequest.urlopen(req, timeout=15) as resp:
+        event = _json_mod.loads(resp.read())
+    meet_url = event.get("hangoutLink") or ""
+    if not meet_url:
+        for ep in event.get("conferenceData", {}).get("entryPoints", []) or []:
+            if ep.get("entryPointType") == "video" and ep.get("uri"):
+                meet_url = ep.get("uri")
+                break
+    code = ""
+    if meet_url:
+        code = meet_url.rstrip("/").split("/")[-1]
+    return {"event": event, "meetUrl": meet_url, "meetingCode": code}
+
+@app.route("/api/calls/google-meet", methods=["POST"])
+@login_required
+def create_google_meet_call():
+    """Start a Google Meet from DM and post the invite into the conversation."""
+    d = request.json or {}
+    target_id = (d.get("targetId") or d.get("recipient") or "").strip()
+    call_type = (d.get("type") or "dm").strip().lower()
+    if call_type != "dm":
+        return jsonify({"error": "Only DM Google Meet calls are supported right now"}), 400
+    if not target_id:
+        return jsonify({"error": "Missing target user"}), 400
+
+    ws_id = wid()
+    me = session["user_id"]
+    with get_db() as db:
+        target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
+        sender = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+        title = (d.get("title") or f"Call with {target['name']}").strip()
+
+    access_token = session.get("google_access_token", "")
+    if not access_token:
+        return jsonify({
+            "error": "Google Calendar permission is required to create an automatic Google Meet link.",
+            "authUrl": "/api/auth/google/login",
+            "needsGoogleAuth": True
+        }), 409
+
+    try:
+        created = _create_google_meet_event(access_token, title, [target["email"]])
+    except Exception as exc:
+        log.error("[google_meet] create failed: %s", exc)
+        return jsonify({
+            "error": "Unable to create Google Meet. Please reconnect Google and try again.",
+            "authUrl": "/api/auth/google/login",
+            "needsGoogleAuth": True
+        }), 502
+
+    meet_url = created.get("meetUrl") or ""
+    meeting_code = created.get("meetingCode") or ""
+    if not meet_url:
+        return jsonify({"error": "Google did not return a Meet link"}), 502
+
+    content = f"📹 Google Meet call started\nJoin: {meet_url}"
+    if meeting_code:
+        content += f"\nCode: {meeting_code}"
+
+    mid = f"dm{int(datetime.now().timestamp()*1000)}"
+    now = ts()
+    with get_db() as db:
+        db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (mid, ws_id, me, target_id, content, 0, now, "", now, "", 0, 0, 0))
+        nid = f"n{int(datetime.now().timestamp()*1000)}"
+        sender_name = sender["name"] if sender else "Someone"
+        try:
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                       (nid, ws_id, "call", f"{sender_name} started a Google Meet call", target_id, 0, now, me))
+        except Exception:
+            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                       (nid, ws_id, "call", f"{sender_name} started a Google Meet call", target_id, 0, now))
+        row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
+
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "content": "Google Meet call started"})
+    _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
+    return jsonify({"meetUrl": meet_url, "meetingCode": meeting_code, "message": row})
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required
