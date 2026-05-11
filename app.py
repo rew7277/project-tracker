@@ -15,6 +15,7 @@ except ImportError:
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
 import socket, threading, time, webbrowser, mimetypes, base64, smtplib
 import re, struct, traceback, hmac, math, zlib, logging
+from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -646,7 +647,9 @@ import time as _time
 import threading as _cthread
 
 _CACHE: dict = {}        # {key: {"val": ..., "ts": float, "refreshing": bool}}
-_CACHE_TTL   = 5         # serve fresh data up to 5s (was 20s — caused stale UI requiring cache clear)
+_CACHE_TTL   = 30        # 30s fresh window — SSE events notify clients on mutations, so stale UI
+                         # is no longer a risk from a longer TTL. Short TTL was causing every 5s
+                         # cache-cold request to block 5s on DB, saturating the connection pool.
 _CACHE_STALE = 60        # serve stale data up to 60s while refreshing (was 120s)
 _CACHE_LOCK  = _cthread.Lock()
 
@@ -4498,58 +4501,107 @@ def get_projects_last_messages():
         return jsonify({r["project"]: r["last_ts"] for r in rows})
 
 def _fetch_app_data_from_db(ws, team_id, uid):
-    """Execute all app-data queries in ONE round-trip using a single connection.
-    pg8000 is synchronous so we batch all SELECTs through the same connection
-    object — each .run() call reuses the same TCP socket, costing only the
-    server-side execution time instead of a full network round-trip per query.
-    With Postgres on Railway US-West and users in India (~180ms RTT),
-    going from 9 separate queries to 9 queries on ONE connection saves
-    ~8 × 180ms = ~1.44s per request."""
+    """Execute all app-data queries IN PARALLEL using the connection pool.
+
+    Each query runs on its own pooled connection in a dedicated thread, so
+    total wall-clock time = max(individual query times) instead of their sum.
+
+    Previous approach: 9 sequential queries on one connection.
+    India → Railway US-West RTT ≈ 180ms → 9 × 180ms = 1.6s in network alone,
+    plus server-side execution time. Total observed: ~5s.
+
+    New approach: 9 concurrent queries, each on its own pool connection.
+    All fire simultaneously → total ≈ slowest single query (~400-600ms).
+    Expected improvement: 5s → ~0.5-1s for the cold-cache path.
+
+    Pool sizing note: this borrows up to 9 connections simultaneously per
+    app-data call. With PG_POOL_SIZE=30 and typical concurrent user counts
+    this is fine; raise PG_POOL_SIZE if you see pool exhaustion under load.
+    """
     now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Get a single pooled connection and run ALL queries on it
-    conn = _get_pool_conn()
-    try:
-        def _q(sql, params=()):
-            pg_sql, pdict = _sql_compat(sql, params)
-            rows = conn.run(pg_sql, **pdict) if pdict else conn.run(pg_sql)
-            cols = [c["name"] for c in (conn.columns or [])]
-            return [dict(zip(cols, r)) for r in (rows or [])]
+    if team_id:
+        tasks_sql    = (
+            "SELECT id,workspace_id,title,description,project,assignee,priority,stage,"
+            "created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at "
+            "FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' "
+            "ORDER BY created DESC LIMIT 300"
+        )
+        tasks_params = (ws, team_id)
+        proj_sql     = "SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 200"
+        proj_params  = (ws, team_id)
+    else:
+        tasks_sql    = (
+            "SELECT id,workspace_id,title,description,project,assignee,priority,stage,"
+            "created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at "
+            "FROM tasks WHERE workspace_id=? AND deleted_at='' "
+            "ORDER BY created DESC LIMIT 300"
+        )
+        tasks_params = (ws,)
+        proj_sql     = "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 200"
+        proj_params  = (ws,)
 
-        # Exclude avatar_data from bulk fetch — it's 20-100KB per user as base64.
-        # Avatars are served separately via /api/users/<uid>/avatar with 24h browser cache.
-        users    = _q("SELECT id,name,email,role,avatar,color,workspace_id,last_active,two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name", (ws,))
+    # Each entry: cache_result_key → (sql, params)
+    # _raw_pg is thread-safe: it borrows its own connection from the pool per call.
+    queries = {
+        "users":     (
+            "SELECT id,name,email,role,avatar,color,workspace_id,last_active,"
+            "two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",
+            (ws,)
+        ),
+        "projects":  (proj_sql,  proj_params),
+        "tasks":     (tasks_sql, tasks_params),
+        "notifs":    (
+            "SELECT * FROM notifications WHERE workspace_id=? AND user_id=? "
+            "ORDER BY ts DESC LIMIT 50",
+            (ws, uid)
+        ),
+        "dm_unread": (
+            "SELECT sender, COUNT(*) as cnt FROM direct_messages "
+            "WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",
+            (ws, uid)
+        ),
+        "workspace": ("SELECT * FROM workspaces WHERE id=?", (ws,)),
+        "teams":     ("SELECT * FROM teams WHERE workspace_id=?", (ws,)),
+        # Reduced from 200 → 100: 100 tickets is still plenty for any dashboard
+        # view and cuts the heaviest single payload in half.
+        "tickets":   (
+            "SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 100",
+            (ws,)
+        ),
+        "reminders": (
+            "SELECT * FROM reminders WHERE workspace_id=? AND user_id=? "
+            "AND remind_at>=? ORDER BY remind_at",
+            (ws, uid, now_str)
+        ),
+    }
 
-        if team_id:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 300", (ws, team_id))
-            # Exclude comments from bulk fetch — comments are a JSON blob stored inline
-            # and can be large. They are fetched on-demand when a task is opened.
-            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
-                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
-                             FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at=''
-                             ORDER BY created DESC LIMIT 500""", (ws, team_id))
-        else:
-            projects = _q("SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 300", (ws,))
-            tasks    = _q("""SELECT id,workspace_id,title,description,project,assignee,priority,stage,
-                                    created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at
-                             FROM tasks WHERE workspace_id=? AND deleted_at=''
-                             ORDER BY created DESC LIMIT 500""", (ws,))
-
-        notifs   = _q("SELECT * FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY ts DESC LIMIT 50", (ws, uid))
-        dm_unread= _q("SELECT sender,COUNT(*) as cnt FROM direct_messages WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender", (ws, uid))
-        ws_rows  = _q("SELECT * FROM workspaces WHERE id=?", (ws,))
-        teams    = _q("SELECT * FROM teams WHERE workspace_id=?", (ws,))
-        tickets  = _q("SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 200", (ws,))
-        reminders= _q("SELECT * FROM reminders WHERE workspace_id=? AND user_id=? AND remind_at>=? ORDER BY remind_at", (ws, uid, now_str))
-
-        return {
-            "users": users, "projects": projects, "tasks": tasks,
-            "notifications": notifs, "dm_unread": dm_unread,
-            "workspace": ws_rows[0] if ws_rows else {},
-            "teams": teams, "tickets": tickets, "reminders": reminders,
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        future_to_key = {
+            pool.submit(_raw_pg, sql, params, True): key
+            for key, (sql, params) in queries.items()
         }
-    finally:
-        _return_pool_conn(conn)
+        for fut in _as_completed(future_to_key):
+            key = future_to_key[fut]
+            try:
+                results[key] = fut.result() or []
+            except Exception as _e:
+                log.error("[app-data] parallel query '%s' failed: %s", key, _e)
+                results[key] = []
+
+    ws_rows = results.get("workspace", [])
+    return {
+        "users":         results.get("users",     []),
+        "projects":      results.get("projects",  []),
+        "tasks":         results.get("tasks",     []),
+        "notifications": results.get("notifs",    []),
+        "dm_unread":     results.get("dm_unread", []),
+        "workspace":     ws_rows[0] if ws_rows else {},
+        "teams":         results.get("teams",     []),
+        "tickets":       results.get("tickets",   []),
+        "reminders":     results.get("reminders", []),
+    }
 
 
 def _etag_response(result):
@@ -4732,7 +4784,8 @@ def create_project():
         # refresh to re-fetch from DB with the new project included.
         # Previously only busting 'notifs' left the appdata cache stale, causing the
         # background SWR refresh to overwrite state and make the new project disappear.
-        _cache_bust_ws(wid())
+        # Targeted bust: projects and appdata only. Tasks cache untouched (no tasks yet).
+        _cache_bust(wid(), "projects", "appdata")
         # Push SSE event so connected clients update immediately without waiting for next poll
         _sse_publish(wid(), "project_updated", {"id": pid, "action": "created"})
         return jsonify(dict(p))
@@ -4772,10 +4825,9 @@ def update_project(pid):
             for uid in newly_added:
                 _enqueue_push(push_notification_to_user, *(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
                           f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"))
-    # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
-    # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
-    # that's why added members weren't visible until cache expired.
-    _cache_bust_ws(wid())
+    # Targeted bust: projects and appdata. Member/name changes don't affect
+    # task, notification, or DM caches.
+    _cache_bust(wid(), "projects", "appdata")
     # Notify connected clients via SSE so they reload without waiting 30s
     _sse_publish(wid(), "project_updated", {"id": pid, "action": "updated"})
     return jsonify(dict(updated))
@@ -4928,9 +4980,10 @@ def create_task():
             db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
         _cache_inject_item(wid(), "tasks", dict(t))
-        # Bust full workspace cache so app-data background refresh picks up the new task.
-        # Previously only busting 'notifs' left app-data stale, causing new tasks to vanish.
-        _cache_bust_ws(wid())
+        # Targeted bust: only invalidate tasks + appdata caches.
+        # Notifications, DM, and user caches are unaffected by a new task.
+        # SSE event below notifies connected clients immediately so they refetch.
+        _cache_bust(wid(), "tasks", "appdata")
         # Push SSE event — connected clients reload immediately without polling delay
         _sse_publish(wid(), "task_updated", {"id": tid, "action": "created",
                                               "project": d.get("project", ""),
@@ -5117,7 +5170,7 @@ def update_task(tid):
                 _enqueue_push(push_notification_to_user, db, t["assignee"],
                     f"💬 Comment on: {t['title']}",
                     f"{cname}: {latest.get('text','')[:80]}", "/")
-        _cache_bust_ws(wid())
+        _cache_bust(wid(), "tasks", "appdata")
         updated_task = dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
         # Push SSE — all workspace clients get the new stage/assignee immediately
         _sse_publish(wid(), "task_updated", {"id": tid, "action": "updated",
@@ -5203,7 +5256,7 @@ def del_task(tid):
             "UPDATE tasks SET deleted_at=? WHERE id=? AND workspace_id=?",
             (deleted_ts, tid, wid())
         )
-    _cache_bust_ws(wid())
+    _cache_bust(wid(), "tasks", "appdata")
     _sse_publish(wid(), "task_updated", {"id": tid, "action": "deleted"})
     return jsonify({"ok":True,"deleted_at":deleted_ts})
 
