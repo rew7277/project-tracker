@@ -1762,7 +1762,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
   return html`
     <div class="ov" onClick=${e=>e.target===e.currentTarget&&onClose()}>
       <div class="mo fi">
-        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
           <div>
             <div style=${{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
               <!-- Type badge pill -->
@@ -3189,7 +3189,7 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,ti
             <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:8}}>
         ${stats.map((s,i)=>html`
           <div key=${i} onClick=${()=>onNav(s.nav)}
-            style=${{background:'var(--sf)',borderRadius:14,padding:'12px 14px',position:'relative',overflow:'hidden',cursor:'pointer',transition:'all .16s',border:'1px solid var(--bd2)'}}
+            style=${{background:'var(--sf)',borderRadius:16,padding:'10px 12px',position:'relative',overflow:'hidden',cursor:'pointer',transition:'all .16s',border:'1px solid var(--bd2)'}}
             onMouseEnter=${e=>{e.currentTarget.style.borderColor=s.color;e.currentTarget.style.transform='translateY(-2px)';}}
             onMouseLeave=${e=>{e.currentTarget.style.borderColor='';e.currentTarget.style.transform='';}}>
             <div style=${{position:'absolute',top:0,left:0,right:0,height:2,background:s.color,borderRadius:'16px 16px 0 0'}}></div>
@@ -3652,7 +3652,7 @@ function ProductivityView({cu,tasks,projects,users}){
                 <div style=${{fontSize:12,color:'var(--tx2)',marginTop:3}}>${selDev.role||'Team Member'}</div>
               </div>
               <div style=${{width:58,height:58,borderRadius:'50%',border:'3px solid '+selDev.scoreColor, display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column', background:'rgba(255,255,255,.03)',flexShrink:0}}>
-                <span style=${{fontSize:20,fontWeight:900,color:selDev.scoreColor,fontFamily:'monospace',lineHeight:1}}>${selDev.score}</span>
+                <span style=${{fontSize:18,fontWeight:900,color:selDev.scoreColor,fontFamily:'monospace',lineHeight:1}}>${selDev.score}</span>
                 <span style=${{fontSize:8,color:'var(--tx3)',textTransform:'uppercase'}}>score</span>
               </div>
               ${[
@@ -4175,13 +4175,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
-    const r=ev.currentTarget.getBoundingClientRect();
-    const w=176,h=196,pad=10;
-    let left=Math.min(Math.max(r.left-(w/2)+(r.width/2),pad),window.innerWidth-w-pad);
-    let top=r.bottom+8;
-    let placement='down';
-    if(top+h>window.innerHeight-pad){ top=Math.max(pad,r.top-h-8); placement='up'; }
-    setMenuPos({left,top,placement});
+    // Keep the menu anchored to the message bubble itself. The previous fixed
+    // viewport popover could feel detached on short messages near the edges.
+    setMenuPos(null);
     setMenuFor(v=>v===m.id?'':m.id);
   };
   const closeMsgOverlays=()=>{setReactionPickerFor('');setMenuFor('');setMenuPos(null);};
@@ -4509,16 +4505,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
-          <div key=${m.id} onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed)setReactionPickerFor(v=>v===m.id?'':m.id);}} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',cursor:m._pending||m._failed?'default':'pointer',animation:'dmBubbleIn .18s ease-out'}}>
+          <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
-                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
+                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
                 ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'linear-gradient(135deg, rgba(15,23,42,.94), rgba(30,41,59,.90))',backdropFilter:'blur(16px)',borderRadius:22,boxShadow:'0 20px 50px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:20,animation:'dmPickerPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
                 ${!m._pending&&!m._failed?html`<button onClick=${ev=>openMsgMenu(ev,m)} style=${{position:'absolute',top:-8,[isMe?'left':'right']:-28,border:'1px solid var(--bd)',background:'var(--sf)',color:'var(--tx2)',borderRadius:12,width:24,height:24,cursor:'pointer'}}>⋯</button>`:null}
-                ${menuFor===m.id?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'fixed',left:(menuPos&&menuPos.left)||24,top:(menuPos&&menuPos.top)||90,display:'grid',gap:8,padding:10,border:'1px solid rgba(148,163,184,.24)',background:'linear-gradient(145deg, rgba(17,24,39,.98), rgba(30,41,59,.94))',backdropFilter:'blur(22px)',borderRadius:22,boxShadow:'0 24px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04) inset',zIndex:9999,minWidth:176,animation:'dmMenuPop .18s cubic-bezier(.2,.9,.25,1.25)',overflow:'hidden'}}>
+                ${menuFor===m.id?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'calc(100% + 8px)',[isMe?'right':'left']:0,display:'grid',gap:6,padding:8,border:'1px solid rgba(148,163,184,.24)',background:'linear-gradient(145deg, rgba(17,24,39,.98), rgba(30,41,59,.94))',backdropFilter:'blur(22px)',borderRadius:18,boxShadow:'0 18px 56px rgba(0,0,0,.50), 0 0 0 1px rgba(255,255,255,.04) inset',zIndex:60,minWidth:150,animation:'dmMenuPop .18s cubic-bezier(.2,.9,.25,1.25)',overflow:'hidden'}}>
                   <button onClick=${()=>{setReplyTo(m);setMenuFor('');setMenuPos(null);}} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>↩️</span><span>Reply</span></button>
                   ${isMe&&!m.deleted?html`<button onClick=${()=>startEdit(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>✏️</span><span>Edit</span></button>`:null}
                   <button onClick=${()=>pinMessage(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>📌</span><span>${m.pinned||m.pinned===1?'Unpin':'Pin'}</span></button>
@@ -5269,21 +5265,21 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     </div>`:null;
 
   return html`
-    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',background:'var(--bg)'}}>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:10,marginBottom:14}}>
+    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'14px 18px',background:'var(--bg)'}}>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:8,marginBottom:10}}>
         ${[
           {label:'Open workload',val:unresolvedTickets,sub:'not closed/resolved',icon:'⚡',tone:'rgba(59,130,246,.14)'},
           {label:'Critical',val:criticalTickets,sub:'needs immediate action',icon:'🚨',tone:'rgba(239,68,68,.14)'},
           {label:'Unassigned',val:unassignedTickets,sub:'needs owner',icon:'👤',tone:'rgba(245,158,11,.14)'},
           {label:'My queue',val:myTicketsCount,sub:'assigned to me',icon:'🎯',tone:'rgba(139,92,246,.14)'}
-        ].map(card=>html`<div style=${{border:'1px solid var(--bd)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:14,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,boxShadow:'0 10px 30px rgba(0,0,0,.12)'}}>
-          <div style=${{width:36,height:36,borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',background:card.tone,fontSize:17}}>${card.icon}</div>
-          <div><div style=${{fontSize:20,fontWeight:900,color:'var(--tx)',lineHeight:1}}>${card.val}</div><div style=${{fontSize:11,fontWeight:800,color:'var(--tx2)'}}>${card.label}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${card.sub}</div></div>
+        ].map(card=>html`<div style=${{border:'1px solid var(--bd)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:12,boxShadow:'0 10px 30px rgba(0,0,0,.12)'}}>
+          <div style=${{width:32,height:32,borderRadius:11,display:'flex',alignItems:'center',justifyContent:'center',background:card.tone,fontSize:17}}>${card.icon}</div>
+          <div><div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',lineHeight:1}}>${card.val}</div><div style=${{fontSize:11,fontWeight:800,color:'var(--tx2)'}}>${card.label}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${card.sub}</div></div>
         </div>`)}
       </div>
 
             <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <div style=${{display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
           ${Object.entries(STATUS_CFG).map(([s,c])=>html`
             <button key=${s} class=${'chip'+(filterStatus===s?' on':'')} onClick=${()=>setFilterStatus(filterStatus===s?'':s)}
               style=${{fontSize:11,display:'flex',alignItems:'center',gap:4}}>
@@ -5295,7 +5291,7 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
         </button>
       </div>
 
-            <div style=${{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
+            <div style=${{display:'flex',gap:8,marginBottom:10,flexWrap:'wrap',alignItems:'center',padding:'8px 10px',border:'1px solid var(--bd)',background:'linear-gradient(135deg,rgba(255,255,255,.045),rgba(255,255,255,.018))',borderRadius:16,boxShadow:'inset 0 1px 0 rgba(255,255,255,.04)'}}>
         ${filterStatus?html`
           <div style=${{display:'flex',alignItems:'center',gap:6,padding:'4px 10px 4px 8px',background:'var(--sf2)',border:'1px solid var(--bd)',borderRadius:20,flexShrink:0}}>
             <span style=${{fontSize:11,color:'var(--tx2)',fontWeight:600}}>${(STATUS_CFG[filterStatus]||{label:filterStatus}).icon} ${(STATUS_CFG[filterStatus]||{label:filterStatus}).label}</span>
@@ -5314,15 +5310,15 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
           onClick=${()=>setFilterAssignee(filterAssignee===cu.id?'':cu.id)}>
           👤 My Tickets ${myTicketsCount>0?html`<span style=${{fontWeight:700,marginLeft:3}}>(${myTicketsCount})</span>`:null}
         </button>
-        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30}} value=${filterPriority} onChange=${e=>setFilterPriority(e.target.value)}>
+        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:132,flex:'0 0 132px'}} value=${filterPriority} onChange=${e=>setFilterPriority(e.target.value)}>
           <option value="">All Priorities</option>
           ${Object.entries(PRIORITY_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
         </select>
-        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30}} value=${filterType} onChange=${e=>setFilterType(e.target.value)}>
+        <select class="sel" style=${{fontSize:11,padding:'5px 10px',height:30,width:120,flex:'0 0 120px'}} value=${filterType} onChange=${e=>setFilterType(e.target.value)}>
           <option value="">All Types</option>
           ${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
         </select>
-        <input class="inp" value=${ticketSearch} onInput=${e=>setTicketSearch(e.target.value)} placeholder="Search tickets..." style=${{fontSize:11,height:30,minWidth:220,flex:'1 1 220px'}}/>
+        <input class="inp" value=${ticketSearch} onInput=${e=>setTicketSearch(e.target.value)} placeholder="Search tickets..." style=${{fontSize:11,height:30,minWidth:180,maxWidth:320,flex:'1 1 220px'}}/>
         <span style=${{fontSize:11,color:'var(--tx3)',alignSelf:'center',marginLeft:4}}>${visibleTickets.length} ticket${visibleTickets.length!==1?'s':''}</span>
       </div>
 
@@ -6610,7 +6606,7 @@ function RemindersView({cu,tasks,projects,onSetReminder,onReload,initialView}){
     {label:'Upcoming',val:upcoming.length,color:'var(--cy)',bg:'rgba(34,211,238,.1)',icon:'⚡'}, {label:'Overdue',val:overdue.length,color:'var(--rd)',bg:'rgba(248,113,113,.1)',icon:'🚨'}, {label:'Completed',val:completed.length,color:'var(--gn)',bg:'rgba(74,222,128,.1)',icon:'✅'}, {label:'Today',val:active.filter(r=>{const d=new Date(r.remind_at);return d.toDateString()===now.toDateString();}).length,color:'#1d4ed8',bg:'rgba(29,78,216,0.10)',icon:'📅'}, ];
 
   return html`
-    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',background:'var(--bg)'}}>
+    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'14px 18px',background:'var(--bg)'}}>
 
       <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
         <div style=${{fontSize:13,color:'var(--tx2)'}}>Set reminders for your tasks — get notified with sound before they're due.</div>
@@ -8201,7 +8197,7 @@ function VaultView({cu}){
         <div style=${{display:'flex',alignItems:'center',gap:14}}>
           <div style=${{width:44,height:44,borderRadius:13,background:'linear-gradient(135deg,rgba(90,94,247,.3),rgba(168,85,247,.2))',border:'1.5px solid rgba(90,94,247,.45)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0,boxShadow:'0 0 24px rgba(90,94,247,.3)'}}>🔐</div>
           <div>
-            <div style=${{fontSize:20,fontWeight:900,letterSpacing:'-.5px',lineHeight:1.15}}>
+            <div style=${{fontSize:18,fontWeight:900,letterSpacing:'-.5px',lineHeight:1.15}}>
               <span style=${{background:'linear-gradient(135deg,#818cf8,#c084fc)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',backgroundClip:'text'}}>My Vault</span>
             </div>
             <div style=${{fontSize:12,color:'var(--tx2)',marginTop:2,fontWeight:500}}>Encrypted credential store · Click any cell to edit</div>
