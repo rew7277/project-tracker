@@ -2258,8 +2258,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
       }
     }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>onReload(),2000);
+    // SSE (task_updated) already triggers load() on all clients — no delay needed
     return r;
   };
   const delTask=async id=>{
@@ -2516,7 +2515,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(!Array.isArray(realProj.members)){try{realProj.members=parseIdList(realProj.members);}catch{realProj.members=[];}}
       setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
       // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
-      setTimeout(()=>reload(),2000);
+      // SSE triggers reload — no extra delay needed
     }catch(e){
       setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>!p._pending)}));
       setErr('Error creating project: '+(e.message||'Unknown error'));
@@ -2891,7 +2890,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       api.post('/api/tasks',p,{quiet:true}).then(real=>{
         if(real&&real.id){
           setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...real,_localTs:Date.now()}:t)}));
-          setTimeout(()=>reload(),1200);
+          // SSE triggers reload — no extra delay needed
         } else {
           setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
         }
@@ -2905,8 +2904,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>reload(),2000);
+    // SSE (task_updated) already triggers load() — no extra reload needed
     return r;
   };
   const delT=async id=>{
@@ -9242,6 +9240,14 @@ function App(){
                 const callerUser=data.users.find(u=>u.id===senderId);
                 if(senderId)setDmTargetUser(senderId);
               }
+            }
+            // Deep-link: route directly to the specific task or project
+            if(n.entity_id&&n.entity_type==='task'){
+              setInitialTaskId(n.entity_id);
+            } else if(n.entity_id&&n.entity_type==='project'){
+              setInitialProjectId(n.entity_id);
+            } else if(n.entity_id&&n.entity_type==='ticket'){
+              setInitialTaskId(null); // tickets view opens normally
             }
             setView(dest);
           }}

@@ -2163,7 +2163,8 @@ def init_db():
                 UNIQUE(workspace_id, message_id, user_id, emoji));
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, content TEXT,
-                user_id TEXT, read INTEGER DEFAULT 0, ts TEXT);
+                user_id TEXT, read INTEGER DEFAULT 0, ts TEXT,
+                entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS reminders (
                 id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT,
                 task_id TEXT, task_title TEXT, remind_at TEXT,
@@ -2335,6 +2336,8 @@ def init_db():
             # ── Enhanced audit log ──
             "ALTER TABLE audit_log ADD COLUMN entity_type TEXT DEFAULT ''",
             "ALTER TABLE audit_log ADD COLUMN entity_id TEXT DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN entity_id TEXT DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN entity_type TEXT DEFAULT ''",
             "ALTER TABLE audit_log ADD COLUMN old_value TEXT DEFAULT ''",
             "ALTER TABLE audit_log ADD COLUMN new_value TEXT DEFAULT ''",
             # ── Time tracking ──
@@ -4631,11 +4634,11 @@ def create_project():
         for uid in members:
             if uid != session["user_id"]:
                 nid=f"n{int(datetime.now().timestamp()*1000)}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                           (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts()))
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                           (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts(),pid,'project'))
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
-                          f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
+                          f"{cname} added you to '{d['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
         # Inject into appdata cache FIRST so workers with stale cache get the new project immediately.
         _cache_inject_item(wid(), "projects", dict(p))
         # Bust the FULL workspace cache — this forces the next /api/app-data background
@@ -4676,12 +4679,13 @@ def update_project(pid):
             placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(newly_added))
             flat=[v for i,uid in enumerate(newly_added)
                   for v in (f"n{base_ts+i}",wid(),"project_added",
-                            f"{aname} added you to project '{updated['name']}'",uid,0,ts())]
+                            f"{aname} added you to project '{updated['name']}'",uid,0,ts(),pid,'project')]
+            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(newly_added))
             db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
             for uid in newly_added:
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
-                          f"{aname} added you to '{updated['name']}'","/"),daemon=True).start()
+                          f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
     # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
     # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
     # that's why added members weren't visible until cache expired.
@@ -4806,17 +4810,18 @@ def create_task():
         notif_rows=[]
         if assignee_user:
             notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
-                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
+                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts(),tid,'task'))
         for i,uid in enumerate(proj_members):
             if uid==session["user_id"] or uid==d.get("assignee"): continue
             proj_name=proj["name"] if proj else ""
             notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
-                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts()))
+                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts(),tid,'task'))
         if notif_rows:
-            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(notif_rows))
+            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
             flat=[v for row in notif_rows for v in row]
             db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
         # Send emails + push notifications in background threads (non-blocking)
+        _task_url=f"/?action=task&id={tid}"
         if assignee_user:
             if assignee_user["email"]:
                 threading.Thread(target=send_task_assigned_email,
@@ -4824,13 +4829,13 @@ def create_task():
                     daemon=True).start()
             threading.Thread(target=push_notification_to_user,
                 args=(db,d["assignee"],f"✅ New task assigned: {d['title']}",
-                      f"{cname} assigned you this task [{d.get('priority','medium')}]","/"),
+                      f"{cname} assigned you this task [{d.get('priority','medium')}]",_task_url),
                 daemon=True).start()
         for uid in proj_members:
             if uid==session["user_id"] or uid==d.get("assignee"): continue
             threading.Thread(target=push_notification_to_user,
                 args=(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
-                      f"{cname} created '{d['title']}'","/"),daemon=True).start()
+                      f"{cname} created '{d['title']}'",_task_url),daemon=True).start()
         t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
         if d.get("project") and proj:
             assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
@@ -4958,9 +4963,9 @@ def update_task(tid):
                                 daemon=True).start()
             if t["assignee"]:
                 nid=f"n{base_ts2}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid,wid(),"status_change",f"Task '{t['title']}' moved to {d['stage']}",
-                            t["assignee"],0,ts()))
+                            t["assignee"],0,ts(),tid,'task'))
                 assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
                 changer_user=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
                 changer_name=changer_user["name"] if changer_user else "Someone"
@@ -4970,7 +4975,7 @@ def update_task(tid):
                         daemon=True).start()
                 threading.Thread(target=push_notification_to_user,
                     args=(db, t["assignee"], f"🔄 Task updated: {t['title']}",
-                          f"{changer_name} moved it to {d['stage']}", "/"),
+                          f"{changer_name} moved it to {d['stage']}", f"/?action=task&id={tid}"),
                     daemon=True).start()
             if t["project"]:
                 proj=db.execute("SELECT members FROM projects WHERE id=? AND workspace_id=?",(t["project"],wid())).fetchone()
@@ -4982,11 +4987,11 @@ def update_task(tid):
                     for i2,uid in enumerate(members):
                         if uid==session["user_id"] or uid==t["assignee"]: continue
                         nid2=f"n{base_ts2+20+i2}"
-                        db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                                   (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts()))
+                        db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                                   (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts(),tid,'task'))
                         threading.Thread(target=push_notification_to_user,
                             args=(db, uid, f"🔄 {t['title']} → {d['stage']}",
-                                  f"{aname} updated the task stage", "/"),
+                                  f"{aname} updated the task stage", f"/?action=task&id={tid}"),
                             daemon=True).start()
                 sysmid=f"m{base_ts2+2}"
                 db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
@@ -5004,9 +5009,9 @@ def update_task(tid):
                         f"💬 **{cname}** commented on **{t['title']}**: {latest.get('text','')}",ts(),1))
             if t["assignee"] and t["assignee"]!=session["user_id"]:
                 nid2=f"n{int(datetime.now().timestamp()*1000)+4}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid2,wid(),"comment",f"{cname} commented on '{t['title']}': {latest.get('text','')}",
-                            t["assignee"],0,ts()))
+                            t["assignee"],0,ts(),tid,'task'))
                 assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
                 if assignee_user and assignee_user["email"]:
                     threading.Thread(target=send_comment_email,
@@ -5595,8 +5600,8 @@ def create_ticket():
             nid=f"n{int(datetime.now().timestamp()*1000)}"
             reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
             rname=reporter["name"] if reporter else "Someone"
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                       (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now))
+            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                       (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
             # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_tkt and assignee_tkt["email"]:
