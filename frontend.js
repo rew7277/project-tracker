@@ -129,7 +129,9 @@ const safe=a=>(Array.isArray(a)?a:[]);
 const parseMembers=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
 const normRole=r=>String(r||'').trim().toLowerCase().replace(/[\s_-]+/g,'');
 function hasOpsAccess(cu){const r=normRole(cu&&cu.role);return ['admin','owner','workspaceowner','manager','projectmanager','teamlead','superadmin'].includes(r);}
-function parseIdList(v){if(Array.isArray(v))return v;if(v==null||v==='')return [];const s=String(v).trim();if(!s)return [];if(s[0]==='['||s[0]==='{'){try{const parsed=JSON.parse(s);return Array.isArray(parsed)?parsed:[];}catch{return [];}}return s.split(',').map(x=>x.trim()).filter(Boolean);}
+function parseIdList(v){if(Array.isArray(v))return v;if(v==null||v==='')return [];const s=String(v).trim();if(!s)return [];if(s[0]==='['||s[0]==='{'){try{const parsed=JSON.parse(s);return Array.isArray(parsed)?parsed:[];}catch(e){return [];}}return s.split(',').map(x=>x.trim()).filter(Boolean);}
+function idListLen(v){return parseIdList(v).length;}
+function idListHas(v,id){return parseIdList(v).includes(id);}
 
 
 function Av({u,size=32}){
@@ -865,7 +867,7 @@ function TeamSidePanel({cu,onClose,onSelectTeam,selectedTeam,teams,users,project
   if(selectedTeam){
     const team=teams.find(t=>t.id===selectedTeam);
     if(!team)return null;
-    const memberIds=JSON.parse(team.member_ids||'[]');
+    const memberIds=parseIdList(team.member_ids);
     const lead=umap[team.lead_id];
     const members=memberIds.map(id=>umap[id]).filter(Boolean);
     const sum=dashboard&&dashboard.summary;
@@ -1010,7 +1012,7 @@ function TeamSidePanel({cu,onClose,onSelectTeam,selectedTeam,teams,users,project
             ${safe(teams).length===0?html`<div><div style=${{fontSize:28,marginBottom:6}}>🏷</div>No teams yet.${cu&&(cu.role==='Admin'||cu.role==='Manager')?html`<br/>Click <b>⚙ Manage</b> above to create teams.`:html`<br/>Ask your Admin to create teams.`}</div>`:'No teams match your search.'}
           </div>`:null}
         ${filtered.map(team=>{
-          const memberIds=JSON.parse(team.member_ids||'[]');
+          const memberIds=parseIdList(team.member_ids);
           const lead=umap[team.lead_id];
           const members=memberIds.map(id=>umap[id]).filter(Boolean);
           const teamTasks=safe(tasks).filter(t=>{
@@ -1673,7 +1675,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
   const [err,setErr]=useState('');
   const isEdit=!!(task&&task.id);
   const selectedTeam=safe(teams).find(t=>t.id===teamId);
-  const teamMemberIds=selectedTeam?JSON.parse(selectedTeam.member_ids||'[]'):null;
+  const teamMemberIds=selectedTeam?parseIdList(selectedTeam.member_ids):null;
   const assigneeOptions=teamMemberIds
     ? safe(users).filter(u=>teamMemberIds.includes(u.id))
     : safe(users);
@@ -2041,7 +2043,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const [tab,setTab]=useState('tasks');const [edit,setEdit]=useState(false);
   const [name,setName]=useState(project.name||'');const [desc,setDesc]=useState(project.description||'');
   const [tDate,setTDate]=useState(project.target_date||'');const [color,setColor]=useState(project.color||'#5a8cff');
-  const parseMems=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m);return Array.isArray(p)?p:[];}catch{return [];}};
+  const parseMems=m=>{if(Array.isArray(m))return m;try{const p=parseIdList(m);return Array.isArray(p)?p:[];}catch{return [];}};
   const [members,setMembers]=useState(parseMems(project.members));const [saving,setSaving]=useState(false);
   // Sync local members state whenever the parent reloads and passes fresh project.members
   useEffect(()=>{if(!edit)setMembers(parseMems(project.members));},[project.members,edit]);
@@ -2053,7 +2055,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     if(!tid)return;
     const team=safe(teams).find(t=>t.id===tid);
     if(!team)return;
-    const teamMids=JSON.parse(team.member_ids||'[]');
+    const teamMids=parseIdList(team.member_ids);
     setMembers(prev=>{
       const merged=[...prev];
       teamMids.forEach(mid=>{if(!merged.includes(mid))merged.push(mid);});
@@ -2155,7 +2157,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
                 <label class="lbl">Assign to Team <span style=${{fontWeight:400,color:'var(--tx3)',fontSize:10}}>(auto-adds team members)</span></label>
                 <select class="sel" value=${projTeamId} onChange=${e=>handleTeamChange(e.target.value)}>
                   <option value="">— No team —</option>
-                  ${safe(teams).map(t=>html`<option key=${t.id} value=${t.id}>${t.name} (${JSON.parse(t.member_ids||'[]').length} members)</option>`)}
+                  ${safe(teams).map(t=>html`<option key=${t.id} value=${t.id}>${t.name} (${parseIdList(t.member_ids).length} members)</option>`)}
                 </select>
               </div>
               <div><label class="lbl">Members</label><${MemberPicker} allUsers=${allUsers} selected=${members} onChange=${setMembers}/></div>
@@ -2337,7 +2339,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(projTeam){
         const team=teams.find(t=>t.id===projTeam);
         if(team){
-          const teamMids=JSON.parse(team.member_ids||'[]');
+          const teamMids=parseIdList(team.member_ids);
           teamMids.forEach(mid=>{if(!mems.includes(mid))mems.push(mid);});
         }
       }
@@ -2368,7 +2370,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       // Replace temp with real project from server (has real ID, created_at, etc.)
       const realProj={...newProj,_localTs:Date.now()};
       // Normalize members: DB returns a JSON string, card needs a real array
-      if(!Array.isArray(realProj.members)){try{realProj.members=JSON.parse(realProj.members||'[]');}catch{realProj.members=[];}}
+      if(!Array.isArray(realProj.members)){try{realProj.members=parseIdList(realProj.members);}catch{realProj.members=[];}}
       setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
       // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
       setTimeout(()=>reload(),2000);
@@ -2577,7 +2579,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
                 <select class="sel" value=${projTeam} onChange=${e=>setProjTeam(e.target.value)}>
                   <option value="">— No team —</option>
                   ${safe(teams).map(t=>{
-                    const mids=JSON.parse(t.member_ids||'[]');
+                    const mids=parseIdList(t.member_ids);
                     return html`<option key=${t.id} value=${t.id}>${t.name} (${mids.length} member${mids.length!==1?'s':''})</option>`;
                   })}
                 </select>
@@ -2645,7 +2647,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   const teamFilterMemberIds=useMemo(()=>{
     if(teamF==='all')return null;
     const team=safe(teams).find(t=>t.id===teamF);
-    return team?new Set(JSON.parse(team.member_ids||'[]')):null;
+    return team?new Set(parseIdList(team.member_ids)):null;
   },[teamF,teams]);
 
   const filtered=useMemo(()=>{
@@ -4929,7 +4931,7 @@ function TeamView({users,cu,reload,projects}){
     if(newMemberTeam&&r.id){
       const team=teams.find(t=>t.id===newMemberTeam);
       if(team){
-        const existing=JSON.parse(team.member_ids||'[]');
+        const existing=parseIdList(team.member_ids);
         if(!existing.includes(r.id)){
           await api.put('/api/teams/'+newMemberTeam,{name:team.name,lead_id:team.lead_id||'',member_ids:[...existing,r.id]});
           loadTeams();
@@ -4940,7 +4942,7 @@ function TeamView({users,cu,reload,projects}){
     if(newMemberProject&&r.id){
       const proj=safe(projects).find(p=>p.id===newMemberProject);
       if(proj){
-        const existingMems=JSON.parse(proj.members||'[]');
+        const existingMems=parseIdList(proj.members);
         if(!existingMems.includes(r.id)){
           await api.put('/api/projects/'+proj.id,{name:proj.name,members:[...existingMems,r.id]});
         }
@@ -4951,7 +4953,7 @@ function TeamView({users,cu,reload,projects}){
   };
 
   const openNewTeam=()=>{setEditTeam(null);setTName('');setTLead('');setTMembers([]);setShowNewTeam(true);};
-  const openEditTeam=t=>{setEditTeam(t);setTName(t.name);setTLead(t.lead_id||'');setTMembers(JSON.parse(t.member_ids||'[]'));setShowNewTeam(true);};
+  const openEditTeam=t=>{setEditTeam(t);setTName(t.name);setTLead(t.lead_id||'');setTMembers(parseIdList(t.member_ids));setShowNewTeam(true);};
   const saveTeam=async()=>{
     if(!tName.trim())return;
     setSavingTeam(true);
@@ -5034,7 +5036,7 @@ function TeamView({users,cu,reload,projects}){
         ${filteredTeams.length===0&&teams.length>0?html`
           <div style=${{textAlign:'center',padding:'20px',color:'var(--tx3)',fontSize:13,background:'var(--sf)',borderRadius:10,border:'1px solid var(--bd)'}}>No teams match your search.</div>`:null}
         ${filteredTeams.map(t=>{
-          const members=JSON.parse(t.member_ids||'[]').map(id=>umap[id]).filter(Boolean);
+          const members=parseIdList(t.member_ids).map(id=>umap[id]).filter(Boolean);
           const lead=t.lead_id?umap[t.lead_id]:null;
           return html`
           <div key=${t.id} class="card" style=${{display:'flex',gap:14,alignItems:'flex-start'}}>
@@ -8427,6 +8429,14 @@ function App(){
     }catch(e){}
     return 'dashboard';
   });
+  // Production hard-sync: the browser URL is the source of truth on first paint.
+  // This prevents /tasks or /dashboard from staying stuck on the previous Ops view after cache/hydration.
+  useEffect(()=>{
+    try{
+      const p=window.location.pathname.replace(/^\//,'').split('/')[0].trim();
+      if(p&&VALID_VIEWS.includes(p)&&p!==view) setView(p);
+    }catch(e){}
+  },[]);
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
@@ -8946,7 +8956,7 @@ function App(){
   useEffect(()=>{
     if(!isDevRole||!cu||safe(data.teams).length===0)return;
     const myTeams=safe(data.teams).filter(t=>{
-      try{return JSON.parse(t.member_ids||'[]').includes(cu.id);}catch{return false;}
+      try{return parseIdList(t.member_ids).includes(cu.id);}catch{return false;}
     });
     if(myTeams.length===0){setDevNoTeam(true);return;}
     setDevNoTeam(false);
