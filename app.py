@@ -5495,76 +5495,36 @@ def _create_google_meet_event(access_token, title, attendee_emails=None):
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
-    """Start a Google Meet from DM and post the invite into the conversation."""
+    """Open Google Meet instant mode without Google OAuth.
+
+    Important: Google does not expose the final meeting code/link to this app
+    unless we create the Meet through Google Calendar OAuth. For a no-login
+    flow, the app opens https://meet.google.com/new and asks the user to paste
+    the generated Meet link back into the DM.
+    """
     d = request.json or {}
     target_id = (d.get("targetId") or d.get("recipient") or "").strip()
     call_type = (d.get("type") or "dm").strip().lower()
     if call_type != "dm":
-        return jsonify({"error": "Only DM Google Meet calls are supported right now"}), 400
+        return jsonify({"ok": False, "error": "Only DM Google Meet calls are supported right now"}), 400
     if not target_id:
-        return jsonify({"error": "Missing target user"}), 400
+        return jsonify({"ok": False, "error": "Missing target user"}), 400
 
     ws_id = wid()
     me = session["user_id"]
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
-        sender = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         if not target:
-            return jsonify({"error": "User not found"}), 404
-        title = (d.get("title") or f"Call with {target['name']}").strip()
+            return jsonify({"ok": False, "error": "User not found"}), 404
 
-    access_token = session.get("google_access_token", "")
-    if not access_token:
-        # Return 200 instead of 409 so the UI can show a clean "Connect Google" flow
-        # without a red failed request in the network panel. A real Meet code still
-        # requires Google Calendar OAuth; this response tells the frontend to open
-        # the Google consent screen and retry after connecting.
-        return jsonify({
-            "ok": True,
-            "needsGoogleAuth": True,
-            "authUrl": "/api/auth/google/login",
-            "message": "Google Calendar permission is required to create an automatic Google Meet link."
-        })
-
-    try:
-        created = _create_google_meet_event(access_token, title, [target["email"]])
-    except Exception as exc:
-        log.error("[google_meet] create failed: %s", exc)
-        return jsonify({
-            "error": "Unable to create Google Meet. Please reconnect Google and try again.",
-            "authUrl": "/api/auth/google/login",
-            "needsGoogleAuth": True
-        }), 502
-
-    meet_url = created.get("meetUrl") or ""
-    meeting_code = created.get("meetingCode") or ""
-    if not meet_url:
-        return jsonify({"error": "Google did not return a Meet link"}), 502
-
-    content = f"📹 Google Meet call started\nJoin: {meet_url}"
-    if meeting_code:
-        content += f"\nCode: {meeting_code}"
-
-    mid = f"dm{int(datetime.now().timestamp()*1000)}"
-    now = ts()
-    with get_db() as db:
-        db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                   (mid, ws_id, me, target_id, content, 0, now, "", now, "", 0, 0, 0))
-        nid = f"n{int(datetime.now().timestamp()*1000)}"
-        sender_name = sender["name"] if sender else "Someone"
-        try:
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                       (nid, ws_id, "call", f"{sender_name} started a Google Meet call", target_id, 0, now, me))
-        except Exception:
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                       (nid, ws_id, "call", f"{sender_name} started a Google Meet call", target_id, 0, now))
-        row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
-
-    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "content": "Google Meet call started"})
-    _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
-    return jsonify({"meetUrl": meet_url, "meetingCode": meeting_code, "message": row})
+    return jsonify({
+        "ok": True,
+        "mode": "instant",
+        "meetUrl": "https://meet.google.com/new",
+        "requiresLinkPaste": True,
+        "targetId": target_id,
+        "message": "Opening Google Meet instant meeting. Copy the generated Meet link from the new tab and paste it into this chat."
+    })
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required

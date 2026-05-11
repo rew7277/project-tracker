@@ -5343,25 +5343,17 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setStartingMeet(true);
     try{
       const data=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`},{quiet:true});
-      const needsGoogleAuth = data && (data.needsGoogleAuth || data.status===409 || (data.data&&data.data.needsGoogleAuth));
-      if(needsGoogleAuth){
-        if(confirm('To auto-generate a real Google Meet link and invite code, please connect Google Calendar once. Open Google connection now?')){
-          window.open((data.data&&data.data.authUrl)||data.authUrl||'/api/auth/google/login','_blank','noopener,noreferrer');
-        }
-        return;
-      }
       if(data&&data.ok===false){
         alert(data.error||'Unable to start Google Meet. Please try again.');
         return;
       }
-      if(data&&data.message){
-        setMsgs(prev=>{const next=[...prev,data.message];threadCache.current.set(toId,next);return next;});
-      }
-      if(data&&data.meetUrl){
-        window.open(data.meetUrl,'_blank','noopener,noreferrer');
-      }
+      const meetUrl=(data&&data.meetUrl)||'https://meet.google.com/new';
+      window.open(meetUrl,'_blank','noopener,noreferrer');
+      const hint='Google Meet is opening in a new tab. Once Google creates the meeting, copy that Meet link and paste it here so others can join.';
+      if(typeof window.showToast==='function') window.showToast(hint,'info'); else alert(hint);
     }catch(e){
-      alert('Unable to start Google Meet. Please try again.');
+      window.open('https://meet.google.com/new','_blank','noopener,noreferrer');
+      alert('Google Meet is opening in a new tab. Copy the generated Meet link and paste it here.');
     }finally{setStartingMeet(false);}
   };
   const toggleRecording=async()=>{
