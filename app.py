@@ -116,7 +116,7 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
 WORKSPACE_UPLOAD_QUOTA_BYTES = int(os.environ.get("WORKSPACE_UPLOAD_QUOTA_BYTES", str(2 * 1024 * 1024 * 1024)))
 ALLOWED_UPLOAD_EXTENSIONS = {
     ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".txt", ".md", ".csv",
-    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip"
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".webm", ".mp3", ".wav", ".m4a", ".ogg"
 }
 BLOCKED_UPLOAD_EXTENSIONS = {
     ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".sh", ".py", ".js",
@@ -2280,6 +2280,12 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_dm_sender_ws ON direct_messages(workspace_id, sender, recipient, read)",
             "CREATE TABLE IF NOT EXISTS dm_reactions (id TEXT PRIMARY KEY, workspace_id TEXT, message_id TEXT, user_id TEXT, emoji TEXT, ts TEXT, UNIQUE(workspace_id, message_id, user_id, emoji))",
             "CREATE INDEX IF NOT EXISTS idx_dm_reactions_msg ON dm_reactions(workspace_id, message_id)",
+            "ALTER TABLE direct_messages ADD COLUMN edited INTEGER DEFAULT 0",
+            "ALTER TABLE direct_messages ADD COLUMN deleted INTEGER DEFAULT 0",
+            "ALTER TABLE direct_messages ADD COLUMN pinned INTEGER DEFAULT 0",
+            "ALTER TABLE direct_messages ADD COLUMN delivered_at TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN seen_at TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN reply_to TEXT DEFAULT ''",
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
@@ -5243,8 +5249,8 @@ def get_dm(other_id):
         rows=db.execute("""SELECT * FROM direct_messages
             WHERE workspace_id=? AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
             ORDER BY ts""",(ws_id,me,other_id,other_id,me)).fetchall()
-        db.execute("UPDATE direct_messages SET read=1 WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                   (ws_id,other_id,me))
+        db.execute("UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+                   (ts(),ws_id,other_id,me))
         data=_attach_dm_reactions(db, ws_id, rows)
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     return jsonify(data)
@@ -5255,7 +5261,7 @@ def react_dm():
     d=request.json or {}
     msg_id=(d.get("message_id") or "").strip()
     emoji=(d.get("emoji") or "").strip()
-    allowed={"👍","❤️","😂","🤣","😮","😢","🙏","🔥","👏","👀","🚀","🎉","💯","✅"}
+    allowed={"👍","👎","❤️","😂","🤣","😮","😢","🙏","🔥","👏","👀","🚀","🎉","💯","✅","😍","🤔","🙌","💪","🤝","⭐"}
     if not msg_id or emoji not in allowed:
         return jsonify({"error":"Invalid reaction"}),400
     ws_id=wid(); me=session["user_id"]
@@ -5286,8 +5292,9 @@ def send_dm():
     if not d.get("content","").strip(): return jsonify({"error":"Empty"}),400
     mid=f"dm{int(datetime.now().timestamp()*1000)}"
     with get_db() as db:
-        db.execute("INSERT INTO direct_messages VALUES (?,?,?,?,?,?,?)",
-                   (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts()))
+        db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0))
         sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
         sender_name=sender["name"] if sender else "Someone"
         nid=f"n{int(datetime.now().timestamp()*1000)}"
@@ -5306,6 +5313,63 @@ def send_dm():
     _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"], "content": preview})
     _sse_publish(wid(), "notification_updated", {"reason": "dm", "sender": session["user_id"], "recipient": d["recipient"]})
     return jsonify(row)
+
+
+def _get_dm_message_with_reactions(db, ws_id, mid):
+    rows=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchall()
+    return _attach_dm_reactions(db, ws_id, rows)[0] if rows else None
+
+@app.route("/api/dm/edit",methods=["POST"])
+@login_required
+def edit_dm():
+    d=request.json or {}
+    mid=(d.get("message_id") or "").strip(); content=(d.get("content") or "").strip()
+    if not mid or not content: return jsonify({"error":"Invalid edit"}),400
+    ws_id=wid(); me=session["user_id"]
+    with get_db() as db:
+        msg=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone()
+        if not msg or msg["sender"]!=me: return jsonify({"error":"Not allowed"}),403
+        db.execute("UPDATE direct_messages SET content=?, edited=1 WHERE id=? AND workspace_id=?",(content,mid,ws_id))
+        data=_get_dm_message_with_reactions(db,ws_id,mid)
+    _sse_publish(ws_id,"dm_updated",{"message":data})
+    return jsonify({"message":data})
+
+@app.route("/api/dm/delete",methods=["POST"])
+@login_required
+def delete_dm_message():
+    d=request.json or {}; mid=(d.get("message_id") or "").strip()
+    if not mid: return jsonify({"error":"Invalid message"}),400
+    ws_id=wid(); me=session["user_id"]
+    with get_db() as db:
+        msg=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone()
+        if not msg or msg["sender"]!=me: return jsonify({"error":"Not allowed"}),403
+        db.execute("UPDATE direct_messages SET content=?, deleted=1 WHERE id=? AND workspace_id=?",("This message was deleted",mid,ws_id))
+        db.execute("DELETE FROM dm_reactions WHERE workspace_id=? AND message_id=?",(ws_id,mid))
+        data=_get_dm_message_with_reactions(db,ws_id,mid)
+    _sse_publish(ws_id,"dm_deleted",{"message":data})
+    return jsonify({"message":data})
+
+@app.route("/api/dm/pin",methods=["POST"])
+@login_required
+def pin_dm_message():
+    d=request.json or {}; mid=(d.get("message_id") or "").strip(); pinned=1 if d.get("pinned") else 0
+    if not mid: return jsonify({"error":"Invalid message"}),400
+    ws_id=wid(); me=session["user_id"]
+    with get_db() as db:
+        msg=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone()
+        if not msg or (msg["sender"]!=me and msg["recipient"]!=me): return jsonify({"error":"Not allowed"}),403
+        db.execute("UPDATE direct_messages SET pinned=? WHERE id=? AND workspace_id=?",(pinned,mid,ws_id))
+        data=_get_dm_message_with_reactions(db,ws_id,mid)
+    _sse_publish(ws_id,"dm_pinned",{"message":data})
+    return jsonify({"message":data})
+
+@app.route("/api/dm/typing",methods=["POST"])
+@login_required
+def dm_typing():
+    d=request.json or {}; recipient=(d.get("recipient") or "").strip(); typing=bool(d.get("typing"))
+    if recipient:
+        _sse_publish(wid(),"dm_typing",{"sender":session["user_id"],"recipient":recipient,"typing":typing})
+    return jsonify({"ok":True})
 
 @app.route("/api/dm/unread")
 @login_required
