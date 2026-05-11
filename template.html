@@ -947,6 +947,8 @@ const PAL=['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#ec4899','#0891b2'
 const fmtD=d=>{if(!d)return'—';try{return new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});}catch(e){return d;}};
 const ago=iso=>{const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)return'just now';if(m<60)return m+'m ago';if(m<1440)return Math.floor(m/60)+'h ago';return Math.floor(m/1440)+'d ago';};
 const safe=a=>(Array.isArray(a)?a:[]);
+const normRole=r=>(r||'').toString().toLowerCase().replace(/[^a-z]/g,'');
+function hasOpsAccess(cu){const r=normRole(cu&&cu.role);return ['admin','owner','workspaceowner','manager','projectmanager','teamlead','superadmin'].includes(r);}
 // Normalize project.members: DB stores it as a JSON string, UI needs a real array
 const parseMembers=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
 
@@ -2020,7 +2022,7 @@ function PersonalTwoFAToggle({cu,setCu}){
 
 function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set(),offlineMode=false}){
   const fmtTime=s=>{const m=Math.floor(s/60);const sec=s%60;return m+':'+(sec<10?'0':'')+sec;};
-  const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
+  const isAdminManager=hasOpsAccess(cu);
   const baseView=(view||'dashboard').split(':')[0];
 
   const NAV_ICONS={
@@ -2033,7 +2035,7 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
   const adminNav=[
     {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
 
   // ── Sidebar nav reorder + pin ────────────────────────────────────────────
@@ -3884,7 +3886,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
 /* ─── Dashboard ───────────────────────────────────────────────────────────── */
 function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,tickets:propTickets}){
   const t=safe(tasks);const p=safe(projects);const u=safe(users);
-  const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
+  const isAdminManager=hasOpsAccess(cu);
   const [teamDropOpen,setTeamDropOpen]=useState(false);
   const [teamSearch,setTeamSearch]=useState('');
   const teamDropRef=useRef(null);
@@ -9294,7 +9296,7 @@ function App(){
   const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
   const [loading,setLoading]=useState(_hadSession);
   // Read initial view from URL path or ?page= param
-  const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
+  const VALID_VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
   useEffect(()=>{
     try{
@@ -9326,7 +9328,7 @@ function App(){
   });
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
-    dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',
+    dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
     messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',
     timeline:'Timeline Tracker',reminders:'Reminders',
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
@@ -9951,6 +9953,16 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
+            ${baseView==='ops'&&hasOpsAccess(cu)?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
+            ${baseView==='ops'&&!hasOpsAccess(cu)?html`
+              <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg)',padding:24}}>
+                <div style=${{maxWidth:440,textAlign:'center',padding:24,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 20px 70px rgba(0,0,0,.25)'}}>
+                  <div style=${{fontSize:42,marginBottom:10}}>🔐</div>
+                  <div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',marginBottom:8}}>Ops Center is restricted</div>
+                  <div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.6}}>This workspace-level command center is visible only for Admins, Managers, and Team Leads.</div>
+                  <button class="btn bp" style=${{marginTop:16}} onClick=${()=>setView('dashboard')}>Go to Dashboard</button>
+                </div>
+              </div>`:null}
             ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
@@ -9962,10 +9974,10 @@ function App(){
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} onNavigate=${setView}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
-            ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
-            ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
+            ${baseView==='team'&&hasOpsAccess(cu)?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
+            ${baseView==='settings'&&hasOpsAccess(cu)?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
-            ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
+            ${baseView==='productivity'&&hasOpsAccess(cu)?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
             ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
             ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
             ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}

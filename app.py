@@ -6574,6 +6574,14 @@ def serve_static(fn):
     for root in [STATIC_DIR, JS_DIR, os.path.join(BASE_DIR, "pf_static")]:
         path = safe_join(root, fn)
         if path and os.path.isfile(path):
+            
+            # Always revalidate JS/CSS in production so UI fixes are not hidden by browser/CDN cache.
+            if fn.lower().endswith((".js", ".css")):
+                resp = send_from_directory(root, fn, max_age=0)
+                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                return resp
             return send_from_directory(root, fn, max_age=604800)
     if fn == "frontend.js":
         err_js = """console.error('[Project Tracker] frontend.js not found on server.');
@@ -7539,9 +7547,8 @@ def _inject_nonce(html_content):
 def _serve_html():
     """Return template.html with CSP nonce stamped onto every <script> tag."""
     nonce = getattr(_g, "csp_nonce", "")
-    if not nonce:
-        return HTML
-    return _inject_nonce(HTML)
+    body = HTML if not nonce else _inject_nonce(HTML)
+    return Response(body, mimetype="text/html", headers={"Cache-Control":"no-cache, no-store, must-revalidate", "Pragma":"no-cache", "Expires":"0"})
 
 def _serve_landing():
     """Return landing.html with CSP nonce stamped onto every <script> tag."""
