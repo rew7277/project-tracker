@@ -5041,7 +5041,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
               <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,outline:m._failed?'1px solid var(--rd)':'none'}}>${m.content}</div>
               ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':ago(m.ts)}</span>`:null}
             </div>
-          </div>`;}):null}
+          </div>`;})}
       </div>
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0}}>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>setTxt(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
