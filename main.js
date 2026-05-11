@@ -4017,6 +4017,13 @@ function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
+  const callMatch=raw.match(/https:\/\/meet\.jit\.si\/[^\s<]+/i);
+  if(callMatch || /📹\s*Instant video call/i.test(raw)){
+    const url=callMatch?callMatch[0]:'';
+    const room=(url.split('/').pop()||'').replace(/[^A-Za-z0-9_-]/g,'');
+    const link=url?`<a href="${url}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;margin-top:8px;padding:8px 12px;border-radius:999px;background:#2563eb;color:#fff;text-decoration:none;font-weight:800">Join video call</a>`:'';
+    return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:12px;background:rgba(37,99,235,.12)"><div style="display:flex;align-items:center;gap:9px;font-weight:900;margin-bottom:4px"><span style="width:30px;height:30px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#2563eb;color:white">📹</span><span>Instant video call</span></div><div style="font-size:12px;opacity:.82;line-height:1.45">No Google admin permission needed. Click join to open the call.</div>${room?`<div style="font-size:11px;opacity:.7;margin-top:7px;font-family:monospace;word-break:break-all">${room}</div>`:''}${link}</div>`;
+  }
   const fileMatch=raw.match(/\/api\/files\/[A-Za-z0-9_-]+/);
   const fileUrl=fileMatch&&fileMatch[0];
   const isVoice=/🎤\s*Voice note/i.test(raw);
@@ -4690,16 +4697,21 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     try{
       const data=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`},{quiet:true});
       if(data&&data.ok===false){
-        alert(data.error||'Unable to start Google Meet. Please try again.');
+        alert(data.error||'Unable to start the video call. Please try again.');
         return;
       }
-      const meetUrl=(data&&data.meetUrl)||'https://meet.google.com/new';
-      window.open(meetUrl,'_blank','noopener,noreferrer');
-      const hint='Google Meet is opening in a new tab. Once Google creates the meeting, copy that Meet link and paste it here so others can join.';
-      if(typeof window.showToast==='function') window.showToast(hint,'info'); else alert(hint);
+      const meetUrl=data&&data.meetUrl;
+      if(meetUrl){
+        window.open(meetUrl,'_blank','noopener,noreferrer');
+        loadMsgs(toId,'video-call-created');
+        const hint=(data&&data.note)||'Video call invite sent. Opening the call in a new tab.';
+        if(typeof window.showToast==='function') window.showToast(hint,'success');
+      }else{
+        alert('Call link was not created. Please try again.');
+      }
     }catch(e){
-      window.open('https://meet.google.com/new','_blank','noopener,noreferrer');
-      alert('Google Meet is opening in a new tab. Copy the generated Meet link and paste it here.');
+      console.warn('[DM] video call failed',e);
+      alert('Unable to start the video call. Please try again.');
     }finally{setStartingMeet(false);}
   };
   const toggleRecording=async()=>{
@@ -4871,7 +4883,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         </div>
         ${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
         ${editingId?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>✎ Editing message <button style=${{float:'right'}} onClick=${()=>{setEditingId('');setTxt('');}}>×</button></div>`:null}
-        <button title="Start Google Meet" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(37,99,235,.18)':'linear-gradient(135deg,#2563eb,#7c3aed)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
+        <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(37,99,235,.18)':'linear-gradient(135deg,#2563eb,#7c3aed)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
         <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
