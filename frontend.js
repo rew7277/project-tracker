@@ -4090,7 +4090,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
   const [loading,setLoading]=useState(false);
+  const [msgThreadId,setMsgThreadId]=useState('');
+  const [sending,setSending]=useState(false);
   const ref=useRef(null);
+  const msgPaneRef=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   useEffect(()=>{activeToRef.current=toId;},[toId]);
@@ -4099,8 +4102,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
+    setMsgThreadId('');
     setMsgs([]);
     setLoading(true);
+    if(msgPaneRef.current){ msgPaneRef.current.innerHTML=''; }
     setToId(id);
   },[]);
   useEffect(()=>{
@@ -4121,23 +4126,26 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return;
     }
     if(Array.isArray(d)){
+      setMsgThreadId(id);
       setMsgs(d);
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:d.length,seq});
     }else{
+      setMsgThreadId(id);
       setMsgs([]);
       console.warn('[DM] load failed', {id,response:d});
     }
     setLoading(false);
   },[onDmRead]);
   useEffect(()=>{
-    if(!toId){setMsgs([]);setLoading(false);return;}
+    if(!toId){setMsgThreadId('');setMsgs([]);setLoading(false);return;}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
       const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
+        setMsgThreadId(requestedTo);
         setMsgs(prev=>{
           if(d.length>prev.length){playSound('notif');}
           return d;
@@ -4151,22 +4159,40 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[toId,loadMsgs,onDmRead]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
   const send=async()=>{
-    if(!txt.trim()||!toId)return;
+    if(!txt.trim()||!toId||sending)return;
     const recipient=toId;
     const c=txt.trim();
+    const tempId='tmpdm'+Date.now();
+    const optimistic={id:tempId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),_pending:true};
     setTxt('');
-    const m=await api.post('/api/dm',{recipient,content:c});
-    if(recipient===activeToRef.current&&m&&m.id){setMsgs(prev=>[...prev,m]);}
+    setSending(true);
+    setMsgThreadId(recipient);
+    setMsgs(prev=>[...prev.filter(m=>m.id!==tempId),optimistic]);
+    try{
+      const m=await api.post('/api/dm',{recipient,content:c});
+      if(recipient===activeToRef.current&&m&&m.id){
+        setMsgThreadId(recipient);
+        setMsgs(prev=>prev.map(x=>x.id===tempId?m:x));
+      }
+    }catch(e){
+      console.warn('[DM] send failed', e);
+      setMsgs(prev=>prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x));
+      setTxt(c);
+    }finally{
+      setSending(false);
+      window.dispatchEvent(new CustomEvent('pt:refresh',{detail:{type:'dm_sent',recipient}}));
+    }
   };
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
   const toUser=safe(users).find(u=>u.id===toId);
+  const visibleMsgs=(msgThreadId===toId)?msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id)):[];
   const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
   return html`<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
         ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;return html`
-          <button key=${u.id} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
+          <button key=${u.id} onMouseDown=${()=>{if(u.id!==activeToRef.current){setMsgThreadId('');setMsgs([]);if(msgPaneRef.current)msgPaneRef.current.innerHTML='';}}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:onlineUsers.has(u.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none',transition:'background .3s,box-shadow .3s'}}></div>
@@ -4190,21 +4216,21 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             <div style=${{fontSize:11,color:onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)',fontWeight:500}}>${loading?'Loading conversation…':(onlineUsers.has(toUser.id)?'Active now':'Offline')}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
       </div>
-      <div ref=${ref} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
+      <div ref=${el=>{ref.current=el;msgPaneRef.current=el;}} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
         ${loading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
-        ${!loading&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
-        ${!loading?msgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===msgs.length-1||msgs[i+1].sender!==m.sender;return html`
+        ${!loading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+        ${!loading?visibleMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===visibleMsgs.length-1||visibleMsgs[i+1].sender!==m.sender;return html`
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row'}}>
-            <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||msgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
+            <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||visibleMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
-              <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3}}>${m.content}</div>
-              ${showT?html`<span style=${{fontSize:10,color:'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${ago(m.ts)}</span>`:null}
+              <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?.65:1,outline:m._failed?'1px solid var(--rd)':'none'}}>${m.content}</div>
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':ago(m.ts)}</span>`:null}
             </div>
           </div>`;}):null}
       </div>
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0}}>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>setTxt(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
-        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId}>➤</button>
+        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
       </div>
     </div>
   </div>`;
@@ -8340,7 +8366,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },120000); // SSE handles DM unread refresh; fallback only
+    },3000); // fast fallback for environments where SSE is delayed/disconnected
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -8418,7 +8444,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(pollOnce, 120000); // SSE handles notifications; fallback only
+    const id=setInterval(pollOnce, 8000); // fast fallback — SSE is primary
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 

@@ -8689,7 +8689,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(pollOnce, 120000); // SSE handles notifications; fallback only
+    const id=setInterval(pollOnce, 8000); // fast fallback — SSE is primary
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
