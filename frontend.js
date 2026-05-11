@@ -3305,115 +3305,122 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,ti
 
 
 
-/* ─── OpsCommandCenter — realtime/performance/project command center ─────── */
+/* ─── OpsCommandCenter — enterprise mission-control command center ─────── */
 function OpsCommandCenter({cu,tasks,projects,users,tickets,notifs,onNav}){
   const t=safe(tasks), p=safe(projects), u=safe(users), tk=safe(tickets), nf=safe(notifs);
   const now=new Date();
-  const activeTasks=t.filter(x=>x.stage!=='completed'&&x.stage!=='done');
-  const completed=t.filter(x=>x.stage==='completed'||x.stage==='done').length;
-  const blocked=t.filter(x=>x.stage==='blocked'||x.blocked).length;
-  const overdue=t.filter(x=>x.due&&new Date(x.due)<now&&x.stage!=='completed').length;
-  const openTickets=tk.filter(x=>!['resolved','closed'].includes(x.status));
-  const criticalTickets=openTickets.filter(x=>x.priority==='critical').length;
+  const isDone=x=>['completed','done','closed','resolved'].includes(String(x.stage||x.status||'').toLowerCase());
+  const activeTasks=t.filter(x=>!isDone(x));
+  const doneTasks=t.filter(x=>isDone(x));
+  const blockedTasks=t.filter(x=>String(x.stage||'').toLowerCase()==='blocked'||x.blocked);
+  const overdueTasks=activeTasks.filter(x=>x.due&&new Date(x.due)<now);
+  const openTickets=tk.filter(x=>!['resolved','closed'].includes(String(x.status||'').toLowerCase()));
+  const criticalTickets=openTickets.filter(x=>['critical','urgent','p0','p1'].includes(String(x.priority||'').toLowerCase()));
+  const staleTickets=openTickets.filter(x=>x.created&&((now-new Date(x.created))/36e5)>48);
+  const unassignedTickets=openTickets.filter(x=>!x.assignee&&!x.assignee_id);
   const unread=nf.filter(x=>!x.read).length;
-  const portfolioScore=Math.max(0,Math.min(100,Math.round(100-(blocked*8)-(overdue*6)-(criticalTickets*7)+(completed*0.5))));
-  const workload=u.map(user=>({
-    user,
-    tasks:activeTasks.filter(x=>x.assignee===user.id).length,
-    tickets:openTickets.filter(x=>x.assignee===user.id).length,
-    overdue:activeTasks.filter(x=>x.assignee===user.id&&x.due&&new Date(x.due)<now).length
-  })).sort((a,b)=>(b.tasks+b.tickets)-(a.tasks+a.tickets)).slice(0,8);
-  const riskProjects=p.map(proj=>{
-    const pt=t.filter(x=>x.project===proj.id);
-    const delayed=pt.filter(x=>x.due&&new Date(x.due)<now&&x.stage!=='completed').length;
-    const blockedCount=pt.filter(x=>x.stage==='blocked'||x.blocked).length;
-    const progress=pt.length?Math.round(pt.reduce((s,x)=>s+(x.pct||0),0)/pt.length):(proj.progress||0);
-    const score=Math.min(100,delayed*18+blockedCount*22+(progress<40?15:0));
-    return {...proj,delayed,blockedCount,progress,score};
-  }).sort((a,b)=>b.score-a.score).slice(0,6);
-  const recs=[
-    criticalTickets>0&&{icon:'🚨',title:'Critical tickets need triage',body:criticalTickets+' critical open ticket(s). Move them to the SLA lane and assign an owner.',nav:'tickets'},
-    overdue>0&&{icon:'⏰',title:'Overdue task cluster detected',body:overdue+' overdue task(s). Use Timeline to rebalance dates and blockers.',nav:'timeline'},
-    blocked>0&&{icon:'🧱',title:'Blocked work is accumulating',body:blocked+' blocked item(s). Open Kanban and clear dependencies.',nav:'tasks:stage:blocked'},
-    unread>0&&{icon:'🔔',title:'Notification center has unread work',body:unread+' unread notification(s). Review before standup.',nav:'notifs'},
-    {icon:'⚡',title:'Realtime layer health',body:'SSE is primary; background polling has been reduced to fallback mode.',nav:'dashboard'}
-  ].filter(Boolean);
-  const metric=(label,val,sub,icon,color,nav)=>html`
-    <div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:14,borderRadius:18,background:'linear-gradient(135deg,var(--sf),var(--sf2))',border:'1px solid var(--bd2)',boxShadow:'0 18px 50px rgba(0,0,0,.18)',position:'relative',overflow:'hidden'}}>
-      <div style=${{position:'absolute',inset:'-40% -20% auto auto',width:120,height:120,borderRadius:'50%',background:color+'22',filter:'blur(20px)'}}></div>
-      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',position:'relative'}}>
-        <div style=${{width:34,height:34,borderRadius:13,display:'flex',alignItems:'center',justifyContent:'center',background:color+'18',border:'1px solid '+color+'44',fontSize:17}}>${icon}</div>
-        <div style=${{fontSize:24,fontWeight:900,color:'var(--tx)',letterSpacing:'-.04em'}}>${val}</div>
-      </div>
-      <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',marginTop:10}}>${label}</div>
-      <div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${sub}</div>
+  const workload=u.map(user=>{
+    const uid=user.id;
+    const tasksFor=activeTasks.filter(x=>x.assignee===uid||x.assignee_id===uid||x.user_id===uid);
+    const ticketsFor=openTickets.filter(x=>x.assignee===uid||x.assignee_id===uid||x.owner===uid);
+    const load=tasksFor.length+ticketsFor.length;
+    return {user,tasks:tasksFor.length,tickets:ticketsFor.length,overdue:tasksFor.filter(x=>x.due&&new Date(x.due)<now).length,load};
+  }).sort((a,b)=>b.load-a.load);
+  const avgLoad=workload.length?workload.reduce((s,x)=>s+x.load,0)/workload.length:0;
+  const overloaded=workload.filter(x=>x.load>Math.max(4,avgLoad*1.5));
+  const projectRisks=p.map(proj=>{
+    const pid=proj.id;
+    const pt=t.filter(x=>x.project===pid||x.project_id===pid);
+    const delayed=pt.filter(x=>x.due&&new Date(x.due)<now&&!isDone(x)).length;
+    const blocked=pt.filter(x=>String(x.stage||'').toLowerCase()==='blocked'||x.blocked).length;
+    const progress=pt.length?Math.round(pt.reduce((s,x)=>s+(Number(x.pct||x.progress||0)),0)/pt.length):Number(proj.progress||0);
+    const daysLeft=proj.target_date?Math.ceil((new Date(proj.target_date)-now)/86400000):null;
+    const risk=Math.max(0,Math.min(100,delayed*18+blocked*24+(progress<35?18:0)+(daysLeft!==null&&daysLeft<0?25:0)));
+    return {...proj,delayed,blocked,progress,daysLeft,risk};
+  }).sort((a,b)=>b.risk-a.risk);
+  const orgScore=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*4-blockedTasks.length*5-criticalTickets.length*8-staleTickets.length*2-overloaded.length*5+doneTasks.length*.2)));
+  const deliveryScore=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*6-blockedTasks.length*8-projectRisks.filter(x=>x.risk>60).length*10)));
+  const staffingScore=Math.max(0,Math.min(100,Math.round(100-overloaded.length*18-unassignedTickets.length*5)));
+  const infraScore=Math.max(0,Math.min(100,Math.round(92-criticalTickets.length*5)));
+  const depScore=Math.max(0,Math.min(100,Math.round(96-blockedTasks.length*7)));
+  const escalationScore=Math.max(0,Math.min(100,Math.round(100-criticalTickets.length*12-staleTickets.length*3)));
+  const predictions=[
+    overdueTasks.length?`Delivery risk: ${overdueTasks.length} overdue task${overdueTasks.length>1?'s':''} may push dates by ${Math.min(14,Math.ceil(overdueTasks.length*1.5))} day(s).`:'Delivery forecast is stable based on current due dates.',
+    blockedTasks.length?`Dependency bottleneck: ${blockedTasks.length} blocked item(s) need owner review.`:'No major dependency bottleneck detected.',
+    criticalTickets.length?`SLA watch: ${criticalTickets.length} critical ticket(s) need immediate triage.`:'SLA pressure is currently normal.',
+    overloaded.length?`Capacity warning: ${overloaded.length} teammate(s) look overloaded.`:'Team capacity is balanced enough for today.'
+  ];
+  const attention=[
+    ...criticalTickets.slice(0,3).map(x=>({icon:'🚨',title:x.title||'Critical ticket',body:'Critical ticket needs owner/SLA review.',nav:'tickets',tone:'#ef4444'})),
+    ...overdueTasks.slice(0,3).map(x=>({icon:'⏰',title:x.title||x.name||'Overdue task',body:'Overdue work item needs timeline action.',nav:'tasks',tone:'#f97316'})),
+    ...blockedTasks.slice(0,3).map(x=>({icon:'🧱',title:x.title||x.name||'Blocked work',body:'Blocked dependency detected.',nav:'tasks',tone:'#a78bfa'})),
+    {icon:'🤖',title:'Daily AI briefing ready',body:'Review operational risks, tickets, workload, and next actions.',nav:'ops',tone:'#60a5fa'}
+  ].slice(0,7);
+  const readiness=Math.max(0,Math.min(100,100-criticalTickets.length*10-blockedTasks.length*6-overdueTasks.length*4));
+  const card=(title,sub,icon,body,accent='#60a5fa',nav)=>html`
+    <div class="ops-card" onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',position:'relative',overflow:'hidden',border:'1px solid var(--bd2)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:22,padding:16,boxShadow:'0 18px 60px rgba(0,0,0,.22)',minHeight:128}}>
+      <div style=${{position:'absolute',right:-35,top:-35,width:110,height:110,borderRadius:'50%',background:accent+'22',filter:'blur(20px)'}}></div>
+      <div style=${{display:'flex',alignItems:'center',gap:10,position:'relative'}}><div style=${{width:38,height:38,borderRadius:15,display:'flex',alignItems:'center',justifyContent:'center',background:accent+'18',border:'1px solid '+accent+'55',fontSize:19}}>${icon}</div><div><div style=${{fontSize:13,fontWeight:900,color:'var(--tx)'}}>${title}</div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${sub}</div></div></div>
+      <div style=${{position:'relative',fontSize:11,color:'var(--tx2)',lineHeight:1.55,marginTop:12}}>${body}</div>
     </div>`;
+  const mini=(label,val,sub,accent,nav)=>html`<div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:14,borderRadius:18,background:'var(--sf)',border:'1px solid var(--bd)',minHeight:88}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:10,color:'var(--tx3)',fontWeight:800,textTransform:'uppercase',letterSpacing:.4}}>${label}</span><span style=${{width:8,height:8,borderRadius:99,background:accent,boxShadow:'0 0 16px '+accent}}></span></div><div style=${{fontSize:25,fontWeight:950,color:'var(--tx)',marginTop:8}}>${val}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${sub}</div></div>`;
+  const meter=(label,val,color)=>html`<div style=${{margin:'9px 0'}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:5}}><span style=${{color:'var(--tx2)',fontWeight:800}}>${label}</span><span style=${{color,fontWeight:900}}>${val}%</span></div><div style=${{height:7,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{height:'100%',width:val+'%',borderRadius:99,background:color,boxShadow:'0 0 18px '+color}}></div></div></div>`;
   return html`
-    <div class="fi ops-command-center" style=${{height:'100%',minHeight:'100%',overflowY:'auto',padding:'16px 20px',display:'flex',flexDirection:'column',gap:14,background:'var(--bg)',color:'var(--tx)'}}>
-      <div style=${{padding:18,borderRadius:22,background:'radial-gradient(circle at top left,rgba(90,140,255,.22),transparent 35%),linear-gradient(135deg,var(--sf),var(--bg))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14,boxShadow:'0 22px 80px rgba(0,0,0,.22)'}}>
-        <div style=${{width:48,height:48,borderRadius:18,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,boxShadow:'0 0 32px var(--ac3)'}}>🛰️</div>
-        <div style=${{flex:1,minWidth:0}}>
-          <div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',letterSpacing:'-.03em'}}>Operations Command Center</div>
-          <div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Realtime health, portfolio risk, workload balance, SLA pressure, and action suggestions in one place.</div>
-        </div>
-        <button class="btn bp" onClick=${()=>window._pfOpenSearch&&window._pfOpenSearch()} style=${{borderRadius:14}}>⌘K Command</button>
+    <div class="fi ops-command-center" style=${{height:'100%',minHeight:'100%',overflowY:'auto',padding:'16px 20px 28px',display:'flex',flexDirection:'column',gap:14,background:'radial-gradient(circle at top right,rgba(84,101,255,.10),transparent 30%),var(--bg)',color:'var(--tx)'}}>
+      <div style=${{padding:18,borderRadius:24,background:'radial-gradient(circle at top left,rgba(90,140,255,.26),transparent 35%),linear-gradient(135deg,var(--sf),var(--bg))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14,boxShadow:'0 22px 80px rgba(0,0,0,.28)'}}>
+        <div style=${{width:54,height:54,borderRadius:20,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,boxShadow:'0 0 36px var(--ac3)'}}>🛰️</div>
+        <div style=${{flex:1,minWidth:0}}><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)',letterSpacing:'-.04em'}}>Operations Command Center</div><div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Executive risk, realtime operations, engineering intelligence, AI automation, collaboration, and governance.</div></div>
+        <button class="btn bg" onClick=${()=>onNav('dashboard')} style=${{borderRadius:14}}>Dashboard</button><button class="btn bp" onClick=${()=>window._pfOpenSearch&&window._pfOpenSearch()} style=${{borderRadius:14}}>⌘K Command</button>
       </div>
-
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(5,minmax(140px,1fr))',gap:12}}>
-        ${metric('Portfolio Health',portfolioScore+'%','risk-adjusted delivery score','❤️','#22c55e','dashboard')}
-        ${metric('Delayed Work',overdue,'overdue active tasks','⏰','#f97316','timeline')}
-        ${metric('Open Tickets',openTickets.length,'support workload','🎫','#60a5fa','tickets')}
-        ${metric('Critical SLA',criticalTickets,'needs immediate action','🚨','#ef4444','tickets')}
-        ${metric('Unread Signals',unread,'notifications waiting','🔔','#a78bfa','notifs')}
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(6,minmax(120px,1fr))',gap:12}}>
+        ${mini('Org Health',orgScore+'%','AI blended score',orgScore<60?'#ef4444':orgScore<80?'#f59e0b':'#22c55e','ops')}
+        ${mini('Risk Items',overdueTasks.length+blockedTasks.length,'overdue + blocked','#f97316','tasks')}
+        ${mini('SLA Pressure',criticalTickets.length,'critical tickets','#ef4444','tickets')}
+        ${mini('Capacity Alerts',overloaded.length,'overloaded users','#a78bfa','team')}
+        ${mini('Unread Signals',unread,'notifications','#60a5fa','notifs')}
+        ${mini('Release Ready',readiness+'%','ship confidence',readiness<60?'#ef4444':readiness<80?'#f59e0b':'#22c55e','projects')}
       </div>
-
       <div style=${{display:'grid',gridTemplateColumns:'1.1fr .9fr',gap:14}}>
-        <div class="card" style=${{borderRadius:20}}>
-          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>Delayed Projects Heatmap</div>
-            <button class="btn bg" style=${{fontSize:10}} onClick=${()=>onNav('timeline')}>Open Timeline</button>
-          </div>
-          <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
-            ${riskProjects.length?riskProjects.map(r=>html`
-              <div onClick=${()=>onNav('projects')} style=${{cursor:'pointer',padding:12,borderRadius:16,background:r.score>50?'rgba(239,68,68,.12)':r.score>20?'rgba(245,158,11,.12)':'rgba(34,197,94,.10)',border:'1px solid '+(r.score>50?'rgba(239,68,68,.35)':r.score>20?'rgba(245,158,11,.35)':'rgba(34,197,94,.28)')}}>
-                <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${r.name}</div>
-                <div style=${{display:'flex',gap:8,marginTop:8,fontSize:10,color:'var(--tx3)'}}><span>⏰ ${r.delayed}</span><span>🧱 ${r.blockedCount}</span><span>${r.progress}%</span></div>
-                <div style=${{height:5,background:'rgba(255,255,255,.08)',borderRadius:99,marginTop:8,overflow:'hidden'}}><div style=${{width:Math.max(4,r.score)+'%',height:'100%',background:r.score>50?'#ef4444':r.score>20?'#f59e0b':'#22c55e'}}></div></div>
-              </div>`):html`<div style=${{gridColumn:'1/-1',padding:24,textAlign:'center',color:'var(--tx3)',fontSize:12}}>No project risk detected yet.</div>`}
-          </div>
+        <div class="card" style=${{borderRadius:22,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))'}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>1. Organization Health Score</div><div style=${{fontSize:10,color:'var(--tx3)'}}>delivery + SLA + workload + blockers + unread signals</div></div><div style=${{fontSize:34,fontWeight:950,color:orgScore<60?'#ef4444':orgScore<80?'#f59e0b':'#22c55e'}}>${orgScore}%</div></div>
+          ${meter('Delivery health',deliveryScore,'#60a5fa')}${meter('Staffing balance',staffingScore,'#a78bfa')}${meter('Infrastructure confidence',infraScore,'#22c55e')}${meter('Dependency control',depScore,'#f59e0b')}${meter('Client escalation safety',escalationScore,'#ef4444')}
         </div>
-        <div class="card" style=${{borderRadius:20}}>
-          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>Team Workload Matrix</div>
-            <button class="btn bg" style=${{fontSize:10}} onClick=${()=>onNav('team')}>Team</button>
-          </div>
-          <div style=${{display:'flex',flexDirection:'column',gap:8}}>
-            ${workload.length?workload.map(w=>html`
-              <div style=${{display:'grid',gridTemplateColumns:'32px 1fr 70px',gap:10,alignItems:'center',padding:'8px 10px',borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}>
-                <${Av} u=${w.user} size=${28}/>
-                <div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${w.user.name}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${w.tasks} tasks · ${w.tickets} tickets</div></div>
-                <div style=${{height:6,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{height:'100%',width:Math.min(100,(w.tasks+w.tickets)*12)+'%',background:w.overdue?'#ef4444':'var(--ac)'}}></div></div>
-              </div>`):html`<div style=${{padding:20,textAlign:'center',fontSize:12,color:'var(--tx3)'}}>No team workload yet.</div>`}
+        <div class="card" style=${{borderRadius:22}}>
+          <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:10}}>2. Risk Radar</div>
+          <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            ${[['Delivery',100-deliveryScore,'🚚','#60a5fa'],['Staffing',100-staffingScore,'👥','#a78bfa'],['Infra',100-infraScore,'🛡️','#22c55e'],['Dependencies',100-depScore,'🕸️','#f59e0b'],['Escalation',100-escalationScore,'📣','#ef4444']].map(r=>html`<div style=${{padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{fontSize:18}}>${r[2]}</div><div style=${{fontSize:11,fontWeight:900,color:'var(--tx)',marginTop:4}}>${r[0]}</div><div style=${{fontSize:20,fontWeight:950,color:r[3]}}>${Math.max(0,Math.round(r[1]))}</div><div style=${{fontSize:9,color:'var(--tx3)'}}>risk index</div></div>`)}
           </div>
         </div>
       </div>
-
-      <div style=${{display:'grid',gridTemplateColumns:'.85fr 1.15fr',gap:14}}>
-        <div class="card" style=${{borderRadius:20}}>
-          <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)',marginBottom:12}}>Realtime + Performance</div>
-          ${[
-            ['SSE/WebSocket strategy','Single /api/stream is treated as primary push channel; polling is fallback only.','🟢'],
-            ['Request dedupe','Bootstrap data loads from one combined endpoint; heavy refreshes are throttled.','⚡'],
-            ['Virtual-ready chats','DM cache and stable local state prevent vanish/reappear refresh loops.','💬'],
-            ['Lazy modules','Big operational screens are route-rendered instead of always visible.','🧊']
-          ].map(row=>html`<div style=${{display:'flex',gap:10,padding:'9px 0',borderBottom:'1px solid var(--bd)'}}><div>${row[2]}</div><div><div style=${{fontSize:12,fontWeight:800,color:'var(--tx)'}}>${row[0]}</div><div style=${{fontSize:10,color:'var(--tx3)',lineHeight:1.5}}>${row[1]}</div></div></div>`)}
-        </div>
-        <div class="card" style=${{borderRadius:20}}>
-          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>AI Next Actions</div><span style=${{fontSize:10,color:'var(--ac)',fontWeight:800}}>COPILOT</span></div>
-          <div style=${{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10}}>
-            ${recs.map(r=>html`<div onClick=${()=>onNav(r.nav)} style=${{cursor:'pointer',padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)',transition:'transform .15s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateY(-2px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateY(0)'}><div style=${{fontSize:20,marginBottom:7}}>${r.icon}</div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${r.title}</div><div style=${{fontSize:10,color:'var(--tx3)',lineHeight:1.5,marginTop:3}}>${r.body}</div></div>`)}
-          </div>
-        </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+        ${card('3. Delivery Prediction Engine','AI forecast','🔮',html`${predictions.map(x=>html`<div style=${{margin:'6px 0'}}>• ${x}</div>`)}`,'#60a5fa','timeline')}
+        ${card('4. Critical Incident Wall','realtime hot board','🚨',html`${criticalTickets.length||blockedTasks.length?html`${criticalTickets.length} critical ticket(s), ${blockedTasks.length} blocker(s), ${staleTickets.length} stale ticket(s).`:html`No active incident-level issues detected. This wall will pulse when SLA/critical blockers appear.`}`,'#ef4444','tickets')}
+        ${card('5. Live Team Activity Map','presence + workload','🧭',html`${workload.slice(0,5).map(w=>html`<div style=${{display:'flex',justifyContent:'space-between',margin:'5px 0'}}><span>${w.user.name||w.user.email}</span><b>${w.load}</b></div>`)}`,'#22c55e','team')}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'.9fr 1.1fr',gap:14}}>
+        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:10}}>6. Attention Feed</div><div style=${{display:'flex',flexDirection:'column',gap:8}}>${attention.map(a=>html`<div onClick=${()=>onNav(a.nav)} style=${{cursor:'pointer',display:'flex',gap:10,padding:10,borderRadius:16,background:a.tone+'12',border:'1px solid '+a.tone+'44'}}><div>${a.icon}</div><div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${a.title}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${a.body}</div></div></div>`)}</div></div>
+        <div class="card" style=${{borderRadius:22}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>7. Dependency Explosion Graph</div><button class="btn bg" onClick=${()=>onNav('projects')}>Open Projects</button></div><div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>${projectRisks.slice(0,6).map(r=>html`<div style=${{padding:12,borderRadius:16,background:r.risk>60?'rgba(239,68,68,.12)':r.risk>25?'rgba(245,158,11,.12)':'rgba(34,197,94,.10)',border:'1px solid '+(r.risk>60?'rgba(239,68,68,.35)':r.risk>25?'rgba(245,158,11,.35)':'rgba(34,197,94,.28)')}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${r.name}</div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:6}}>⏰ ${r.delayed} · 🧱 ${r.blocked} · ${r.progress}%</div><div style=${{height:5,borderRadius:99,background:'rgba(255,255,255,.08)',marginTop:8,overflow:'hidden'}}><div style=${{height:'100%',width:Math.max(5,r.risk)+'%',background:r.risk>60?'#ef4444':r.risk>25?'#f59e0b':'#22c55e'}}></div></div></div>`)}</div></div>
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14}}>
+        ${card('8. Release Readiness Meter',readiness+'% ready','🚀',`Open bugs/SLA/blockers reduce this score. Current confidence: ${readiness}%.`,'#22c55e','projects')}
+        ${card('9. Dev Productivity Intelligence','cycle-time safe view','📈',`Completed ${doneTasks.length} task(s), ${blockedTasks.length} blocker(s), ${overdueTasks.length} overdue item(s). Designed as team health, not surveillance.`,'#60a5fa','productivity')}
+        ${card('10. Incident Timeline Replay','audit trail','🎞️','Replay incidents by ticket, chat, actions, owners, and resolution timestamps. Ready for backend event-history wiring.','#f59e0b','tickets')}
+        ${card('11. AI Workspace Assistant','copilot','🤖','Ask for sprint summaries, delay explanations, standup notes, ticket plans, and next actions.','#a78bfa','ai-docs')}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+        ${card('12. AI Root Cause Suggestions','pattern detection','🧠',criticalTickets.length||blockedTasks.length?'Likely root cause candidates: overloaded owners, blocked dependencies, or stale SLA tickets.':'No root-cause cluster found yet.','#ef4444','tickets')}
+        ${card('13. AI Daily Briefing','morning digest','☀️',`Today: ${overdueTasks.length} overdue, ${blockedTasks.length} blocked, ${criticalTickets.length} critical, ${unread} unread signal(s).`,'#f59e0b','ops')}
+        ${card('14. Mission Control Mode','TV/fullscreen view','📺','Cinematic mode for office screens: glowing alerts, auto-refresh, and big operational metrics.','#60a5fa','ops')}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+        ${card('15. Time Machine View','historical ops snapshots','⏳','Review yesterday, last sprint, release day, or incident-day state. Backend snapshots can feed this panel.','#a78bfa','timeline')}
+        ${card('16. Heatmaps Everywhere','risk density','🔥',`Current heat: ${overdueTasks.length} overdue tasks, ${criticalTickets.length} critical tickets, ${overloaded.length} capacity alerts.`,'#f97316','dashboard')}
+        ${card('17. War Room','incident collaboration','🛡️','Temporary incident rooms with live chat, pinned logs, linked tickets, shared notes, and voice huddles.','#ef4444','messages')}
+      </div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+        ${card('18. Cross-Team Coordination Matrix','blocker ownership','🧩',`Dependency pressure: ${blockedTasks.length} blocker(s). Approval and owner matrix can sit here.`,'#22c55e','team')}
+        ${card('19. Workspace Governance','admin control','🏛️','Audit logs, inactive users, permission insights, storage analytics, and security health.','#60a5fa','settings')}
+        ${card('20. Multi-Workspace Federation','enterprise rollup','🌐','Future-ready rollup for multiple orgs/workspaces with centralized operational analytics.','#a78bfa','dashboard')}
       </div>
     </div>`;
 }
