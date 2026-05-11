@@ -5354,14 +5354,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         alert(data.error||'Unable to start the video call. Please try again.');
         return;
       }
-      const meetUrl=data&&data.meetUrl;
+      const meetUrl=(data&&(data.launchUrl||data.meetUrl))||'https://meet.new';
       if(meetUrl){
         window.open(meetUrl,'_blank','noopener,noreferrer');
-        loadMsgs(toId,'video-call-created');
-        const hint=(data&&data.note)||'Video call invite sent. Opening the call in a new tab.';
+        loadMsgs(toId,'google-meet-launcher-opened');
+        const hint=(data&&data.note)||'Opening Google Meet. Copy the generated Meet link and paste it in this DM.';
         if(typeof window.showToast==='function') window.showToast(hint,'success');
+        else alert(hint);
       }else{
-        alert('Call link was not created. Please try again.');
+        alert('Unable to open Google Meet. Please try again.');
       }
     }catch(e){
       console.warn('[DM] video call failed',e);
@@ -10003,7 +10004,7 @@ function App(){
               const senderId=n.sender_id||n.sender||null;
               if(senderId)setDmTargetUser(senderId);
             }
-            // Call: open Jitsi with the caller directly
+            // Call: open Google Meet launcher directly
             if(n.type==='call'){
               const senderId=n.sender_id||n.sender||null;
               if(senderId){
