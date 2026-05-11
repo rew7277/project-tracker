@@ -3305,79 +3305,136 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,ti
 
 
 
-/* ─── OpsCommandCenter — clean live system view ─────────────────────────── */
+/* ─── OpsCommandCenter — production live system view ──────────────────────── */
 function OpsCommandCenter({cu,tasks,projects,users,tickets,notifs,onNav}){
   const t=safe(tasks), p=safe(projects), u=safe(users), tk=safe(tickets), nf=safe(notifs);
   const now=new Date();
-  const norm=x=>String(x||'').toLowerCase();
-  const isDone=x=>['completed','done','closed','resolved'].includes(norm(x.stage||x.status));
+  const norm=x=>String(x||'').trim().toLowerCase();
+  const toDate=x=>{if(!x)return null;const d=new Date(x);return isNaN(d.getTime())?null:d;};
+  const daysUntil=x=>{const d=toDate(x);return d?Math.ceil((d-now)/86400000):null;};
+  const sameId=(a,b)=>String(a||'')&&String(a||'')===String(b||'');
+  const getProjectId=x=>x.project_id||x.project||x.pid||'';
+  const getAssignee=x=>x.assignee_id||x.assignee||x.owner_id||x.owner||x.user_id||'';
+  const getPriority=x=>norm(x.priority||x.severity||x.impact);
+  const isDone=x=>['completed','complete','done','closed','resolved'].includes(norm(x.stage||x.status));
+  const isBlocked=x=>Boolean(x.blocked)||['blocked','on hold','waiting','dependency'].includes(norm(x.stage||x.status));
   const activeTasks=t.filter(x=>!isDone(x));
-  const overdueTasks=activeTasks.filter(x=>x.due&&new Date(x.due)<now);
-  const blockedTasks=activeTasks.filter(x=>norm(x.stage)==='blocked'||x.blocked);
-  const openTickets=tk.filter(x=>!['resolved','closed'].includes(norm(x.status)));
-  const criticalTickets=openTickets.filter(x=>['critical','urgent','p0','p1','high'].includes(norm(x.priority)));
-  const unassignedTickets=openTickets.filter(x=>!x.assignee&&!x.assignee_id&&!x.owner);
+  const doneTasks=t.filter(isDone);
+  const overdueTasks=activeTasks.filter(x=>{const d=toDate(x.due||x.due_date||x.deadline);return d&&d<now;});
+  const dueSoonTasks=activeTasks.filter(x=>{const d=daysUntil(x.due||x.due_date||x.deadline);return d!==null&&d>=0&&d<=3;});
+  const blockedTasks=activeTasks.filter(isBlocked);
+  const unassignedTasks=activeTasks.filter(x=>!getAssignee(x));
+  const reviewTasks=activeTasks.filter(x=>['review','in review','qa','testing','approval','waiting approval'].includes(norm(x.stage||x.status)));
+  const reopenedTasks=t.filter(x=>Number(x.reopen_count||x.reopened||0)>0||norm(x.status)==='reopened');
+  const staleTasks=activeTasks.filter(x=>{const d=toDate(x.updated_at||x.modified_at||x.created_at);return d&&((now-d)/86400000)>7;});
+  const openTickets=tk.filter(x=>!['resolved','closed','done'].includes(norm(x.status)));
+  const criticalTickets=openTickets.filter(x=>['critical','urgent','p0','p1','high'].includes(getPriority(x)));
+  const unassignedTickets=openTickets.filter(x=>!getAssignee(x));
+  const ticketBacklog=openTickets.length;
   const unread=nf.filter(x=>!x.read).length;
+  const urgentNotifs=nf.filter(x=>!x.read&&['critical','urgent','high','deadline','blocked'].includes(norm(x.priority||x.type))).length;
+  const onlineUsers=u.filter(x=>x.online||x.is_online||norm(x.status)==='online'||norm(x.presence)==='online').length;
+  const idleUsers=u.filter(x=>norm(x.status)==='idle'||norm(x.presence)==='idle'||x.idle).length;
+  const offlineUsers=Math.max(0,u.length-onlineUsers-idleUsers);
+  const recentUsers=u.filter(x=>{const d=toDate(x.last_seen||x.last_active||x.updated_at);return d&&((now-d)/3600000)<=24;}).length;
   const workload=u.map(user=>{
     const uid=user.id;
-    const taskCount=activeTasks.filter(x=>x.assignee===uid||x.assignee_id===uid||x.user_id===uid).length;
-    const ticketCount=openTickets.filter(x=>x.assignee===uid||x.assignee_id===uid||x.owner===uid).length;
-    return {name:user.name||user.email||uid,tasks:taskCount,tickets:ticketCount,total:taskCount+ticketCount};
+    const userTasks=activeTasks.filter(x=>sameId(getAssignee(x),uid));
+    const userTickets=openTickets.filter(x=>sameId(getAssignee(x),uid));
+    const overdue=userTasks.filter(x=>{const d=toDate(x.due||x.due_date||x.deadline);return d&&d<now;}).length;
+    const blocked=userTasks.filter(isBlocked).length;
+    const lateNight=userTasks.filter(x=>{const d=toDate(x.updated_at||x.created_at);return d&&(d.getHours()>=21||d.getHours()<6);}).length;
+    const total=userTasks.length+userTickets.length;
+    return {id:uid,name:user.name||user.email||uid,tasks:userTasks.length,tickets:userTickets.length,overdue,blocked,lateNight,total};
   }).sort((a,b)=>b.total-a.total);
-  const avg=workload.length?workload.reduce((s,x)=>s+x.total,0)/workload.length:0;
-  const overloaded=workload.filter(x=>x.total>Math.max(5,avg*1.6));
-  const projectStats=p.map(pr=>{
+  const avgLoad=workload.length?workload.reduce((s,x)=>s+x.total,0)/workload.length:0;
+  const overloaded=workload.filter(x=>x.total>Math.max(5,avgLoad*1.6)||x.overdue>=3||x.blocked>=2);
+  const underloaded=workload.filter(x=>x.total===0);
+  const projectRows=p.map(pr=>{
     const pid=pr.id;
-    const pt=t.filter(x=>x.project===pid||x.project_id===pid);
+    const pt=t.filter(x=>sameId(getProjectId(x),pid));
     const open=pt.filter(x=>!isDone(x));
     const done=pt.filter(isDone);
-    const overdue=open.filter(x=>x.due&&new Date(x.due)<now).length;
-    const blocked=open.filter(x=>norm(x.stage)==='blocked'||x.blocked).length;
+    const overdue=open.filter(x=>{const d=toDate(x.due||x.due_date||x.deadline);return d&&d<now;}).length;
+    const blocked=open.filter(isBlocked).length;
+    const unassigned=open.filter(x=>!getAssignee(x)).length;
     const progress=pt.length?Math.round(done.length*100/pt.length):Number(pr.progress||0);
-    const risk=Math.min(100,overdue*25+blocked*30+(progress<30&&pt.length?15:0));
-    return {name:pr.name||'Untitled project',open:open.length,done:done.length,overdue,blocked,progress,risk};
-  }).sort((a,b)=>b.risk-a.risk);
-  const health=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*6-blockedTasks.length*8-criticalTickets.length*10-unassignedTickets.length*3-overloaded.length*6)));
-  const status=health>=80?'Stable':health>=60?'Needs attention':'Critical';
-  const tone=health>=80?'#22c55e':health>=60?'#f59e0b':'#ef4444';
-  const actionItems=[
-    ...criticalTickets.slice(0,3).map(x=>({icon:'🚨',title:x.title||'Critical ticket',body:'Critical/high priority ticket requires triage.',nav:'tickets'})),
-    ...blockedTasks.slice(0,3).map(x=>({icon:'🧱',title:x.title||x.name||'Blocked task',body:'Blocked work item needs dependency/owner review.',nav:'tasks'})),
-    ...overdueTasks.slice(0,3).map(x=>({icon:'⏰',title:x.title||x.name||'Overdue task',body:'Overdue task needs timeline update.',nav:'tasks'})),
-    ...(unassignedTickets.length?[{icon:'👤',title:'Unassigned tickets',body:`${unassignedTickets.length} ticket(s) need an owner.`,nav:'tickets'}]:[])
-  ].slice(0,6);
-  const stat=(label,val,sub,color,nav)=>html`<div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:16,borderRadius:18,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))',border:'1px solid var(--bd2)'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:10,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.35}}>${label}</span><span style=${{width:8,height:8,borderRadius:99,background:color,boxShadow:'0 0 14px '+color}}></span></div><div style=${{fontSize:28,fontWeight:950,color:'var(--tx)',marginTop:8}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${sub}</div></div>`;
-  const bar=(label,val,color)=>html`<div style=${{margin:'10px 0'}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:6}}><b style=${{color:'var(--tx2)'}}>${label}</b><b style=${{color}}>${val}%</b></div><div style=${{height:7,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{width:Math.max(3,val)+'%',height:'100%',borderRadius:99,background:color}}></div></div></div>`;
+    const targetDays=daysUntil(pr.target_date||pr.end_date||pr.deadline);
+    const timelineRisk=targetDays!==null&&targetDays<0&&progress<100?35:targetDays!==null&&targetDays<=7&&progress<70?18:0;
+    const risk=Math.min(100,overdue*16+blocked*22+unassigned*5+timelineRisk+(progress<30&&pt.length?10:0));
+    return {id:pid,name:pr.name||'Untitled project',open:open.length,done:done.length,total:pt.length,overdue,blocked,unassigned,progress,targetDays,risk,color:pr.color||'var(--ac)'};
+  }).sort((a,b)=>b.risk-a.risk||b.open-a.open);
+  const highRiskProjects=projectRows.filter(x=>x.risk>=50);
+  const atRiskProjects=projectRows.filter(x=>x.risk>=25&&x.risk<50);
+  const totalWork=t.length+tk.length;
+  const completionRate=t.length?Math.round(doneTasks.length*100/t.length):0;
+  const health=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*4-blockedTasks.length*5-criticalTickets.length*7-highRiskProjects.length*6-unassignedTasks.length*1.5-unassignedTickets.length*3-overloaded.length*4)));
+  const deliveryConfidence=Math.max(0,Math.min(100,Math.round(100-highRiskProjects.length*10-atRiskProjects.length*4-overdueTasks.length*3-blockedTasks.length*4)));
+  const slaCompliance=Math.max(0,Math.min(100,Math.round(100-criticalTickets.length*10-overdueTasks.length*3-ticketBacklog*1.5)));
+  const communicationHealth=Math.max(0,Math.min(100,Math.round(100-unread*2-urgentNotifs*8)));
+  const capacityHealth=Math.max(0,Math.min(100,Math.round(100-overloaded.length*12-underloaded.length*2)));
+  const agingBuckets=[
+    ['0-2d',activeTasks.filter(x=>{const d=toDate(x.created_at||x.updated_at);const age=d?(now-d)/86400000:0;return age<=2;}).length],
+    ['3-7d',activeTasks.filter(x=>{const d=toDate(x.created_at||x.updated_at);const age=d?(now-d)/86400000:0;return age>2&&age<=7;}).length],
+    ['8-14d',activeTasks.filter(x=>{const d=toDate(x.created_at||x.updated_at);const age=d?(now-d)/86400000:0;return age>7&&age<=14;}).length],
+    ['15d+',activeTasks.filter(x=>{const d=toDate(x.created_at||x.updated_at);const age=d?(now-d)/86400000:0;return age>14;}).length]
+  ];
+  const stageCounts=activeTasks.reduce((m,x)=>{const k=x.stage||x.status||'open';m[k]=(m[k]||0)+1;return m;},{});
+  const bottlenecks=Object.entries(stageCounts).sort((a,b)=>b[1]-a[1]).slice(0,4);
+  const focus=[
+    ...criticalTickets.slice(0,3).map(x=>({icon:'🚨',title:x.title||x.subject||'Critical ticket',body:'High-impact ticket requires triage.',nav:'tickets'})),
+    ...blockedTasks.slice(0,3).map(x=>({icon:'🧱',title:x.title||x.name||'Blocked task',body:'Dependency or owner review needed.',nav:'tasks'})),
+    ...overdueTasks.slice(0,3).map(x=>({icon:'⏰',title:x.title||x.name||'Overdue task',body:'Timeline update or reassignment needed.',nav:'tasks'})),
+    ...dueSoonTasks.slice(0,2).map(x=>({icon:'🎯',title:x.title||x.name||'Due soon',body:'Due within the next 3 days.',nav:'tasks'})),
+    ...(unassignedTasks.length?[{icon:'👤',title:'Unassigned tasks',body:`${unassignedTasks.length} active task(s) need an owner.`,nav:'tasks'}]:[]),
+    ...(unassignedTickets.length?[{icon:'🎫',title:'Unassigned tickets',body:`${unassignedTickets.length} ticket(s) need an owner.`,nav:'tickets'}]:[])
+  ].slice(0,8);
+  const riskColor=v=>v>=75?'#22c55e':v>=55?'#f59e0b':'#ef4444';
+  const stat=(label,val,sub,color,nav)=>html`<button onClick=${()=>nav&&onNav(nav)} style=${{textAlign:'left',cursor:nav?'pointer':'default',padding:16,borderRadius:18,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.025))',border:'1px solid var(--bd2)',minHeight:106}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:10,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.35}}>${label}</span><span style=${{width:8,height:8,borderRadius:99,background:color,boxShadow:'0 0 14px '+color}}></span></div><div style=${{fontSize:27,fontWeight:950,color:'var(--tx)',marginTop:8,lineHeight:1}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)',marginTop:7}}>${sub}</div></button>`;
+  const miniBar=(label,val,color)=>html`<div style=${{margin:'9px 0'}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:6}}><b style=${{color:'var(--tx2)'}}>${label}</b><b style=${{color}}>${val}%</b></div><div style=${{height:7,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{width:Math.max(3,Math.min(100,val))+'%',height:'100%',borderRadius:99,background:color}}></div></div></div>`;
+  const panel=(title,body,sub)=>html`<div class="card" style=${{borderRadius:22,minHeight:0}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:10}}><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>${title}</div>${sub?html`<div style=${{fontSize:10,color:'var(--tx3)',fontWeight:800,textTransform:'uppercase',letterSpacing:.35}}>${sub}</div>`:null}</div>${body}</div>`;
   return html`
     <div class="fi ops-command-center" style=${{height:'100%',overflowY:'auto',padding:'16px 20px 28px',display:'flex',flexDirection:'column',gap:14,background:'var(--bg)',color:'var(--tx)'}}>
       <div style=${{padding:18,borderRadius:24,background:'linear-gradient(135deg,var(--sf),var(--sf2))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14}}>
-        <div style=${{width:52,height:52,borderRadius:18,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>📊</div>
-        <div style=${{flex:1,minWidth:0}}><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)'}}>Operations Command Center</div><div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Live workspace signals from your actual projects, tasks, tickets, notifications, and team workload.</div></div>
-        <button class="btn bg" onClick=${()=>onNav('dashboard')} style=${{borderRadius:14}}>Dashboard</button>
+        <div style=${{width:48,height:48,borderRadius:18,display:'grid',placeItems:'center',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.30)',fontSize:23}}>⌘</div>
+        <div style=${{flex:1,minWidth:0}}><div style=${{fontSize:21,fontWeight:950,color:'var(--tx)'}}>Operations Command Center</div><div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Live operational inputs from projects, tasks, tickets, notifications, team workload, deadlines, and activity. No demo data.</div></div>
+        <button class="btn bp" onClick=${()=>onNav('tasks')} style=${{fontSize:12}}>Open Work Queue</button>
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(6,minmax(130px,1fr))',gap:12}}>
-        ${stat('Health',health+'%',status,tone,'ops')}
-        ${stat('Open Projects',p.length,'active portfolio','#60a5fa','projects')}
-        ${stat('Overdue',overdueTasks.length,'tasks past due','#f97316','tasks')}
-        ${stat('Blocked',blockedTasks.length,'blocked work','#a78bfa','tasks')}
-        ${stat('Critical Tickets',criticalTickets.length,'needs triage','#ef4444','tickets')}
-        ${stat('Unread',unread,'notifications','#38bdf8','notifs')}
+
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:12}}>
+        ${stat('Portfolio Health',health+'%',health>=80?'Stable':health>=60?'Needs attention':'Critical',riskColor(health),'ops')}
+        ${stat('Delivery Confidence',deliveryConfidence+'%',`${highRiskProjects.length} high-risk project(s)`,riskColor(deliveryConfidence),'timeline')}
+        ${stat('SLA Compliance',slaCompliance+'%',`${criticalTickets.length} critical ticket(s)`,riskColor(slaCompliance),'tickets')}
+        ${stat('Capacity Health',capacityHealth+'%',`${overloaded.length} overloaded member(s)`,riskColor(capacityHealth),'team')}
+        ${stat('Communication',communicationHealth+'%',`${unread} unread · ${urgentNotifs} urgent`,riskColor(communicationHealth),'dm')}
+        ${stat('Open Work',activeTasks.length,`${overdueTasks.length} overdue · ${blockedTasks.length} blocked`,'var(--ac)','tasks')}
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-        <div class="card" style=${{borderRadius:22}}>
-          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)'}}>Workspace Health</div><div style=${{fontSize:11,color:'var(--tx3)'}}>calculated from live system data only</div></div><div style=${{fontSize:34,fontWeight:950,color:tone}}>${health}%</div></div>
-          ${bar('Delivery readiness',Math.max(0,100-overdueTasks.length*10-blockedTasks.length*12),'#60a5fa')}
-          ${bar('Ticket stability',Math.max(0,100-criticalTickets.length*18-unassignedTickets.length*6),'#22c55e')}
-          ${bar('Capacity balance',Math.max(0,100-overloaded.length*18),'#a78bfa')}
-        </div>
-        <div class="card" style=${{borderRadius:22}}>
-          <div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Action Required</div>
-          ${actionItems.length?html`<div style=${{display:'flex',flexDirection:'column',gap:9}}>${actionItems.map(a=>html`<div onClick=${()=>onNav(a.nav)} style=${{cursor:'pointer',display:'flex',gap:10,padding:11,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div>${a.icon}</div><div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${a.title}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${a.body}</div></div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No urgent operational actions right now.</div>`}
-        </div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'minmax(280px,1.1fr) minmax(280px,.9fr)',gap:14}}>
+        ${panel('Today’s Focus',focus.length?html`<div style=${{display:'flex',flexDirection:'column',gap:9}}>${focus.map(a=>html`<div onClick=${()=>onNav(a.nav)} style=${{cursor:'pointer',display:'flex',gap:10,padding:11,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{fontSize:18}}>${a.icon}</div><div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${a.title}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${a.body}</div></div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No urgent operational actions right now.</div>`, 'AI-prioritized')}
+        ${panel('Operational Scorecard',html`<div>${miniBar('Delivery confidence',deliveryConfidence,riskColor(deliveryConfidence))}${miniBar('SLA compliance',slaCompliance,riskColor(slaCompliance))}${miniBar('Communication health',communicationHealth,riskColor(communicationHealth))}${miniBar('Capacity balance',capacityHealth,riskColor(capacityHealth))}<div style=${{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:8,marginTop:12}}>${[['Done rate',completionRate+'%'],['Total signals',totalWork],['Review queue',reviewTasks.length],['Stale tasks',staleTasks.length]].map(([k,v])=>html`<div style=${{padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{fontSize:10,color:'var(--tx3)',fontWeight:800}}>${k}</div><div style=${{fontSize:18,color:'var(--tx)',fontWeight:950}}>${v}</div></div>`)}</div></div>`, '20-input model')}
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'1.1fr .9fr',gap:14}}>
-        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Project Risk</div>${projectStats.length?html`<div style=${{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10}}>${projectStats.slice(0,8).map(pr=>html`<div onClick=${()=>onNav('projects')} style=${{cursor:'pointer',padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{display:'flex',justifyContent:'space-between',gap:8}}><b style=${{fontSize:12,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${pr.name}</b><span style=${{fontSize:11,color:pr.risk>50?'#ef4444':pr.risk>20?'#f59e0b':'#22c55e'}}>${pr.risk}% risk</span></div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:6}}>Open ${pr.open} · Done ${pr.done} · Overdue ${pr.overdue} · Blocked ${pr.blocked}</div><div style=${{height:5,borderRadius:99,background:'rgba(255,255,255,.08)',marginTop:8,overflow:'hidden'}}><div style=${{height:'100%',width:pr.progress+'%',background:'var(--ac)'}}></div></div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No projects available yet.</div>`}</div>
-        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Team Workload</div>${workload.length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${workload.slice(0,8).map(w=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center',padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${w.name}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>Tasks ${w.tasks} · Tickets ${w.tickets}</div></div><b style=${{color:w.total>Math.max(5,avg*1.6)?'#ef4444':'var(--tx)'}}>${w.total}</b></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No team workload data available.</div>`}</div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:14}}>
+        ${panel('Delivery Risk Engine',projectRows.length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${projectRows.slice(0,6).map(pr=>html`<div onClick=${()=>onNav('projects')} style=${{cursor:'pointer',padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)',borderLeft:'4px solid '+(pr.risk>=50?'#ef4444':pr.risk>=25?'#f59e0b':'#22c55e')}}><div style=${{display:'flex',justifyContent:'space-between',gap:8}}><b style=${{fontSize:12,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pr.name}</b><b style=${{fontSize:12,color:pr.risk>=50?'#ef4444':pr.risk>=25?'#f59e0b':'#22c55e'}}>${pr.risk}</b></div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:4}}>Open ${pr.open} · Overdue ${pr.overdue} · Blocked ${pr.blocked} · ${pr.progress}% done</div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No project risk data available.</div>`, 'computed')}
+        ${panel('Team Capacity Matrix',workload.length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${workload.slice(0,8).map(w=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center',padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${w.name}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>Tasks ${w.tasks} · Tickets ${w.tickets} · Overdue ${w.overdue}</div></div><b style=${{color:w.total>Math.max(5,avgLoad*1.6)||w.overdue>=3?'#ef4444':w.total===0?'var(--tx3)':'var(--tx)'}}>${w.total}</b></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No team workload data available.</div>`, `${onlineUsers} online · ${idleUsers} idle`)}
+        ${panel('Task Aging Analysis',html`<div style=${{display:'flex',flexDirection:'column',gap:10}}>${agingBuckets.map(([label,count])=>{const pct=activeTasks.length?Math.round(count*100/activeTasks.length):0;return html`<div><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:5}}><b style=${{color:'var(--tx2)'}}>${label}</b><b style=${{color:'var(--tx)'}}>${count}</b></div><div style=${{height:8,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{width:Math.max(2,pct)+'%',height:'100%',background:label==='15d+'?'#ef4444':label==='8-14d'?'#f59e0b':'var(--ac)'}}></div></div></div>`;})}</div>`, 'open tasks')}
+        ${panel('Bottleneck Detector',bottlenecks.length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${bottlenecks.map(([stage,count])=>html`<div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><span style=${{fontSize:12,color:'var(--tx2)',fontWeight:850}}>${stage}</span><b style=${{fontSize:15,color:'var(--tx)'}}>${count}</b></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No stage bottlenecks detected.</div>`, 'workflow')}
+      </div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+        ${[
+          ['Real-time activity',`${onlineUsers} online`,`${recentUsers||onlineUsers} active in 24h · ${offlineUsers} offline`,'team'],
+          ['Burnout risk',overloaded.length,`${overloaded.filter(x=>x.lateNight>0).length} with late-night activity`,'team'],
+          ['Deadline prediction',`${dueSoonTasks.length} due soon`,`${overdueTasks.length} already overdue`,'timeline'],
+          ['Communication health',`${unread} unread`,`${urgentNotifs} urgent notification(s)`,'dm'],
+          ['Meeting/action load',reviewTasks.length,'Review / approval queue count','tasks'],
+          ['Backlog grooming',unassignedTasks.length,`${reopenedTasks.length} reopened · ${staleTasks.length} stale`,'tasks'],
+          ['System health signals',nf.filter(x=>['error','api_error','system','incident'].includes(norm(x.type))).length,'Error/incident notifications','dashboard'],
+          ['Smart alerts',urgentNotifs,`${criticalTickets.length} critical tickets grouped`,'dashboard'],
+          ['Operational replay',`${doneTasks.length}/${t.length}`,'Completed vs total task history','tasks'],
+          ['War room trigger',highRiskProjects.length+criticalTickets.length,`${highRiskProjects.length} risky project(s) + ${criticalTickets.length} critical ticket(s)`,'tickets']
+        ].map(([label,val,sub,nav])=>stat(label,val,sub,'var(--ac)',nav))}
       </div>
     </div>`;
 }
@@ -4182,7 +4239,7 @@ function MessagesView({projects,users,cu,tasks}){
 
             <div style=${{padding:'10px 14px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadChannelAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'8px 11px',fontSize:15,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!pid||attaching}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 17.2a2 2 0 1 1-2.83-2.83l8.49-8.49"/></svg>`}</button>
+        <button title="Attach file" class="btn" style=${{padding:'8px 11px',fontSize:15,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!pid||attaching}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'8px 11px',fontSize:15}} onClick=${()=>setShowChatEmoji(v=>!v)}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
@@ -4617,7 +4674,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         ${previewImage?html`<div onClick=${()=>setPreviewImage('')} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center'}}><img src=${previewImage} style=${{maxWidth:'88vw',maxHeight:'88vh',borderRadius:16,boxShadow:'0 30px 80px rgba(0,0,0,.6)'}}/></div>`:null}
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadDmAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 17.2a2 2 0 1 1-2.83-2.83l8.49-8.49"/></svg>`}</button>
+        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'9px 12px',fontSize:16}} onClick=${()=>setShowChatEmoji(v=>!v)} disabled=${!toId}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
