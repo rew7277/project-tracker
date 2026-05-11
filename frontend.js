@@ -1211,7 +1211,7 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
   const adminNav=[
     {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
 
   // ── Sidebar nav reorder + pin ────────────────────────────────────────────
@@ -9052,6 +9052,16 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
+            ${baseView==='ops'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
+            ${baseView==='ops'&&!(cu.role==='Admin'||cu.role==='Manager')?html`
+              <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg)',padding:24}}>
+                <div style=${{maxWidth:440,textAlign:'center',padding:24,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 20px 70px rgba(0,0,0,.25)'}}>
+                  <div style=${{fontSize:42,marginBottom:10}}>🔐</div>
+                  <div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',marginBottom:8}}>Ops Center is restricted</div>
+                  <div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.6}}>This workspace-level command center is visible only for Admins and Managers. Use Dashboard, Tickets, and Timeline for your assigned work.</div>
+                  <button class="btn bp" style=${{marginTop:16}} onClick=${()=>setView('dashboard')}>Go to Dashboard</button>
+                </div>
+              </div>`:null}
             ${baseView==='projects'?html`<${ProjectsView} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam} initialProjectId=${initialProjectId} onClearInitial=${()=>setInitialProjectId(null)}/>`:null}
             ${baseView==='tasks'?html`<${TasksView} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} cu=${cu} reload=${load} setData=${setData} onSetReminder=${t=>{setReminderTask(t);}} teams=${data.teams} activeTeam=${activeTeam}
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
