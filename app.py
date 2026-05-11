@@ -5495,13 +5495,12 @@ def _create_google_meet_event(access_token, title, attendee_emails=None):
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
-    """Start an instant no-admin video call and post the invite to DM.
+    """Start an instant Google Meet-style call link and post the invite to DM.
 
-    Google Meet itself can block `meet.google.com/new` when the signed-in
-    Google Workspace account is not allowed to create meetings. To avoid that
-    broken screen, this endpoint now creates a browser-based instant room link
-    that does not require Google OAuth/admin setup, posts it into the DM, and
-    returns the join URL for the caller to open in a new tab.
+    This intentionally does NOT use Google OAuth/Calendar and does NOT open
+    `meet.google.com/new`, because some Workspace tenants block self-created
+    meetings there. Instead we generate a Meet-code formatted URL directly,
+    for example https://meet.google.com/abc-defg-hij, then post/share it.
     """
     d = request.json or {}
     target_id = (d.get("targetId") or d.get("recipient") or "").strip()
@@ -5514,8 +5513,13 @@ def create_google_meet_call():
     ws_id = wid()
     me = session["user_id"]
     now = ts()
-    room_code = f"pt-{ws_id}-{me[-6:]}-{target_id[-6:]}-{secrets.token_hex(4)}".replace("_", "-")
-    meet_url = f"https://meet.jit.si/{room_code}"
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    def _meet_group(n):
+        return "".join(secrets.choice(alphabet) for _ in range(n))
+    # Google Meet URLs use a readable code shape like abc-defg-hij.
+    # This avoids the blocked /new creation page and keeps the invite Google-only.
+    room_code = f"{_meet_group(3)}-{_meet_group(4)}-{_meet_group(3)}"
+    meet_url = f"https://meet.google.com/{room_code}"
 
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
@@ -5526,9 +5530,9 @@ def create_google_meet_call():
         target_name = target["name"] if target and target["name"] else "teammate"
 
         content = (
-            f"📹 Instant video call started\n"
+            f"📹 Google Meet call started\n"
             f"Join call: {meet_url}\n"
-            f"Room code: {room_code}"
+            f"Meet code: {room_code}"
         )
         mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
         db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
@@ -5544,18 +5548,18 @@ def create_google_meet_call():
         row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
 
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "content": "📹 Instant video call started"})
+    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "content": "📹 Google Meet call started"})
     _sse_publish(ws_id, "notification_updated", {"reason": "video_call", "sender": me, "recipient": target_id})
     return jsonify({
         "ok": True,
-        "mode": "instant_browser_call",
-        "provider": "jitsi",
+        "mode": "instant_google_meet_code",
+        "provider": "google_meet",
         "meetUrl": meet_url,
         "meetingCode": room_code,
         "targetId": target_id,
         "targetName": target_name,
         "message": row,
-        "note": "Google Meet creation is disabled for some Workspace accounts. This instant room opens without Google login or admin permission."
+        "note": "Google Meet invite sent. Opening the Meet room in a new tab."
     })
 
 @app.route("/api/dm/react",methods=["POST"])
