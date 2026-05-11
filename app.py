@@ -1535,7 +1535,7 @@ def send_task_assigned_email(user_email, user_name, task_title, assigner_name, t
     html = _email_base(
         subject_label="TASK", accent=accent, header_icon="📋",
         header_badge="TASK ASSIGNMENT", inner_html=body,
-        cta_url=APP_URL, cta_text="Open Task Dashboard →",
+        cta_url=f"{APP_URL}/?action=task&id={task_id}", cta_text="Open Task →",
     )
     send_email(user_email, subject, html, workspace_id)
 
@@ -1603,7 +1603,7 @@ def send_status_change_email(user_email, user_name, task_title, new_stage, chang
     html = _email_base(
         subject_label="STATUS", accent=accent, header_icon=icon,
         header_badge=f"STATUS UPDATE · {label.upper()}",
-        inner_html=body, cta_url=APP_URL, cta_text="View Task →",
+        inner_html=body, cta_url=f"{APP_URL}/?action=tasks", cta_text="View Task →",
         celebration=celeb,
     )
     send_email(user_email, subject, html, workspace_id)
@@ -1644,7 +1644,7 @@ def send_comment_email(user_email, user_name, task_title, commenter_name, commen
     html = _email_base(
         subject_label="COMMENT", accent=accent, header_icon="💬",
         header_badge="NEW COMMENT", inner_html=body,
-        cta_url=APP_URL, cta_text="Reply to Comment →",
+        cta_url=f"{APP_URL}/?action=tasks", cta_text="Reply to Comment →",
     )
     send_email(user_email, subject, html, workspace_id)
 
@@ -1680,7 +1680,7 @@ def send_task_reassigned_email(user_email, user_name, task_title, assigner_name,
     html = _email_base(
         subject_label="REASSIGN", accent=accent, header_icon="🔄",
         header_badge="TASK REASSIGNMENT", inner_html=body,
-        cta_url=APP_URL, cta_text="Open Task →",
+        cta_url=f"{APP_URL}/?action=task&id={task_id}", cta_text="Open Task →",
     )
     send_email(user_email, subject, html, workspace_id)
 
@@ -1726,7 +1726,7 @@ def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_i
     html = _email_base(
         subject_label="DUE SOON", accent=accent, header_icon="⏰",
         header_badge="DUE DATE REMINDER", inner_html=body,
-        cta_url=APP_URL, cta_text="Complete Task →",
+        cta_url=f"{APP_URL}/?action=task&id={task_id}", cta_text="Complete Task →",
         warning=True,
     )
     send_email(user_email, subject, html, workspace_id)
@@ -1772,7 +1772,7 @@ def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id
     html = _email_base(
         subject_label="OVERDUE", accent=accent, header_icon="🚨",
         header_badge="OVERDUE ALERT", inner_html=body,
-        cta_url=APP_URL, cta_text="Update Task Now →",
+        cta_url=f"{APP_URL}/?action=task&id={task_id}", cta_text="Update Task Now →",
         urgent=True,
     )
     send_email(user_email, subject, html, workspace_id)
@@ -1817,7 +1817,7 @@ def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_nam
     html = _email_base(
         subject_label="TICKET", accent=accent, header_icon="🎫",
         header_badge="SUPPORT TICKET", inner_html=body,
-        cta_url=APP_URL, cta_text="View Ticket →",
+        cta_url=f"{APP_URL}/?action=ticket&id={ticket_id}", cta_text="View Ticket →",
         urgent=(priority == "critical"),
         warning=(priority == "high"),
     )
@@ -1854,7 +1854,7 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     html = _email_base(
         subject_label="TICKET", accent=accent, header_icon=icon,
         header_badge=f"TICKET {label.upper()}", inner_html=body,
-        cta_url=APP_URL, cta_text="View Ticket →",
+        cta_url=f"{APP_URL}/?action=ticket&id={ticket_id}", cta_text="View Ticket →",
         celebration=celeb,
     )
     send_email(user_email, subject, html, workspace_id)
@@ -1896,7 +1896,7 @@ def send_mention_email(user_email, user_name, mentioner_name, context_title, com
     html = _email_base(
         subject_label="MENTION", accent=accent, header_icon="💬",
         header_badge="@MENTION", inner_html=body,
-        cta_url=APP_URL, cta_text="View Thread →",
+        cta_url=f"{APP_URL}/?action=tasks", cta_text="View Thread →",
     )
     send_email(user_email, subject, html, workspace_id)
 
@@ -1939,7 +1939,7 @@ def send_task_completed_email(user_email, user_name, task_title, completer_name,
     html = _email_base(
         subject_label="COMPLETE", accent=accent, header_icon="✅",
         header_badge="TASK COMPLETED", inner_html=body,
-        cta_url=APP_URL, cta_text="View Project →",
+        cta_url=f"{APP_URL}/?action=projects", cta_text="View Project →",
         celebration=True,
     )
     send_email(user_email, subject, html, workspace_id)
@@ -2164,7 +2164,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, content TEXT,
                 user_id TEXT, read INTEGER DEFAULT 0, ts TEXT,
-                entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '');
+                entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '',
+                followup_sent INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS reminders (
                 id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT,
                 task_id TEXT, task_title TEXT, remind_at TEXT,
@@ -2338,6 +2339,7 @@ def init_db():
             "ALTER TABLE audit_log ADD COLUMN entity_id TEXT DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN entity_id TEXT DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN entity_type TEXT DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN followup_sent INTEGER DEFAULT 0",
             "ALTER TABLE audit_log ADD COLUMN old_value TEXT DEFAULT ''",
             "ALTER TABLE audit_log ADD COLUMN new_value TEXT DEFAULT ''",
             # ── Time tracking ──
@@ -7450,14 +7452,25 @@ def admin_api_add_user():
 def public_landing():
     """Serve the marketing landing page at the bare domain.
 
-    `/` should look like the public landing page, not the authenticated dashboard
-    shell. Query links such as `/?action=login` are kept as app-entry links so old
-    email/CTA URLs continue to open the sign-in screen.
+    `/` serves the landing page to unauthenticated visitors.
+    Any URL with an app-specific action param (task, project, ticket, dm, etc.)
+    always opens the SPA shell so deep-links from emails work even when already
+    logged in.  The SPA's deepLinkFromSearch() reads the ?action=task&id=... params.
     """
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     action = (request.args.get("action") or "").strip().lower()
-    if action in {"login", "signin", "sign-in", "signup", "register"}:
+    # App-entry actions — serve SPA shell (logged-in users land on their dashboard
+    # with the deep-link applied; logged-out users see the login screen)
+    _APP_ACTIONS = {
+        "login", "signin", "sign-in", "signup", "register",
+        "task", "project", "ticket", "dm", "message",
+        "reminder", "notification", "dashboard", "settings",
+    }
+    if action in _APP_ACTIONS:
+        return _serve_html()
+    # If the user is already authenticated, skip the marketing page entirely
+    if "user_id" in session:
         return _serve_html()
     return _serve_landing()
 
@@ -8606,6 +8619,102 @@ def _recurring_task_runner():
                 _raw_pg("UPDATE recurring_tasks SET last_run=?,next_run=? WHERE id=?", (today, next_run, rt["id"]))
         except Exception as e:
             log.error("[recurring] %s", e)
+
+
+# ── 10-minute unread notification follow-up emailer ──────────────────────────
+def _send_unread_followup_email(user_email, user_name, notif_type, content, entity_id, entity_type, workspace_id):
+    """Send a plain follow-up reminder for an unread notification after 10 minutes."""
+    accent = "#f59e0b"
+    subject = f"⏰ Reminder: You have an unread notification"
+    safe_user = _email_escape(user_name)
+    safe_content = _email_escape(content)
+    # Build deep-link
+    if entity_type == "task" and entity_id:
+        link = f"{APP_URL}/?action=task&id={entity_id}"
+        cta  = "Open Task →"
+    elif entity_type == "ticket" and entity_id:
+        link = f"{APP_URL}/?action=ticket&id={entity_id}"
+        cta  = "Open Ticket →"
+    elif entity_type == "project" and entity_id:
+        link = f"{APP_URL}/?action=project&id={entity_id}"
+        cta  = "Open Project →"
+    else:
+        link = f"{APP_URL}/?action=tasks"
+        cta  = "Open Dashboard →"
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:26px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        ⏰ You have an unread notification
+      </h1>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>, this notification
+        has been waiting for you for over 10 minutes.
+      </p>
+      <div style="padding:16px 20px;background:rgba(245,158,11,.08);border:1px solid
+          rgba(245,158,11,.25);border-radius:14px;font-size:14px;color:rgba(255,255,255,.8);
+          line-height:1.6;margin-bottom:20px;">
+        {safe_content}
+      </div>"""
+    html = _email_base(
+        subject_label="REMINDER", accent=accent, header_icon="⏰",
+        header_badge="UNREAD NOTIFICATION REMINDER", inner_html=body,
+        cta_url=link, cta_text=cta, warning=True,
+    )
+    send_email(user_email, subject, html, workspace_id)
+
+
+def _unread_followup_runner():
+    """Background thread: every 5 minutes, find notifications unread for >10 min
+    and send one follow-up email per user (deduped by followup_sent flag)."""
+    import time as _time
+    while True:
+        _time.sleep(300)  # run every 5 minutes
+        try:
+            cutoff = datetime.utcnow().replace(microsecond=0)
+            from dateutil.parser import parse as _parse_dt
+            # Find all workspaces
+            workspaces = _raw_pg("SELECT id FROM workspaces", (), fetch=True) or []
+            for ws in workspaces:
+                ws_id = ws["id"]
+                # Find notifications older than 10 min, unread, no followup sent yet
+                rows = _raw_pg(
+                    """SELECT n.id, n.type, n.content, n.user_id, n.ts,
+                              n.entity_id, n.entity_type,
+                              u.email, u.name
+                       FROM notifications n
+                       JOIN users u ON u.id = n.user_id
+                       WHERE n.workspace_id=?
+                         AND n.read=0
+                         AND (n.followup_sent IS NULL OR n.followup_sent=0)
+                         AND n.type IN ('task_assigned','status_change','comment','task_due','ticket_assigned')""",
+                    (ws_id,), fetch=True
+                ) or []
+                for row in rows:
+                    try:
+                        notif_ts = _parse_dt(row["ts"]).replace(tzinfo=None)
+                        age_mins = (cutoff - notif_ts).total_seconds() / 60
+                        if age_mins < 10:
+                            continue
+                        if not row["email"]:
+                            continue
+                        _send_unread_followup_email(
+                            row["email"], row["name"], row["type"],
+                            row["content"], row["entity_id"], row["entity_type"],
+                            ws_id
+                        )
+                        # Mark followup sent
+                        _raw_pg(
+                            "UPDATE notifications SET followup_sent=1 WHERE id=?",
+                            (row["id"],)
+                        )
+                    except Exception as _e:
+                        log.warning("[followup] row error: %s", _e)
+        except Exception as e:
+            log.error("[followup_runner] %s", e)
+
+
+threading.Thread(target=_unread_followup_runner, daemon=True).start()
 
 threading.Thread(target=_recurring_task_runner, daemon=True).start()
 
