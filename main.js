@@ -1761,7 +1761,7 @@ function FileAttachments({taskId,projectId,readOnly}){
       onDragOver=${e=>{e.preventDefault();setDrag(true);}} onDragLeave=${()=>setDrag(false)}
       onDrop=${e=>{e.preventDefault();setDrag(false);upload(e.dataTransfer.files);}}>
       ${busy?html`<span class="spin"></span><span style=${{marginLeft:8}}>Uploading...</span>`:
-        html`<div style=${{fontSize:22,marginBottom:6}}>📎</div><div style=${{fontWeight:500}}>Click or drag to attach files</div><div style=${{fontSize:11,marginTop:3}}>Max 150 MB</div>`}
+        html`<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{marginBottom:6}}><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 17.2a2 2 0 1 1-2.83-2.83l8.49-8.49"/></svg><div style=${{fontWeight:500}}>Click or drag to attach files</div><div style=${{fontSize:11,marginTop:3}}>Max 150 MB</div>`}
       <input ref=${ref} type="file" multiple style=${{display:'none'}} onChange=${e=>upload(e.target.files)}/></div>`:null}
     ${files.map(f=>html`
       <div key=${f.id} style=${{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',background:'var(--sf2)',borderRadius:9,border:'1px solid var(--bd)'}}>
@@ -3475,125 +3475,83 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,ti
 
 
 
-/* ─── OpsCommandCenter — enterprise mission-control command center ─────── */
+/* ─── OpsCommandCenter — clean live system view ─────────────────────────── */
 function OpsCommandCenter({cu,tasks,projects,users,tickets,notifs,onNav}){
   const t=safe(tasks), p=safe(projects), u=safe(users), tk=safe(tickets), nf=safe(notifs);
   const now=new Date();
-  const isDone=x=>['completed','done','closed','resolved'].includes(String(x.stage||x.status||'').toLowerCase());
+  const norm=x=>String(x||'').toLowerCase();
+  const isDone=x=>['completed','done','closed','resolved'].includes(norm(x.stage||x.status));
   const activeTasks=t.filter(x=>!isDone(x));
-  const doneTasks=t.filter(x=>isDone(x));
-  const blockedTasks=t.filter(x=>String(x.stage||'').toLowerCase()==='blocked'||x.blocked);
   const overdueTasks=activeTasks.filter(x=>x.due&&new Date(x.due)<now);
-  const openTickets=tk.filter(x=>!['resolved','closed'].includes(String(x.status||'').toLowerCase()));
-  const criticalTickets=openTickets.filter(x=>['critical','urgent','p0','p1'].includes(String(x.priority||'').toLowerCase()));
-  const staleTickets=openTickets.filter(x=>x.created&&((now-new Date(x.created))/36e5)>48);
-  const unassignedTickets=openTickets.filter(x=>!x.assignee&&!x.assignee_id);
+  const blockedTasks=activeTasks.filter(x=>norm(x.stage)==='blocked'||x.blocked);
+  const openTickets=tk.filter(x=>!['resolved','closed'].includes(norm(x.status)));
+  const criticalTickets=openTickets.filter(x=>['critical','urgent','p0','p1','high'].includes(norm(x.priority)));
+  const unassignedTickets=openTickets.filter(x=>!x.assignee&&!x.assignee_id&&!x.owner);
   const unread=nf.filter(x=>!x.read).length;
   const workload=u.map(user=>{
     const uid=user.id;
-    const tasksFor=activeTasks.filter(x=>x.assignee===uid||x.assignee_id===uid||x.user_id===uid);
-    const ticketsFor=openTickets.filter(x=>x.assignee===uid||x.assignee_id===uid||x.owner===uid);
-    const load=tasksFor.length+ticketsFor.length;
-    return {user,tasks:tasksFor.length,tickets:ticketsFor.length,overdue:tasksFor.filter(x=>x.due&&new Date(x.due)<now).length,load};
-  }).sort((a,b)=>b.load-a.load);
-  const avgLoad=workload.length?workload.reduce((s,x)=>s+x.load,0)/workload.length:0;
-  const overloaded=workload.filter(x=>x.load>Math.max(4,avgLoad*1.5));
-  const projectRisks=p.map(proj=>{
-    const pid=proj.id;
+    const taskCount=activeTasks.filter(x=>x.assignee===uid||x.assignee_id===uid||x.user_id===uid).length;
+    const ticketCount=openTickets.filter(x=>x.assignee===uid||x.assignee_id===uid||x.owner===uid).length;
+    return {name:user.name||user.email||uid,tasks:taskCount,tickets:ticketCount,total:taskCount+ticketCount};
+  }).sort((a,b)=>b.total-a.total);
+  const avg=workload.length?workload.reduce((s,x)=>s+x.total,0)/workload.length:0;
+  const overloaded=workload.filter(x=>x.total>Math.max(5,avg*1.6));
+  const projectStats=p.map(pr=>{
+    const pid=pr.id;
     const pt=t.filter(x=>x.project===pid||x.project_id===pid);
-    const delayed=pt.filter(x=>x.due&&new Date(x.due)<now&&!isDone(x)).length;
-    const blocked=pt.filter(x=>String(x.stage||'').toLowerCase()==='blocked'||x.blocked).length;
-    const progress=pt.length?Math.round(pt.reduce((s,x)=>s+(Number(x.pct||x.progress||0)),0)/pt.length):Number(proj.progress||0);
-    const daysLeft=proj.target_date?Math.ceil((new Date(proj.target_date)-now)/86400000):null;
-    const risk=Math.max(0,Math.min(100,delayed*18+blocked*24+(progress<35?18:0)+(daysLeft!==null&&daysLeft<0?25:0)));
-    return {...proj,delayed,blocked,progress,daysLeft,risk};
+    const open=pt.filter(x=>!isDone(x));
+    const done=pt.filter(isDone);
+    const overdue=open.filter(x=>x.due&&new Date(x.due)<now).length;
+    const blocked=open.filter(x=>norm(x.stage)==='blocked'||x.blocked).length;
+    const progress=pt.length?Math.round(done.length*100/pt.length):Number(pr.progress||0);
+    const risk=Math.min(100,overdue*25+blocked*30+(progress<30&&pt.length?15:0));
+    return {name:pr.name||'Untitled project',open:open.length,done:done.length,overdue,blocked,progress,risk};
   }).sort((a,b)=>b.risk-a.risk);
-  const orgScore=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*4-blockedTasks.length*5-criticalTickets.length*8-staleTickets.length*2-overloaded.length*5+doneTasks.length*.2)));
-  const deliveryScore=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*6-blockedTasks.length*8-projectRisks.filter(x=>x.risk>60).length*10)));
-  const staffingScore=Math.max(0,Math.min(100,Math.round(100-overloaded.length*18-unassignedTickets.length*5)));
-  const infraScore=Math.max(0,Math.min(100,Math.round(92-criticalTickets.length*5)));
-  const depScore=Math.max(0,Math.min(100,Math.round(96-blockedTasks.length*7)));
-  const escalationScore=Math.max(0,Math.min(100,Math.round(100-criticalTickets.length*12-staleTickets.length*3)));
-  const predictions=[
-    overdueTasks.length?`Delivery risk: ${overdueTasks.length} overdue task${overdueTasks.length>1?'s':''} may push dates by ${Math.min(14,Math.ceil(overdueTasks.length*1.5))} day(s).`:'Delivery forecast is stable based on current due dates.',
-    blockedTasks.length?`Dependency bottleneck: ${blockedTasks.length} blocked item(s) need owner review.`:'No major dependency bottleneck detected.',
-    criticalTickets.length?`SLA watch: ${criticalTickets.length} critical ticket(s) need immediate triage.`:'SLA pressure is currently normal.',
-    overloaded.length?`Capacity warning: ${overloaded.length} teammate(s) look overloaded.`:'Team capacity is balanced enough for today.'
-  ];
-  const attention=[
-    ...criticalTickets.slice(0,3).map(x=>({icon:'🚨',title:x.title||'Critical ticket',body:'Critical ticket needs owner/SLA review.',nav:'tickets',tone:'#ef4444'})),
-    ...overdueTasks.slice(0,3).map(x=>({icon:'⏰',title:x.title||x.name||'Overdue task',body:'Overdue work item needs timeline action.',nav:'tasks',tone:'#f97316'})),
-    ...blockedTasks.slice(0,3).map(x=>({icon:'🧱',title:x.title||x.name||'Blocked work',body:'Blocked dependency detected.',nav:'tasks',tone:'#a78bfa'})),
-    {icon:'🤖',title:'Daily AI briefing ready',body:'Review operational risks, tickets, workload, and next actions.',nav:'ops',tone:'#60a5fa'}
-  ].slice(0,7);
-  const readiness=Math.max(0,Math.min(100,100-criticalTickets.length*10-blockedTasks.length*6-overdueTasks.length*4));
-  const card=(title,sub,icon,body,accent='#60a5fa',nav)=>html`
-    <div class="ops-card" onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',position:'relative',overflow:'hidden',border:'1px solid var(--bd2)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:22,padding:16,boxShadow:'0 18px 60px rgba(0,0,0,.22)',minHeight:128}}>
-      <div style=${{position:'absolute',right:-35,top:-35,width:110,height:110,borderRadius:'50%',background:accent+'22',filter:'blur(20px)'}}></div>
-      <div style=${{display:'flex',alignItems:'center',gap:10,position:'relative'}}><div style=${{width:38,height:38,borderRadius:15,display:'flex',alignItems:'center',justifyContent:'center',background:accent+'18',border:'1px solid '+accent+'55',fontSize:19}}>${icon}</div><div><div style=${{fontSize:13,fontWeight:900,color:'var(--tx)'}}>${title}</div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${sub}</div></div></div>
-      <div style=${{position:'relative',fontSize:11,color:'var(--tx2)',lineHeight:1.55,marginTop:12}}>${body}</div>
-    </div>`;
-  const mini=(label,val,sub,accent,nav)=>html`<div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:14,borderRadius:18,background:'var(--sf)',border:'1px solid var(--bd)',minHeight:88}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:10,color:'var(--tx3)',fontWeight:800,textTransform:'uppercase',letterSpacing:.4}}>${label}</span><span style=${{width:8,height:8,borderRadius:99,background:accent,boxShadow:'0 0 16px '+accent}}></span></div><div style=${{fontSize:25,fontWeight:950,color:'var(--tx)',marginTop:8}}>${val}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${sub}</div></div>`;
-  const meter=(label,val,color)=>html`<div style=${{margin:'9px 0'}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:5}}><span style=${{color:'var(--tx2)',fontWeight:800}}>${label}</span><span style=${{color,fontWeight:900}}>${val}%</span></div><div style=${{height:7,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{height:'100%',width:val+'%',borderRadius:99,background:color,boxShadow:'0 0 18px '+color}}></div></div></div>`;
+  const health=Math.max(0,Math.min(100,Math.round(100-overdueTasks.length*6-blockedTasks.length*8-criticalTickets.length*10-unassignedTickets.length*3-overloaded.length*6)));
+  const status=health>=80?'Stable':health>=60?'Needs attention':'Critical';
+  const tone=health>=80?'#22c55e':health>=60?'#f59e0b':'#ef4444';
+  const actionItems=[
+    ...criticalTickets.slice(0,3).map(x=>({icon:'🚨',title:x.title||'Critical ticket',body:'Critical/high priority ticket requires triage.',nav:'tickets'})),
+    ...blockedTasks.slice(0,3).map(x=>({icon:'🧱',title:x.title||x.name||'Blocked task',body:'Blocked work item needs dependency/owner review.',nav:'tasks'})),
+    ...overdueTasks.slice(0,3).map(x=>({icon:'⏰',title:x.title||x.name||'Overdue task',body:'Overdue task needs timeline update.',nav:'tasks'})),
+    ...(unassignedTickets.length?[{icon:'👤',title:'Unassigned tickets',body:`${unassignedTickets.length} ticket(s) need an owner.`,nav:'tickets'}]:[])
+  ].slice(0,6);
+  const stat=(label,val,sub,color,nav)=>html`<div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:16,borderRadius:18,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))',border:'1px solid var(--bd2)'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:10,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.35}}>${label}</span><span style=${{width:8,height:8,borderRadius:99,background:color,boxShadow:'0 0 14px '+color}}></span></div><div style=${{fontSize:28,fontWeight:950,color:'var(--tx)',marginTop:8}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${sub}</div></div>`;
+  const bar=(label,val,color)=>html`<div style=${{margin:'10px 0'}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:6}}><b style=${{color:'var(--tx2)'}}>${label}</b><b style=${{color}}>${val}%</b></div><div style=${{height:7,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{width:Math.max(3,val)+'%',height:'100%',borderRadius:99,background:color}}></div></div></div>`;
   return html`
-    <div class="fi ops-command-center" style=${{height:'100%',minHeight:'100%',overflowY:'auto',padding:'16px 20px 28px',display:'flex',flexDirection:'column',gap:14,background:'radial-gradient(circle at top right,rgba(84,101,255,.10),transparent 30%),var(--bg)',color:'var(--tx)'}}>
-      <div style=${{padding:18,borderRadius:24,background:'radial-gradient(circle at top left,rgba(90,140,255,.26),transparent 35%),linear-gradient(135deg,var(--sf),var(--bg))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14,boxShadow:'0 22px 80px rgba(0,0,0,.28)'}}>
-        <div style=${{width:54,height:54,borderRadius:20,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,boxShadow:'0 0 36px var(--ac3)'}}>🛰️</div>
-        <div style=${{flex:1,minWidth:0}}><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)',letterSpacing:'-.04em'}}>Operations Command Center</div><div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Executive risk, realtime operations, engineering intelligence, AI automation, collaboration, and governance.</div></div>
-        <button class="btn bg" onClick=${()=>onNav('dashboard')} style=${{borderRadius:14}}>Dashboard</button><button class="btn bp" onClick=${()=>window._pfOpenSearch&&window._pfOpenSearch()} style=${{borderRadius:14}}>⌘K Command</button>
+    <div class="fi ops-command-center" style=${{height:'100%',overflowY:'auto',padding:'16px 20px 28px',display:'flex',flexDirection:'column',gap:14,background:'var(--bg)',color:'var(--tx)'}}>
+      <div style=${{padding:18,borderRadius:24,background:'linear-gradient(135deg,var(--sf),var(--sf2))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14}}>
+        <div style=${{width:52,height:52,borderRadius:18,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>📊</div>
+        <div style=${{flex:1,minWidth:0}}><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)'}}>Operations Command Center</div><div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Live workspace signals from your actual projects, tasks, tickets, notifications, and team workload.</div></div>
+        <button class="btn bg" onClick=${()=>onNav('dashboard')} style=${{borderRadius:14}}>Dashboard</button>
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(6,minmax(120px,1fr))',gap:12}}>
-        ${mini('Org Health',orgScore+'%','AI blended score',orgScore<60?'#ef4444':orgScore<80?'#f59e0b':'#22c55e','ops')}
-        ${mini('Risk Items',overdueTasks.length+blockedTasks.length,'overdue + blocked','#f97316','tasks')}
-        ${mini('SLA Pressure',criticalTickets.length,'critical tickets','#ef4444','tickets')}
-        ${mini('Capacity Alerts',overloaded.length,'overloaded users','#a78bfa','team')}
-        ${mini('Unread Signals',unread,'notifications','#60a5fa','notifs')}
-        ${mini('Release Ready',readiness+'%','ship confidence',readiness<60?'#ef4444':readiness<80?'#f59e0b':'#22c55e','projects')}
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(6,minmax(130px,1fr))',gap:12}}>
+        ${stat('Health',health+'%',status,tone,'ops')}
+        ${stat('Open Projects',p.length,'active portfolio','#60a5fa','projects')}
+        ${stat('Overdue',overdueTasks.length,'tasks past due','#f97316','tasks')}
+        ${stat('Blocked',blockedTasks.length,'blocked work','#a78bfa','tasks')}
+        ${stat('Critical Tickets',criticalTickets.length,'needs triage','#ef4444','tickets')}
+        ${stat('Unread',unread,'notifications','#38bdf8','notifs')}
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'1.1fr .9fr',gap:14}}>
-        <div class="card" style=${{borderRadius:22,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))'}}>
-          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>1. Organization Health Score</div><div style=${{fontSize:10,color:'var(--tx3)'}}>delivery + SLA + workload + blockers + unread signals</div></div><div style=${{fontSize:34,fontWeight:950,color:orgScore<60?'#ef4444':orgScore<80?'#f59e0b':'#22c55e'}}>${orgScore}%</div></div>
-          ${meter('Delivery health',deliveryScore,'#60a5fa')}${meter('Staffing balance',staffingScore,'#a78bfa')}${meter('Infrastructure confidence',infraScore,'#22c55e')}${meter('Dependency control',depScore,'#f59e0b')}${meter('Client escalation safety',escalationScore,'#ef4444')}
+      <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+        <div class="card" style=${{borderRadius:22}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)'}}>Workspace Health</div><div style=${{fontSize:11,color:'var(--tx3)'}}>calculated from live system data only</div></div><div style=${{fontSize:34,fontWeight:950,color:tone}}>${health}%</div></div>
+          ${bar('Delivery readiness',Math.max(0,100-overdueTasks.length*10-blockedTasks.length*12),'#60a5fa')}
+          ${bar('Ticket stability',Math.max(0,100-criticalTickets.length*18-unassignedTickets.length*6),'#22c55e')}
+          ${bar('Capacity balance',Math.max(0,100-overloaded.length*18),'#a78bfa')}
         </div>
         <div class="card" style=${{borderRadius:22}}>
-          <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:10}}>2. Risk Radar</div>
-          <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            ${[['Delivery',100-deliveryScore,'🚚','#60a5fa'],['Staffing',100-staffingScore,'👥','#a78bfa'],['Infra',100-infraScore,'🛡️','#22c55e'],['Dependencies',100-depScore,'🕸️','#f59e0b'],['Escalation',100-escalationScore,'📣','#ef4444']].map(r=>html`<div style=${{padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{fontSize:18}}>${r[2]}</div><div style=${{fontSize:11,fontWeight:900,color:'var(--tx)',marginTop:4}}>${r[0]}</div><div style=${{fontSize:20,fontWeight:950,color:r[3]}}>${Math.max(0,Math.round(r[1]))}</div><div style=${{fontSize:9,color:'var(--tx3)'}}>risk index</div></div>`)}
-          </div>
+          <div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Action Required</div>
+          ${actionItems.length?html`<div style=${{display:'flex',flexDirection:'column',gap:9}}>${actionItems.map(a=>html`<div onClick=${()=>onNav(a.nav)} style=${{cursor:'pointer',display:'flex',gap:10,padding:11,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div>${a.icon}</div><div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${a.title}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${a.body}</div></div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No urgent operational actions right now.</div>`}
         </div>
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        ${card('3. Delivery Prediction Engine','AI forecast','🔮',html`${predictions.map(x=>html`<div style=${{margin:'6px 0'}}>• ${x}</div>`)}`,'#60a5fa','timeline')}
-        ${card('4. Critical Incident Wall','realtime hot board','🚨',html`${criticalTickets.length||blockedTasks.length?html`${criticalTickets.length} critical ticket(s), ${blockedTasks.length} blocker(s), ${staleTickets.length} stale ticket(s).`:html`No active incident-level issues detected. This wall will pulse when SLA/critical blockers appear.`}`,'#ef4444','tickets')}
-        ${card('5. Live Team Activity Map','presence + workload','🧭',html`${workload.slice(0,5).map(w=>html`<div style=${{display:'flex',justifyContent:'space-between',margin:'5px 0'}}><span>${w.user.name||w.user.email}</span><b>${w.load}</b></div>`)}`,'#22c55e','team')}
-      </div>
-      <div style=${{display:'grid',gridTemplateColumns:'.9fr 1.1fr',gap:14}}>
-        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:10}}>6. Attention Feed</div><div style=${{display:'flex',flexDirection:'column',gap:8}}>${attention.map(a=>html`<div onClick=${()=>onNav(a.nav)} style=${{cursor:'pointer',display:'flex',gap:10,padding:10,borderRadius:16,background:a.tone+'12',border:'1px solid '+a.tone+'44'}}><div>${a.icon}</div><div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${a.title}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${a.body}</div></div></div>`)}</div></div>
-        <div class="card" style=${{borderRadius:22}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>7. Dependency Explosion Graph</div><button class="btn bg" onClick=${()=>onNav('projects')}>Open Projects</button></div><div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>${projectRisks.slice(0,6).map(r=>html`<div style=${{padding:12,borderRadius:16,background:r.risk>60?'rgba(239,68,68,.12)':r.risk>25?'rgba(245,158,11,.12)':'rgba(34,197,94,.10)',border:'1px solid '+(r.risk>60?'rgba(239,68,68,.35)':r.risk>25?'rgba(245,158,11,.35)':'rgba(34,197,94,.28)')}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${r.name}</div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:6}}>⏰ ${r.delayed} · 🧱 ${r.blocked} · ${r.progress}%</div><div style=${{height:5,borderRadius:99,background:'rgba(255,255,255,.08)',marginTop:8,overflow:'hidden'}}><div style=${{height:'100%',width:Math.max(5,r.risk)+'%',background:r.risk>60?'#ef4444':r.risk>25?'#f59e0b':'#22c55e'}}></div></div></div>`)}</div></div>
-      </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14}}>
-        ${card('8. Release Readiness Meter',readiness+'% ready','🚀',`Open bugs/SLA/blockers reduce this score. Current confidence: ${readiness}%.`,'#22c55e','projects')}
-        ${card('9. Dev Productivity Intelligence','cycle-time safe view','📈',`Completed ${doneTasks.length} task(s), ${blockedTasks.length} blocker(s), ${overdueTasks.length} overdue item(s). Designed as team health, not surveillance.`,'#60a5fa','productivity')}
-        ${card('10. Incident Timeline Replay','audit trail','🎞️','Replay incidents by ticket, chat, actions, owners, and resolution timestamps. Ready for backend event-history wiring.','#f59e0b','tickets')}
-        ${card('11. AI Workspace Assistant','copilot','🤖','Ask for sprint summaries, delay explanations, standup notes, ticket plans, and next actions.','#a78bfa','ai-docs')}
-      </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        ${card('12. AI Root Cause Suggestions','pattern detection','🧠',criticalTickets.length||blockedTasks.length?'Likely root cause candidates: overloaded owners, blocked dependencies, or stale SLA tickets.':'No root-cause cluster found yet.','#ef4444','tickets')}
-        ${card('13. AI Daily Briefing','morning digest','☀️',`Today: ${overdueTasks.length} overdue, ${blockedTasks.length} blocked, ${criticalTickets.length} critical, ${unread} unread signal(s).`,'#f59e0b','ops')}
-        ${card('14. Mission Control Mode','TV/fullscreen view','📺','Cinematic mode for office screens: glowing alerts, auto-refresh, and big operational metrics.','#60a5fa','ops')}
-      </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        ${card('15. Time Machine View','historical ops snapshots','⏳','Review yesterday, last sprint, release day, or incident-day state. Backend snapshots can feed this panel.','#a78bfa','timeline')}
-        ${card('16. Heatmaps Everywhere','risk density','🔥',`Current heat: ${overdueTasks.length} overdue tasks, ${criticalTickets.length} critical tickets, ${overloaded.length} capacity alerts.`,'#f97316','dashboard')}
-        ${card('17. War Room','incident collaboration','🛡️','Temporary incident rooms with live chat, pinned logs, linked tickets, shared notes, and voice huddles.','#ef4444','messages')}
-      </div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        ${card('18. Cross-Team Coordination Matrix','blocker ownership','🧩',`Dependency pressure: ${blockedTasks.length} blocker(s). Approval and owner matrix can sit here.`,'#22c55e','team')}
-        ${card('19. Workspace Governance','admin control','🏛️','Audit logs, inactive users, permission insights, storage analytics, and security health.','#60a5fa','settings')}
-        ${card('20. Multi-Workspace Federation','enterprise rollup','🌐','Future-ready rollup for multiple orgs/workspaces with centralized operational analytics.','#a78bfa','dashboard')}
+      <div style=${{display:'grid',gridTemplateColumns:'1.1fr .9fr',gap:14}}>
+        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Project Risk</div>${projectStats.length?html`<div style=${{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10}}>${projectStats.slice(0,8).map(pr=>html`<div onClick=${()=>onNav('projects')} style=${{cursor:'pointer',padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{display:'flex',justifyContent:'space-between',gap:8}}><b style=${{fontSize:12,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${pr.name}</b><span style=${{fontSize:11,color:pr.risk>50?'#ef4444':pr.risk>20?'#f59e0b':'#22c55e'}}>${pr.risk}% risk</span></div><div style=${{fontSize:10,color:'var(--tx3)',marginTop:6}}>Open ${pr.open} · Done ${pr.done} · Overdue ${pr.overdue} · Blocked ${pr.blocked}</div><div style=${{height:5,borderRadius:99,background:'rgba(255,255,255,.08)',marginTop:8,overflow:'hidden'}}><div style=${{height:'100%',width:pr.progress+'%',background:'var(--ac)'}}></div></div></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No projects available yet.</div>`}</div>
+        <div class="card" style=${{borderRadius:22}}><div style=${{fontSize:16,fontWeight:950,color:'var(--tx)',marginBottom:10}}>Team Workload</div>${workload.length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${workload.slice(0,8).map(w=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center',padding:10,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${w.name}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>Tasks ${w.tasks} · Tickets ${w.tickets}</div></div><b style=${{color:w.total>Math.max(5,avg*1.6)?'#ef4444':'var(--tx)'}}>${w.total}</b></div>`)}</div>`:html`<div style=${{padding:24,textAlign:'center',color:'var(--tx3)'}}>No team workload data available.</div>`}</div>
       </div>
     </div>`;
 }
+
 
 /* ─── TimelineView (Admin/Manager only) ───────────────────────────────────── */
 function TimelineView({cu,tasks,projects,onNav}){
@@ -4009,7 +3967,7 @@ function renderChatContent(text){
   const isVoice=/🎤\s*Voice note/i.test(raw);
   const isImg=/🖼️|\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(raw);
   if(fileUrl&&isVoice){
-    return `<div style="display:flex;align-items:center;gap:10px;min-width:230px"><span style="width:30px;height:30px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.18)">🎤</span><audio controls preload="metadata" src="${fileUrl}" style="height:32px;max-width:220px"></audio></div>`;
+    return `<div style="display:flex;align-items:center;gap:10px;min-width:230px"><span style="width:30px;height:30px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#050505;color:#fff"><span style="display:inline-flex;gap:2px;align-items:center"><i style="width:3px;height:8px;background:#fff;border-radius:3px;display:block"></i><i style="width:3px;height:14px;background:#fff;border-radius:3px;display:block"></i><i style="width:3px;height:8px;background:#fff;border-radius:3px;display:block"></i></span></span><audio controls preload="metadata" src="${fileUrl}" style="height:32px;max-width:220px"></audio></div>`;
   }
   if(fileUrl&&isImg){
     return safe.replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open image</a>').replace(/\n/g,'<br>');
@@ -4394,7 +4352,7 @@ function MessagesView({projects,users,cu,tasks}){
 
             <div style=${{padding:'10px 14px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadChannelAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'8px 11px',fontSize:15,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!pid||attaching}>${attaching?'…':'📎'}</button>
+        <button title="Attach file" class="btn" style=${{padding:'8px 11px',fontSize:15,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!pid||attaching}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 17.2a2 2 0 1 1-2.83-2.83l8.49-8.49"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'8px 11px',fontSize:15}} onClick=${()=>setShowChatEmoji(v=>!v)}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
@@ -4829,7 +4787,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         ${previewImage?html`<div onClick=${()=>setPreviewImage('')} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center'}}><img src=${previewImage} style=${{maxWidth:'88vw',maxHeight:'88vh',borderRadius:16,boxShadow:'0 30px 80px rgba(0,0,0,.6)'}}/></div>`:null}
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadDmAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':'📎'}</button>
+        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 17.2a2 2 0 1 1-2.83-2.83l8.49-8.49"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'9px 12px',fontSize:16}} onClick=${()=>setShowChatEmoji(v=>!v)} disabled=${!toId}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
@@ -4838,7 +4796,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         </div>
         ${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
         ${editingId?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>✎ Editing message <button style=${{float:'right'}} onClick=${()=>{setEditingId('');setTxt('');}}>×</button></div>`:null}
-        <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'⏹️':'🎤'}</button>
+        <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
         <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
       </div>
