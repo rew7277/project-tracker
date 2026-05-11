@@ -5276,7 +5276,7 @@ def react_dm():
         rows=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(msg_id,ws_id)).fetchall()
         data=_attach_dm_reactions(db, ws_id, rows)[0] if rows else None
     _cache_bust(ws_id, "appdata")
-    _sse_publish(ws_id, "dm_reaction", {"message_id": msg_id, "sender": msg["sender"], "recipient": msg["recipient"], "emoji": emoji, "user_id": me, "action": action})
+    _sse_publish(ws_id, "dm_reaction", {"message_id": msg_id, "sender": msg["sender"], "recipient": msg["recipient"], "emoji": emoji, "user_id": me, "action": action, "message": data})
     return jsonify({"message_id":msg_id,"action":action,"message":data})
 
 @app.route("/api/dm",methods=["POST"])

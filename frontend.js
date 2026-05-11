@@ -4092,6 +4092,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
+  const [reactionPickerFor,setReactionPickerFor]=useState('');
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
@@ -4169,6 +4170,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
       if(msg&&msg.type==='dm_reaction'&&data){
+        if(data.message){applyReactionMessage(data.message);return;}
         if(data.sender===toId||data.recipient===toId)loadMsgs(toId,'reaction');
         return;
       }
@@ -4229,13 +4231,44 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setMsgs(prev=>prev.map(m=>m.id===updated.id?{...m,reactions:updated.reactions||[]}:m));
     }
   },[cu.id]);
+  const optimisticToggleReaction=useCallback((messageId,emoji)=>{
+    const updateList=list=>list.map(m=>{
+      if(m.id!==messageId)return m;
+      const reactions=Array.isArray(m.reactions)?m.reactions.map(r=>({...r,users:[...(r.users||[])]})):[];
+      let r=reactions.find(x=>x.emoji===emoji);
+      if(r&&(r.users||[]).includes(cu.id)){
+        r.users=r.users.filter(id=>id!==cu.id);
+        r.count=Math.max(0,(r.count||1)-1);
+      }else if(r){
+        r.users=[...(r.users||[]),cu.id];
+        r.count=(r.count||0)+1;
+      }else{
+        reactions.push({emoji,count:1,users:[cu.id]});
+      }
+      return {...m,reactions:reactions.filter(x=>(x.count||0)>0)};
+    });
+    setMsgs(prev=>{
+      const next=updateList(prev);
+      const updated=next.find(m=>m.id===messageId);
+      if(updated){
+        const peer=updated.sender===cu.id?updated.recipient:updated.sender;
+        threadCache.current.set(peer,updateList(threadCache.current.get(peer)||prev));
+      }
+      return next;
+    });
+  },[cu.id]);
   const toggleReaction=useCallback(async(messageId,emoji)=>{
     if(!messageId||String(messageId).startsWith('tmpdm'))return;
+    optimisticToggleReaction(messageId,emoji);
+    setReactionPickerFor('');
     try{
       const res=await api.post('/api/dm/react',{message_id:messageId,emoji});
       if(res&&res.message)applyReactionMessage(res.message);
-    }catch(e){console.warn('[DM] reaction failed',e);}
-  },[applyReactionMessage]);
+    }catch(e){
+      console.warn('[DM] reaction failed',e);
+      if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
+    }
+  },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
   return html`<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
@@ -4269,16 +4302,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${visibleMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===visibleMsgs.length-1||visibleMsgs[i+1].sender!==m.sender;return html`
-          <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row'}}>
+          <div key=${m.id} onMouseEnter=${()=>setReactionPickerFor(m.id)} onMouseLeave=${()=>setReactionPickerFor(v=>v===m.id?'':v)} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||visibleMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
                 <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,outline:m._failed?'1px solid var(--rd)':'none'}}>${m.content}</div>
-                ${!m._pending&&!m._failed?html`<div class="dm-react-bar" style=${{display:'flex',gap:3,marginTop:4,opacity:.25,transition:'opacity .12s',alignSelf:isMe?'flex-end':'flex-start'}}>
-                  ${reactionEmojis.map(e=>html`<button title=${'React '+e} onClick=${()=>toggleReaction(m.id,e)} style=${{border:'1px solid var(--bd)',background:'var(--sf)',color:'var(--tx)',borderRadius:12,fontSize:12,lineHeight:1,padding:'4px 5px',cursor:'pointer'}}>${e}</button>`)}
+                ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:4,padding:'5px 6px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:18,boxShadow:'0 10px 30px rgba(0,0,0,.25)',zIndex:20}}>
+                  ${reactionEmojis.map(e=>html`<button title=${'React '+e} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:14,lineHeight:1,padding:'4px 5px',cursor:'pointer',filter:'saturate(1.1)'}}>${e}</button>`)}
                 </div>`:null}
-                ${Array.isArray(m.reactions)&&m.reactions.length?html`<div style=${{display:'flex',gap:4,flexWrap:'wrap',marginTop:5,alignSelf:isMe?'flex-end':'flex-start'}}>
-                  ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${()=>toggleReaction(m.id,r.emoji)} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'var(--ac3)':'var(--sf)',color:'var(--tx)',borderRadius:12,fontSize:11,padding:'3px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.15)':'none'}}>${r.emoji} ${r.count}</button>`;})}
+                ${Array.isArray(m.reactions)&&m.reactions.length?html`<div style=${{display:'flex',gap:4,flexWrap:'wrap',marginTop:-2,alignSelf:isMe?'flex-end':'flex-start',transform:'translateY(-1px)'}}>
+                  ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
               ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':ago(m.ts)}</span>`:null}
@@ -8186,7 +8219,7 @@ function App(){
           try{
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
-            if(['task_updated','project_updated','ticket_updated','message_created','dm_created','dm_reaction','notification_updated','reminder_updated'].includes(msg.type)){
+            if(['task_updated','project_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated'].includes(msg.type)){
               // Bust cache and reload — the server has already bust its own cache
               load(teamCtx);
             }
