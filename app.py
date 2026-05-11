@@ -5255,7 +5255,7 @@ def react_dm():
     d=request.json or {}
     msg_id=(d.get("message_id") or "").strip()
     emoji=(d.get("emoji") or "").strip()
-    allowed={"👍","❤️","😂","😮","😢","🔥","👏","👀","🚀"}
+    allowed={"👍","❤️","😂","🤣","😮","😢","🙏","🔥","👏","👀","🚀","🎉","💯","✅"}
     if not msg_id or emoji not in allowed:
         return jsonify({"error":"Invalid reaction"}),400
     ws_id=wid(); me=session["user_id"]

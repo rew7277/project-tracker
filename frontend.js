@@ -3701,6 +3701,19 @@ function ProductivityView({cu,tasks,projects,users}){
 function renderMd(text){
   return text.replace(/[*][*](.*?)[*][*]/g,'<b>$1</b>');
 }
+
+function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function renderChatContent(text){
+  const raw=String(text||'');
+  const safe=escapeHtml(raw);
+  return safe
+    .replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:700">$1</a>')
+    .replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Download attachment</a>')
+    .replace(/\n/g,'<br>');
+}
+const CHAT_EMOJIS=['👍','❤️','😂','🤣','😊','😍','🥰','😎','😮','😢','🙏','👏','🔥','🎉','💯','✅','👀','🚀','⭐','💪','🤝','🙌','😇','🤔','😡','😭'];
+const REACTION_EMOJIS=['👍','❤️','😂','🤣','😮','😢','🙏','🔥','👏','👀','🚀','🎉','💯','✅'];
+const emojiHover=(ev,on)=>{const el=ev.currentTarget;if(!el)return;el.style.transform=on?'translateY(-7px) scale(1.42)':'translateY(0) scale(1)';el.style.zIndex=on?'2':'1';el.style.filter=on?'drop-shadow(0 8px 10px rgba(0,0,0,.35)) saturate(1.25)':'saturate(1.05)';};
 function MessagesView({projects,users,cu,tasks}){
   const [allProjects,setAllProjects]=useState(safe(projects));
   const [lastMsgTs,setLastMsgTs]=useState({});
@@ -3772,6 +3785,9 @@ function MessagesView({projects,users,cu,tasks}){
   const pidRef=useRef('');
   useEffect(()=>{pidRef.current=pid;},[pid]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
+  const [showChatEmoji,setShowChatEmoji]=useState(false);
+  const [attaching,setAttaching]=useState(false);
+  const fileInputRef=useRef(null);
   const [channelUnread,setChannelUnread]=useState({}); // {projectId: count}
   // Persist lastSeen to localStorage so refresh doesn't reset unread counts
   const _pfLastSeenInit=(()=>{try{return JSON.parse(localStorage.getItem('pfLastSeen')||'{}');}catch{return {};}})();
@@ -3833,11 +3849,31 @@ function MessagesView({projects,users,cu,tasks}){
   const blockedTasks=projTasks.filter(t=>t.stage==='blocked').length;
   const pc=projTasks.length?Math.round(projTasks.reduce((a,t)=>a+(t.pct||0),0)/projTasks.length):0;
 
-  const send=async()=>{
-    if(!txt.trim())return;const c=txt.trim();setTxt('');
-    const m=await api.post('/api/messages',{project:pid,content:c});
-    setMsgs(prev=>[...prev,m]);
-    setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
+  const send=async(textOverride)=>{
+    const body=(textOverride!==undefined?textOverride:txt).trim();
+    if(!body||!pid)return;
+    if(textOverride===undefined)setTxt('');
+    const m=await api.post('/api/messages',{project:pid,content:body});
+    if(m&&m.id){
+      setMsgs(prev=>[...prev,m]);
+      setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
+    }
+  };
+  const uploadChannelAttachment=async(ev)=>{
+    const file=ev.target.files&&ev.target.files[0];
+    ev.target.value='';
+    if(!file||!pid)return;
+    setAttaching(true);
+    try{
+      const fd=new FormData();
+      fd.append('file',file);
+      fd.append('project_id',pid);
+      const uploaded=await api.upload('/api/files',fd);
+      if(uploaded&&uploaded.id){
+        await send('📎 '+uploaded.name+'\n/api/files/'+uploaded.id);
+      }
+    }catch(e){console.warn('[Channel] attachment upload failed',e);}
+    finally{setAttaching(false);}
   };
 
   // Fixed order ref — set once, never changes (no re-sorting unless new msg arrives)
@@ -4030,7 +4066,7 @@ function MessagesView({projects,users,cu,tasks}){
                 ${!isMe?html`<${Av} u=${s} size=${25}/>`:null}
                 <div style=${{display:'flex',flexDirection:'column',gap:3,alignItems:isMe?'flex-end':'flex-start',maxWidth:'65%'}}>
                   ${!isMe?html`<span style=${{fontSize:11,color:'var(--tx3)',fontWeight:600,marginLeft:2}}>${(s&&s.name)||'?'}</span>`:null}
-                  <div style=${{padding:'9px 13px',borderRadius:12,fontSize:13,lineHeight:1.5, background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)', border:isMe?'none':'1px solid var(--bd)', borderBottomRightRadius:isMe?3:12,borderBottomLeftRadius:isMe?12:3}}>${m.content}</div>
+                  <div style=${{padding:'9px 13px',borderRadius:12,fontSize:13,lineHeight:1.5, background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)', border:isMe?'none':'1px solid var(--bd)', borderBottomRightRadius:isMe?3:12,borderBottomLeftRadius:isMe?12:3}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.content)}}></div>
                   <span class="mono-10">${timeStr}</span>
                 </div>
               </div>`;
@@ -4042,10 +4078,18 @@ function MessagesView({projects,users,cu,tasks}){
         </div>`:null}
       </div>
 
-            <div style=${{padding:'10px 14px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0}}>
+            <div style=${{padding:'10px 14px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
+        <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadChannelAttachment}/>
+        <button title="Attach file" class="btn" style=${{padding:'8px 11px',fontSize:15,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!pid||attaching}>${attaching?'…':'📎'}</button>
+        <div style=${{position:'relative',flexShrink:0}}>
+          <button title="Emoji" class="btn" style=${{padding:'8px 11px',fontSize:15}} onClick=${()=>setShowChatEmoji(v=>!v)}>😊</button>
+          ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
+            ${CHAT_EMOJIS.map(e=>html`<button title=${e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();setTxt(v=>v+e);}} style=${{border:'none',background:'transparent',borderRadius:10,fontSize:18,lineHeight:1,padding:'5px 4px',cursor:'pointer',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
+          </div>`:null}
+        </div>
         <input class="inp" style=${{flex:1}} placeholder=${'Message in #'+((sp&&sp.name)||'...')} value=${txt}
           onInput=${e=>setTxt(e.target.value)} onKeyDown=${e=>e.key==='Enter'&&!e.shiftKey&&send()}/>
-        <button class="btn bp" style=${{padding:'8px 14px',fontSize:12}} onClick=${send}>➤</button>
+        <button class="btn bp" style=${{padding:'8px 14px',fontSize:12}} onClick=${()=>send()}>➤</button>
       </div>
     </div>
   </div>`;
@@ -4093,6 +4137,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
+  const [showChatEmoji,setShowChatEmoji]=useState(false);
+  const [attaching,setAttaching]=useState(false);
+  const fileInputRef=useRef(null);
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
@@ -4235,12 +4282,40 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       window.dispatchEvent(new CustomEvent('pt:refresh',{detail:{type:'dm_sent',recipient}}));
     }
   };
+  const uploadDmAttachment=async(ev)=>{
+    const file=ev.target.files&&ev.target.files[0];
+    ev.target.value='';
+    if(!file||!toId||sending)return;
+    setAttaching(true);
+    try{
+      const fd=new FormData();
+      fd.append('file',file);
+      const uploaded=await api.upload('/api/files',fd);
+      if(uploaded&&uploaded.id){
+        const prev=txt;
+        setTxt('📎 '+uploaded.name+'\n/api/files/'+uploaded.id);
+        await new Promise(r=>setTimeout(r,0));
+        const recipient=toId;
+        const body='📎 '+uploaded.name+'\n/api/files/'+uploaded.id;
+        const tempId='tmpdm'+Date.now();
+        const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};
+        setMsgThreadId(recipient);
+        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);return next;});
+        const m=await api.post('/api/dm',{recipient,content:body});
+        if(recipient===activeToRef.current&&m&&m.id){
+          setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});
+        }
+        setTxt(prev);
+      }
+    }catch(e){console.warn('[DM] attachment upload failed',e);}
+    finally{setAttaching(false);}
+  };
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
   const toUser=safe(users).find(u=>u.id===toId);
   const visibleMsgs=(msgThreadId===toId)?msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id)):[];
   const isThreadLoading=!!toId&&loadingThread===toId&&visibleMsgs.length===0;
   const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
-  const reactionEmojis=['👍','❤️','😂','😮','😢','🔥','👏','👀','🚀'];
+  const reactionEmojis=REACTION_EMOJIS;
   const applyReactionMessage=useCallback((updated)=>{
     if(!updated||!updated.id)return;
     pendingReactionUntil.current.delete(updated.id);
@@ -4327,9 +4402,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||visibleMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
-                <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,outline:m._failed?'1px solid var(--rd)':'none'}}>${m.content}</div>
-                ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:4,padding:'5px 6px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:18,boxShadow:'0 10px 30px rgba(0,0,0,.25)',zIndex:20}}>
-                  ${reactionEmojis.map(e=>html`<button title=${'React '+e} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:14,lineHeight:1,padding:'4px 5px',cursor:'pointer',filter:'saturate(1.1)'}}>${e}</button>`)}
+                <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,outline:m._failed?'1px solid var(--rd)':'none'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.content)}}></div>
+                ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:18,boxShadow:'0 10px 30px rgba(0,0,0,.25)',zIndex:20}}>
+                  ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
                 ${Array.isArray(m.reactions)&&m.reactions.length?html`<div style=${{display:'flex',gap:4,flexWrap:'wrap',marginTop:-2,alignSelf:isMe?'flex-end':'flex-start',transform:'translateY(-1px)'}}>
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
@@ -4339,7 +4414,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             </div>
           </div>`;})}
       </div>
-      <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0}}>
+      <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
+        <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadDmAttachment}/>
+        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':'📎'}</button>
+        <div style=${{position:'relative',flexShrink:0}}>
+          <button title="Emoji" class="btn" style=${{padding:'9px 12px',fontSize:16}} onClick=${()=>setShowChatEmoji(v=>!v)} disabled=${!toId}>😊</button>
+          ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
+            ${CHAT_EMOJIS.map(e=>html`<button title=${e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();setTxt(v=>v+e);}} style=${{border:'none',background:'transparent',borderRadius:10,fontSize:18,lineHeight:1,padding:'5px 4px',cursor:'pointer',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
+          </div>`:null}
+        </div>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>setTxt(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
         <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
       </div>
