@@ -6543,6 +6543,18 @@ self.addEventListener('activate', event => event.waitUntil(self.clients.claim())
 """
     return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 
+
+@app.route("/icon-192.png")
+def pwa_icon_192():
+    """Inline PWA icon so production stops logging /icon-192.png 404s."""
+    svg = '''<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#2563eb"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+  <rect width="192" height="192" rx="44" fill="url(#g)"/>
+  <path d="M52 98h88M96 54v88" stroke="white" stroke-width="16" stroke-linecap="round" opacity=".96"/>
+  <circle cx="96" cy="96" r="54" fill="none" stroke="white" stroke-width="8" opacity=".26"/>
+</svg>'''
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control":"public, max-age=86400"})
+
 @app.route("/favicon.ico")
 def favicon():
     """Return 204 instead of noisy 404 when no favicon asset is deployed."""

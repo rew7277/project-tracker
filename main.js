@@ -1344,9 +1344,9 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
     vault: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V6"/><path d="M12 18v-2.5"/><path d="M7.5 12H5"/><path d="M19 12h-2.5"/><path d="M9.2 9.2L7.5 7.5"/><path d="M16.5 16.5l-1.7-1.7"/><path d="M14.8 9.2l1.7-1.7"/><path d="M7.5 16.5l1.7-1.7"/></svg>`,
   };
   const adminNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
 
   // ── Sidebar nav reorder + pin ────────────────────────────────────────────
@@ -3462,6 +3462,121 @@ function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,ti
               onClick=${()=>onNav('tasks:assignee:me')}>
               View all my tasks →
             </button>`:null}
+        </div>
+      </div>
+    </div>`;
+}
+
+
+
+/* ─── OpsCommandCenter — realtime/performance/project command center ─────── */
+function OpsCommandCenter({cu,tasks,projects,users,tickets,notifs,onNav}){
+  const t=safe(tasks), p=safe(projects), u=safe(users), tk=safe(tickets), nf=safe(notifs);
+  const now=new Date();
+  const activeTasks=t.filter(x=>x.stage!=='completed'&&x.stage!=='done');
+  const completed=t.filter(x=>x.stage==='completed'||x.stage==='done').length;
+  const blocked=t.filter(x=>x.stage==='blocked'||x.blocked).length;
+  const overdue=t.filter(x=>x.due&&new Date(x.due)<now&&x.stage!=='completed').length;
+  const openTickets=tk.filter(x=>!['resolved','closed'].includes(x.status));
+  const criticalTickets=openTickets.filter(x=>x.priority==='critical').length;
+  const unread=nf.filter(x=>!x.read).length;
+  const portfolioScore=Math.max(0,Math.min(100,Math.round(100-(blocked*8)-(overdue*6)-(criticalTickets*7)+(completed*0.5))));
+  const workload=u.map(user=>({
+    user,
+    tasks:activeTasks.filter(x=>x.assignee===user.id).length,
+    tickets:openTickets.filter(x=>x.assignee===user.id).length,
+    overdue:activeTasks.filter(x=>x.assignee===user.id&&x.due&&new Date(x.due)<now).length
+  })).sort((a,b)=>(b.tasks+b.tickets)-(a.tasks+a.tickets)).slice(0,8);
+  const riskProjects=p.map(proj=>{
+    const pt=t.filter(x=>x.project===proj.id);
+    const delayed=pt.filter(x=>x.due&&new Date(x.due)<now&&x.stage!=='completed').length;
+    const blockedCount=pt.filter(x=>x.stage==='blocked'||x.blocked).length;
+    const progress=pt.length?Math.round(pt.reduce((s,x)=>s+(x.pct||0),0)/pt.length):(proj.progress||0);
+    const score=Math.min(100,delayed*18+blockedCount*22+(progress<40?15:0));
+    return {...proj,delayed,blockedCount,progress,score};
+  }).sort((a,b)=>b.score-a.score).slice(0,6);
+  const recs=[
+    criticalTickets>0&&{icon:'🚨',title:'Critical tickets need triage',body:criticalTickets+' critical open ticket(s). Move them to the SLA lane and assign an owner.',nav:'tickets'},
+    overdue>0&&{icon:'⏰',title:'Overdue task cluster detected',body:overdue+' overdue task(s). Use Timeline to rebalance dates and blockers.',nav:'timeline'},
+    blocked>0&&{icon:'🧱',title:'Blocked work is accumulating',body:blocked+' blocked item(s). Open Kanban and clear dependencies.',nav:'tasks:stage:blocked'},
+    unread>0&&{icon:'🔔',title:'Notification center has unread work',body:unread+' unread notification(s). Review before standup.',nav:'notifs'},
+    {icon:'⚡',title:'Realtime layer health',body:'SSE is primary; background polling has been reduced to fallback mode.',nav:'dashboard'}
+  ].filter(Boolean);
+  const metric=(label,val,sub,icon,color,nav)=>html`
+    <div onClick=${()=>nav&&onNav(nav)} style=${{cursor:nav?'pointer':'default',padding:14,borderRadius:18,background:'linear-gradient(135deg,var(--sf),var(--sf2))',border:'1px solid var(--bd2)',boxShadow:'0 18px 50px rgba(0,0,0,.18)',position:'relative',overflow:'hidden'}}>
+      <div style=${{position:'absolute',inset:'-40% -20% auto auto',width:120,height:120,borderRadius:'50%',background:color+'22',filter:'blur(20px)'}}></div>
+      <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',position:'relative'}}>
+        <div style=${{width:34,height:34,borderRadius:13,display:'flex',alignItems:'center',justifyContent:'center',background:color+'18',border:'1px solid '+color+'44',fontSize:17}}>${icon}</div>
+        <div style=${{fontSize:24,fontWeight:900,color:'var(--tx)',letterSpacing:'-.04em'}}>${val}</div>
+      </div>
+      <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',marginTop:10}}>${label}</div>
+      <div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${sub}</div>
+    </div>`;
+  return html`
+    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'16px 20px',display:'flex',flexDirection:'column',gap:14}}>
+      <div style=${{padding:18,borderRadius:22,background:'radial-gradient(circle at top left,rgba(90,140,255,.22),transparent 35%),linear-gradient(135deg,var(--sf),var(--bg))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14,boxShadow:'0 22px 80px rgba(0,0,0,.22)'}}>
+        <div style=${{width:48,height:48,borderRadius:18,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,boxShadow:'0 0 32px var(--ac3)'}}>🛰️</div>
+        <div style=${{flex:1,minWidth:0}}>
+          <div style=${{fontSize:18,fontWeight:900,color:'var(--tx)',letterSpacing:'-.03em'}}>Operations Command Center</div>
+          <div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>Realtime health, portfolio risk, workload balance, SLA pressure, and action suggestions in one place.</div>
+        </div>
+        <button class="btn bp" onClick=${()=>window._pfOpenSearch&&window._pfOpenSearch()} style=${{borderRadius:14}}>⌘K Command</button>
+      </div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(5,minmax(140px,1fr))',gap:12}}>
+        ${metric('Portfolio Health',portfolioScore+'%','risk-adjusted delivery score','❤️','#22c55e','dashboard')}
+        ${metric('Delayed Work',overdue,'overdue active tasks','⏰','#f97316','timeline')}
+        ${metric('Open Tickets',openTickets.length,'support workload','🎫','#60a5fa','tickets')}
+        ${metric('Critical SLA',criticalTickets,'needs immediate action','🚨','#ef4444','tickets')}
+        ${metric('Unread Signals',unread,'notifications waiting','🔔','#a78bfa','notifs')}
+      </div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'1.1fr .9fr',gap:14}}>
+        <div class="card" style=${{borderRadius:20}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>Delayed Projects Heatmap</div>
+            <button class="btn bg" style=${{fontSize:10}} onClick=${()=>onNav('timeline')}>Open Timeline</button>
+          </div>
+          <div style=${{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
+            ${riskProjects.length?riskProjects.map(r=>html`
+              <div onClick=${()=>onNav('projects')} style=${{cursor:'pointer',padding:12,borderRadius:16,background:r.score>50?'rgba(239,68,68,.12)':r.score>20?'rgba(245,158,11,.12)':'rgba(34,197,94,.10)',border:'1px solid '+(r.score>50?'rgba(239,68,68,.35)':r.score>20?'rgba(245,158,11,.35)':'rgba(34,197,94,.28)')}}>
+                <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${r.name}</div>
+                <div style=${{display:'flex',gap:8,marginTop:8,fontSize:10,color:'var(--tx3)'}}><span>⏰ ${r.delayed}</span><span>🧱 ${r.blockedCount}</span><span>${r.progress}%</span></div>
+                <div style=${{height:5,background:'rgba(255,255,255,.08)',borderRadius:99,marginTop:8,overflow:'hidden'}}><div style=${{width:Math.max(4,r.score)+'%',height:'100%',background:r.score>50?'#ef4444':r.score>20?'#f59e0b':'#22c55e'}}></div></div>
+              </div>`):html`<div style=${{gridColumn:'1/-1',padding:24,textAlign:'center',color:'var(--tx3)',fontSize:12}}>No project risk detected yet.</div>`}
+          </div>
+        </div>
+        <div class="card" style=${{borderRadius:20}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>Team Workload Matrix</div>
+            <button class="btn bg" style=${{fontSize:10}} onClick=${()=>onNav('team')}>Team</button>
+          </div>
+          <div style=${{display:'flex',flexDirection:'column',gap:8}}>
+            ${workload.length?workload.map(w=>html`
+              <div style=${{display:'grid',gridTemplateColumns:'32px 1fr 70px',gap:10,alignItems:'center',padding:'8px 10px',borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}>
+                <${Av} u=${w.user} size=${28}/>
+                <div style=${{minWidth:0}}><div style=${{fontSize:12,fontWeight:800,color:'var(--tx)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${w.user.name}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${w.tasks} tasks · ${w.tickets} tickets</div></div>
+                <div style=${{height:6,borderRadius:99,background:'rgba(255,255,255,.08)',overflow:'hidden'}}><div style=${{height:'100%',width:Math.min(100,(w.tasks+w.tickets)*12)+'%',background:w.overdue?'#ef4444':'var(--ac)'}}></div></div>
+              </div>`):html`<div style=${{padding:20,textAlign:'center',fontSize:12,color:'var(--tx3)'}}>No team workload yet.</div>`}
+          </div>
+        </div>
+      </div>
+
+      <div style=${{display:'grid',gridTemplateColumns:'.85fr 1.15fr',gap:14}}>
+        <div class="card" style=${{borderRadius:20}}>
+          <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)',marginBottom:12}}>Realtime + Performance</div>
+          ${[
+            ['SSE/WebSocket strategy','Single /api/stream is treated as primary push channel; polling is fallback only.','🟢'],
+            ['Request dedupe','Bootstrap data loads from one combined endpoint; heavy refreshes are throttled.','⚡'],
+            ['Virtual-ready chats','DM cache and stable local state prevent vanish/reappear refresh loops.','💬'],
+            ['Lazy modules','Big operational screens are route-rendered instead of always visible.','🧊']
+          ].map(row=>html`<div style=${{display:'flex',gap:10,padding:'9px 0',borderBottom:'1px solid var(--bd)'}}><div>${row[2]}</div><div><div style=${{fontSize:12,fontWeight:800,color:'var(--tx)'}}>${row[0]}</div><div style=${{fontSize:10,color:'var(--tx3)',lineHeight:1.5}}>${row[1]}</div></div></div>`)}
+        </div>
+        <div class="card" style=${{borderRadius:20}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>AI Next Actions</div><span style=${{fontSize:10,color:'var(--ac)',fontWeight:800}}>COPILOT</span></div>
+          <div style=${{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10}}>
+            ${recs.map(r=>html`<div onClick=${()=>onNav(r.nav)} style=${{cursor:'pointer',padding:12,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)',transition:'transform .15s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateY(-2px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateY(0)'}><div style=${{fontSize:20,marginBottom:7}}>${r.icon}</div><div style=${{fontSize:12,fontWeight:900,color:'var(--tx)'}}>${r.title}</div><div style=${{fontSize:10,color:'var(--tx3)',lineHeight:1.5,marginTop:3}}>${r.body}</div></div>`)}
+          </div>
         </div>
       </div>
     </div>`;
@@ -8520,7 +8635,7 @@ function App(){
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const VIEW_T={dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
+      const VIEW_T={dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
       const p=routeViewFromPath(Object.keys(VIEW_T));
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
@@ -8540,7 +8655,7 @@ function App(){
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',
-    messages:'Channels',dm:'Direct Messages',tickets:'Tickets',
+    messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',
     timeline:'Timeline Tracker',reminders:'Reminders',
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
@@ -8615,7 +8730,7 @@ function App(){
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
             window.dispatchEvent(new CustomEvent('pt:realtime',{detail:msg}));
-            if(['task_updated','project_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated'].includes(msg.type)){
+            if(['task_updated','project_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
               // Bust cache and reload — the server has already bust its own cache
               load(teamCtx,true)
             }
@@ -8853,7 +8968,7 @@ function App(){
         prevDmsRef.current=d;
         setDmUnread(d);
       });
-    },3000); // fast fallback for environments where SSE is delayed/disconnected
+    },15000); // fallback only — SSE is primary for environments where SSE is delayed/disconnected
     return()=>clearInterval(id);
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
@@ -8930,7 +9045,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(pollOnce, 8000); // fast fallback — SSE is primary
+    const id=setInterval(pollOnce, 20000); // fallback only — SSE is primary
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
@@ -8992,7 +9107,7 @@ function App(){
     const onRefresh=()=>load(undefined,{bust:true});
     const onRealtime=(e)=>{
       const msg=e.detail||{};
-      if(['project_updated','task_updated','ticket_updated','message_created','dm_created','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
+      if(['project_updated','task_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
         onRefresh();
       }
     };
@@ -9098,7 +9213,7 @@ function App(){
 
   const activeTeamName=activeTeam?activeTeam.name:'';
   const TITLES={
-    dashboard:{title:'Dashboard',sub:activeTeamName?activeTeamName+' Team Dashboard':'Overview of your work'}, projects:{title:'Projects',sub:scopedProjects.length+' projects'+(activeTeamName?' · '+activeTeamName:'')}, tasks:{title:'Kanban Board',sub:scopedTasks.filter(t=>t.stage!=='completed'&&t.stage!=='backlog').length+' active · '+scopedTasks.length+' total'+(activeTeamName?' · '+activeTeamName:'')}, messages:{title:'Channels',sub:(activeTeamName?activeTeamName+' · ':'')+'Project channels'}, dm:{title:'Direct Messages',sub:totalDm>0?totalDm+' unread':'Private conversations'}, reminders:{title:'Reminders',sub:'Upcoming task reminders'}, notifs:{title:'Notifications',sub:unread+' unread'}, team:{title:'Team Management',sub:'Members & sub-teams'}, settings:{title:'Settings',sub:wsName||'Workspace configuration'}, timeline:{title:'Timeline Tracker',sub:activeTeamName?activeTeamName+' project timeline':'Project schedule'}, productivity:{title:'Dev Productivity',sub:activeTeamName?activeTeamName+' performance':'Team performance analytics'}, tickets:{title:'Tickets',sub:activeTeamName?activeTeamName+' tickets':'Support tickets'}, 'ai-docs':{title:'AI Documentation',sub:'Generate docs & architecture diagrams'}, timesheet:{title:'Timesheet',sub:'Log hours · export reports · track productivity'}, };
+    dashboard:{title:'Dashboard',sub:activeTeamName?activeTeamName+' Team Dashboard':'Overview of your work'}, ops:{title:'Ops Center',sub:'Realtime · performance · portfolio risk'}, projects:{title:'Projects',sub:scopedProjects.length+' projects'+(activeTeamName?' · '+activeTeamName:'')}, tasks:{title:'Kanban Board',sub:scopedTasks.filter(t=>t.stage!=='completed'&&t.stage!=='backlog').length+' active · '+scopedTasks.length+' total'+(activeTeamName?' · '+activeTeamName:'')}, messages:{title:'Channels',sub:(activeTeamName?activeTeamName+' · ':'')+'Project channels'}, dm:{title:'Direct Messages',sub:totalDm>0?totalDm+' unread':'Private conversations'}, reminders:{title:'Reminders',sub:'Upcoming task reminders'}, notifs:{title:'Notifications',sub:unread+' unread'}, team:{title:'Team Management',sub:'Members & sub-teams'}, settings:{title:'Settings',sub:wsName||'Workspace configuration'}, timeline:{title:'Timeline Tracker',sub:activeTeamName?activeTeamName+' project timeline':'Project schedule'}, productivity:{title:'Dev Productivity',sub:activeTeamName?activeTeamName+' performance':'Team performance analytics'}, tickets:{title:'Tickets',sub:activeTeamName?activeTeamName+' tickets':'Support tickets'}, 'ai-docs':{title:'AI Documentation',sub:'Generate docs & architecture diagrams'}, timesheet:{title:'Timesheet',sub:'Log hours · export reports · track productivity'}, };
 
   const baseView=(view||'dashboard').split(':')[0];
   const viewParts=view.split(':');
