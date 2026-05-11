@@ -1167,449 +1167,784 @@ def _email_escape(value):
     return _html.escape(str(value or ""), quote=True)
 
 
-def _email_body_cleanup(body_html):
-    """Keep older notification snippets readable inside the new light email shell.
+# ══════════════════════════════════════════════════════════════════════════════
+# FUTURISTIC EMAIL TEMPLATE ENGINE v3.0
+# Dark-glass morphism design — compatible with Gmail, Outlook, Apple Mail, iOS
+# All animations use <style> keyframes (supported by Gmail via embedded CSS,
+# degraded gracefully in clients that strip styles).
+# ══════════════════════════════════════════════════════════════════════════════
 
-    Some old templates used white text intended for a black card. Email clients often
-    strip/alter CSS, which made the notification text almost invisible on light
-    backgrounds. This normalizes the common legacy colors without changing CTA links.
+def _email_base(
+    subject_label: str,
+    accent: str,
+    header_icon: str,
+    header_badge: str,
+    inner_html: str,
+    cta_url: str,
+    cta_text: str,
+    *,
+    celebration: bool = False,
+    warning: bool = False,
+    urgent: bool = False,
+) -> str:
     """
-    body_html = str(body_html or "")
-    replacements = {
-        "color:#fff;": "color:#101828;",
-        "color:#ffffff;": "color:#101828;",
-        "color:#e0e0f0;": "color:#1f2937;",
-        "color:#8888a8;": "color:#667085;",
-        "color:#4a4a5a;": "color:#667085;",
-        "color:#6a6a8a;": "color:#344054;",
-        "background:#111118;": "background:#ffffff;",
-        "border:1px solid #2a2a35;": "border:1px solid #e6eaf2;",
-    }
-    for old, new in replacements.items():
-        body_html = body_html.replace(old, new)
-    return body_html
+    Single master template — dark glassmorphism with CSS animations.
+    accent       : hex color  (#10b981)
+    header_icon  : emoji      (✅)
+    header_badge : short text (COMPLETED · TASK)
+    celebration  : adds confetti particle burst (task complete)
+    warning      : adds amber pulse border (due soon)
+    urgent       : adds red strobe indicator (overdue)
+    """
+    safe_url   = _email_escape(cta_url or APP_URL)
+    safe_cta   = _email_escape(cta_text or "Open ProjectTracker →")
+    safe_badge = _email_escape(header_badge or "NOTIFICATION")
+    safe_icon  = header_icon or "✨"
 
-def _email_base(header_html, body_html, cta_url, cta_text, cta_color):
-    """Apple-inspired email shell, designed for real email clients."""
-    cta_url = _email_escape(cta_url or APP_URL)
-    cta_text = _email_escape(cta_text or "View Dashboard")
-    cta_color = _email_escape(cta_color or "#5a8cff")
-    body_html = _email_body_cleanup(body_html)
-    return f"""<!doctype html>
+    # Derived lighter / alpha colours (inline-safe hex expansion)
+    accent_20  = accent + "33"   # 20% alpha fallback approximation
+    accent_40  = accent + "66"
+
+    # ── confetti dots (celebration only) ─────────────────────────────────────
+    confetti_html = ""
+    if celebration:
+        palette = ["#10b981","#6366f1","#f59e0b","#ef4444","#8b5cf6",
+                   "#06b6d4","#f97316","#a78bfa","#34d399","#fbbf24"]
+        dots = "".join(
+            f'<td style="padding:0 3px;">'
+            f'<div style="width:11px;height:11px;border-radius:50%;'
+            f'background:{c};display:inline-block;"></div></td>'
+            for c in palette
+        )
+        confetti_html = f"""
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+               style="margin:0 auto 22px;">
+          <tr>{dots}</tr>
+        </table>"""
+
+    # ── warning pulse bar ────────────────────────────────────────────────────
+    pulse_bar = ""
+    if urgent:
+        pulse_bar = f"""<div style="height:3px;background:linear-gradient(90deg,#ef4444,#f97316,#ef4444);margin-bottom:0;"></div>"""
+    elif warning:
+        pulse_bar = f"""<div style="height:3px;background:linear-gradient(90deg,#f59e0b,#fbbf24,#f59e0b);margin-bottom:0;"></div>"""
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light only">
-<title>Project Tracker</title>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="dark"/>
+<title>ProjectTracker</title>
 <style>
-  @media only screen and (max-width:620px) {{
-    .pt-wrap {{ padding:20px 10px !important; }}
-    .pt-card {{ width:100% !important; border-radius:24px !important; }}
-    .pt-pad {{ padding:24px 18px !important; }}
-    .pt-title {{ font-size:26px !important; }}
-    .pt-two-col {{ display:block !important; width:100% !important; }}
-    .pt-stat {{ margin-bottom:12px !important; }}
-  }}
-  .pt-cta:hover {{ filter:brightness(1.08); }}
+/* ── Animation keyframes (Gmail supports these in <style> blocks) ── */
+@keyframes pt-fade-in {{
+  from {{ opacity:0; transform:translateY(18px); }}
+  to   {{ opacity:1; transform:translateY(0); }}
+}}
+@keyframes pt-shimmer {{
+  0%   {{ background-position:-200% center; }}
+  100% {{ background-position: 200% center; }}
+}}
+@keyframes pt-bar-fill {{
+  from {{ width:0%; }}
+  to   {{ width:var(--bar-w,12%); }}
+}}
+@keyframes pt-spin {{
+  from {{ transform:rotate(0deg); }}
+  to   {{ transform:rotate(360deg); }}
+}}
+@keyframes pt-pulse {{
+  0%,100% {{ opacity:1; }}
+  50%     {{ opacity:.45; }}
+}}
+@keyframes pt-bounce-in {{
+  0%   {{ transform:scale(.6); opacity:0; }}
+  60%  {{ transform:scale(1.1); opacity:1; }}
+  100% {{ transform:scale(1); }}
+}}
+@keyframes pt-confetti-1 {{ 0%{{transform:rotate(0deg) translateY(0);opacity:1;}} 100%{{transform:rotate(360deg) translateY(-30px);opacity:0;}} }}
+@keyframes pt-confetti-2 {{ 0%{{transform:rotate(0deg) translateY(0);opacity:1;}} 100%{{transform:rotate(-270deg) translateY(-24px);opacity:0;}} }}
+@keyframes pt-countdown {{
+  from {{ stroke-dashoffset:0; }}
+  to   {{ stroke-dashoffset:100; }}
+}}
+@keyframes pt-glow {{
+  0%,100% {{ box-shadow:0 0 20px {accent}44; }}
+  50%     {{ box-shadow:0 0 40px {accent}88,0 0 80px {accent}22; }}
+}}
+
+.pt-card {{ animation:pt-fade-in .55s cubic-bezier(.16,1,.3,1) both; }}
+.pt-cta   {{
+  display:inline-block;padding:16px 32px;
+  background:linear-gradient(135deg,{accent},{accent}bb);
+  color:#ffffff!important;font-size:15px;font-weight:800;text-decoration:none;
+  border-radius:14px;letter-spacing:-.1px;
+  box-shadow:0 12px 40px {accent}55,inset 0 1px 0 rgba(255,255,255,.25);
+  transition:filter .2s;
+}}
+.pt-cta:hover {{ filter:brightness(1.15); }}
+
+@media only screen and (max-width:620px){{
+  .pt-outer {{ padding:16px 8px!important; }}
+  .pt-card  {{ border-radius:20px!important; }}
+  .pt-inner {{ padding:24px 18px!important; }}
+  .pt-h1    {{ font-size:26px!important;line-height:32px!important; }}
+  .pt-cols  {{ display:block!important; }}
+  .pt-col   {{ width:100%!important;padding:0 0 10px!important; }}
+}}
 </style>
 </head>
-<body style="margin:0;padding:0;background:#f4f7fb;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(135deg,#edf5ff 0%,#f7f1ff 45%,#f8fbff 100%);min-height:100vh;">
-    <tr><td class="pt-wrap" align="center" style="padding:42px 16px;">
-      <table role="presentation" class="pt-card" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:rgba(255,255,255,.94);border:1px solid rgba(255,255,255,.88);border-radius:32px;overflow:hidden;box-shadow:0 34px 90px rgba(31,41,55,.18), inset 0 1px 0 rgba(255,255,255,.95);">
-        {header_html}
-        <tr><td class="pt-pad" style="padding:34px 38px 16px;">
-          {body_html}
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:30px 0 12px;">
-            <tr>
-              <td bgcolor="{cta_color}" style="border-radius:18px;background:linear-gradient(135deg,{cta_color},#9b5cff);box-shadow:0 16px 32px rgba(90,140,255,.34);">
-                <a class="pt-cta" href="{cta_url}" style="display:inline-block;padding:15px 26px;color:#ffffff !important;font-size:15px;line-height:18px;font-weight:800;text-decoration:none;border-radius:18px;mso-padding-alt:0;">{cta_text}</a>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-        <tr><td style="padding:22px 38px 30px;background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(245,248,255,.92));border-top:1px solid rgba(148,163,184,.18);">
-          <p style="margin:0;text-align:center;font-size:12px;line-height:18px;color:#7b8496;">Project Tracker · Smart project and task intelligence · <a href="{cta_url}" style="color:#5a8cff;text-decoration:none;font-weight:700;">Manage preferences</a></p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
+<body style="margin:0;padding:0;background:#080b14;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e0e6f0;">
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:linear-gradient(160deg,#080b14 0%,#0d1526 40%,#080b14 100%);min-height:100vh;">
+  <tr><td class="pt-outer" align="center" style="padding:40px 16px;">
+
+    <!-- Card wrapper -->
+    <table role="presentation" class="pt-card" width="600" cellpadding="0" cellspacing="0" border="0"
+           style="width:600px;max-width:600px;background:linear-gradient(145deg,#111827,#0f172a);
+                  border:1px solid rgba(255,255,255,.08);border-radius:28px;overflow:hidden;
+                  box-shadow:0 40px 100px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.04),
+                             inset 0 1px 0 rgba(255,255,255,.06);">
+
+      <!-- Accent top bar -->
+      {pulse_bar}
+      <tr><td style="height:3px;background:linear-gradient(90deg,{accent},#818cf8,{accent});font-size:0;">&nbsp;</td></tr>
+
+      <!-- ── HEADER ── -->
+      <tr><td style="padding:28px 32px 22px;background:linear-gradient(135deg,rgba(255,255,255,.04) 0%,rgba(255,255,255,.01) 100%);">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <!-- Logo -->
+            <td style="vertical-align:middle;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td style="padding-right:10px;vertical-align:middle;">
+                    <div style="width:40px;height:40px;border-radius:12px;
+                                background:linear-gradient(135deg,{accent},{accent}88);
+                                text-align:center;line-height:40px;font-size:20px;
+                                box-shadow:0 8px 24px {accent}44;">
+                      {safe_icon}
+                    </div>
+                  </td>
+                  <td style="vertical-align:middle;">
+                    <div style="font-size:19px;font-weight:900;color:#ffffff;letter-spacing:-.6px;line-height:1;">
+                      Project<span style="color:{accent};">Tracker</span>
+                    </div>
+                    <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.45);
+                                letter-spacing:1.4px;text-transform:uppercase;margin-top:2px;">
+                      {safe_badge}
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+            <!-- Status chip -->
+            <td align="right" style="vertical-align:middle;">
+              <div style="display:inline-block;padding:6px 14px;border-radius:999px;
+                          background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);
+                          font-size:10px;font-weight:800;color:rgba(255,255,255,.6);
+                          letter-spacing:.8px;text-transform:uppercase;">
+                Live&nbsp;·&nbsp;{subject_label}
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+      <!-- Hairline separator -->
+      <tr><td style="height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.08) 30%,rgba(255,255,255,.08) 70%,transparent);font-size:0;">&nbsp;</td></tr>
+
+      <!-- ── BODY ── -->
+      <tr><td class="pt-inner" style="padding:32px 32px 24px;">
+        {confetti_html}
+        {inner_html}
+
+        <!-- CTA button -->
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:28px;">
+          <tr>
+            <td style="border-radius:14px;background:linear-gradient(135deg,{accent},{accent}cc);
+                       box-shadow:0 12px 40px {accent}44,inset 0 1px 0 rgba(255,255,255,.2);">
+              <a class="pt-cta" href="{safe_url}"
+                 style="display:inline-block;padding:15px 30px;color:#ffffff!important;
+                        font-size:14px;line-height:18px;font-weight:800;text-decoration:none;
+                        border-radius:14px;letter-spacing:.1px;">
+                {safe_cta}
+              </a>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+      <!-- ── FOOTER ── -->
+      <tr><td style="padding:18px 32px 24px;
+                     background:rgba(0,0,0,.25);
+                     border-top:1px solid rgba(255,255,255,.05);">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td>
+              <p style="margin:0;font-size:11px;color:rgba(255,255,255,.3);line-height:1.7;">
+                ProjectTracker &nbsp;·&nbsp; Smart Project & Task Intelligence<br/>
+                <a href="{safe_url}" style="color:{accent};text-decoration:none;font-weight:600;">
+                  Manage notification preferences
+                </a>
+              </p>
+            </td>
+            <td align="right" style="vertical-align:top;">
+              <div style="font-size:10px;color:rgba(255,255,255,.2);font-weight:600;letter-spacing:.5px;text-align:right;">
+                AUTOMATED<br/>NOTIFICATION
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+
+    </table>
+    <!-- /card -->
+
+  </td></tr>
+</table>
+
 </body>
 </html>"""
 
 
-def _header_strip(accent, icon, label):
-    """Premium header using email-safe emoji icons instead of SF Symbols."""
-    accent = _email_escape(accent or "#5a8cff")
-    icon = _email_escape(icon or "✨")
-    label = _email_escape(label or "Project Update")
+def _task_card(title: str, accent: str, meta_rows: list[tuple[str, str]]) -> str:
+    """Reusable dark task card with gradient left border."""
+    safe_title = _email_escape(title)
+    rows_html = ""
+    for label, value in meta_rows:
+        rows_html += f"""
+        <tr>
+          <td style="padding:3px 0;font-size:11px;color:rgba(255,255,255,.4);
+                     font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+                     white-space:nowrap;padding-right:16px;">{_email_escape(label)}</td>
+          <td style="padding:3px 0;font-size:12px;color:rgba(255,255,255,.75);
+                     font-weight:600;">{_email_escape(value)}</td>
+        </tr>"""
     return f"""
-    <tr><td style="background:linear-gradient(135deg,#0b1225 0%,#142a5f 45%,#6d4aff 100%);padding:0;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td style="padding:28px 34px 26px;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-            <tr>
-              <td style="vertical-align:middle;">
-                <div style="display:inline-block;width:44px;height:44px;border-radius:16px;background:rgba(255,255,255,.16);text-align:center;line-height:44px;font-size:22px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25);">{icon}</div>
-              </td>
-              <td style="vertical-align:middle;padding-left:14px;">
-                <div style="font-size:23px;line-height:28px;font-weight:900;letter-spacing:-.7px;color:#ffffff;">Project<span style="color:#bcd7ff;">Tracker</span></div>
-                <div style="font-size:12px;line-height:16px;color:rgba(255,255,255,.72);font-weight:700;letter-spacing:.9px;text-transform:uppercase;">{label}</div>
-              </td>
-              <td align="right" style="vertical-align:middle;">
-                <div style="display:inline-block;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.14);color:#ffffff;font-size:12px;font-weight:800;">Live Summary</div>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-      </table>
-      <div style="height:5px;background:linear-gradient(90deg,{accent},#9b5cff,#34d3ff);"></div>
-    </td></tr>"""
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+           style="background:linear-gradient(135deg,rgba(255,255,255,.05),rgba(255,255,255,.02));
+                  border:1px solid rgba(255,255,255,.08);border-left:4px solid {accent};
+                  border-radius:16px;overflow:hidden;margin:16px 0;">
+      <tr><td style="padding:20px 24px;">
+        <div style="font-size:11px;font-weight:800;color:rgba(255,255,255,.35);
+                    letter-spacing:1.2px;text-transform:uppercase;margin-bottom:8px;">Task</div>
+        <div style="font-size:20px;font-weight:900;color:#ffffff;
+                    letter-spacing:-.3px;line-height:1.3;margin-bottom:14px;">{safe_title}</div>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+               style="border-top:1px solid rgba(255,255,255,.06);padding-top:12px;width:100%;">
+          {rows_html}
+        </table>
+      </td></tr>
+    </table>"""
+
+
+def _stat_pill(icon: str, label: str, value: str, color: str) -> str:
+    """Small inline stat pill."""
+    return f"""
+    <td class="pt-col" style="width:50%;padding-right:6px;vertical-align:top;">
+      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);
+                  border-radius:14px;padding:14px 16px;">
+        <div style="font-size:18px;margin-bottom:6px;">{icon}</div>
+        <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.35);
+                    letter-spacing:.9px;text-transform:uppercase;">{_email_escape(label)}</div>
+        <div style="font-size:15px;font-weight:900;color:{color};margin-top:4px;">{_email_escape(value)}</div>
+      </div>
+    </td>"""
+
+
+def _avatar_row(name: str, accent: str, sub: str = "") -> str:
+    """Avatar initials circle + name/sub text."""
+    initials = "".join(p[0].upper() for p in (name or "?").split()[:2])
+    safe_name = _email_escape(name)
+    safe_sub  = _email_escape(sub)
+    return f"""
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;">
+      <tr>
+        <td style="padding-right:14px;vertical-align:middle;">
+          <div style="width:44px;height:44px;border-radius:14px;
+                      background:linear-gradient(135deg,{accent},{accent}88);
+                      text-align:center;line-height:44px;font-size:17px;font-weight:900;
+                      color:#ffffff;box-shadow:0 8px 20px {accent}44;">{initials}</div>
+        </td>
+        <td style="vertical-align:middle;">
+          <div style="font-size:15px;font-weight:800;color:#ffffff;">{safe_name}</div>
+          {f'<div style="font-size:12px;color:rgba(255,255,255,.45);margin-top:2px;">{safe_sub}</div>' if sub else ''}
+        </td>
+      </tr>
+    </table>"""
+
+
+def _progress_bar(pct: int, accent: str) -> str:
+    """Animated progress bar (CSS animation on supporting clients)."""
+    w = max(3, min(100, int(pct)))
+    return f"""
+    <div style="height:8px;background:rgba(255,255,255,.08);border-radius:999px;
+                overflow:hidden;margin-top:12px;margin-bottom:6px;">
+      <div style="width:{w}%;height:8px;
+                  background:linear-gradient(90deg,{accent},{accent}bb);
+                  border-radius:999px;
+                  animation:pt-bar-fill .9s cubic-bezier(.16,1,.3,1) both;">
+      </div>
+    </div>
+    <div style="font-size:10px;color:rgba(255,255,255,.35);font-weight:700;">{w}% complete</div>"""
+
+
+# ── Individual send functions ──────────────────────────────────────────────────
 
 def send_task_assigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    """Premium email: task assigned to user."""
+    """Futuristic task-assigned email with assignment animation indicators."""
     accent  = "#6366f1"
-    subject = f"📋 New Task: {task_title}"
-    safe_user = _email_escape(user_name)
+    subject = f"📋 New Task Assigned: {task_title}"
+    safe_user     = _email_escape(user_name)
     safe_assigner = _email_escape(assigner_name)
-    safe_task = _email_escape(task_title)
-    header  = _header_strip(accent, "📋", "Task Assignment")
-    body    = f"""
-      <h1 class="pt-title" style="margin:0 0 10px;font-size:32px;line-height:38px;color:#101828;letter-spacing:-1px;font-weight:900;">You’ve got a new task</h1>
-      <p style="margin:0 0 24px;font-size:15px;line-height:23px;color:#667085;">
-        Hi <strong style="color:#101828;">{safe_user}</strong>, <strong style="color:#101828;">{safe_assigner}</strong> assigned a new task to you.
+
+    body = f"""
+      <!-- Greeting -->
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:30px;font-weight:900;
+          color:#ffffff;letter-spacing:-.8px;line-height:1.2;">
+        📋 You've got a new task
+      </h1>
+      <p style="margin:0 0 24px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_assigner}</strong> just assigned a task to you.
+        Time to make it happen! 🚀
       </p>
 
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(180deg,#ffffff,#f7f9ff);border:1px solid #e6eaf2;border-radius:24px;box-shadow:0 18px 42px rgba(31,41,55,.10);overflow:hidden;margin:0 0 16px;">
+      {_task_card(task_title, accent, [("Assigned by", assigner_name), ("Status", "New · Awaiting action"), ("Priority", "Normal")])}
+
+      <!-- Stat pills -->
+      <table role="presentation" class="pt-cols" width="100%"
+             cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 4px;">
         <tr>
-          <td style="padding:22px 24px;">
-            <div style="font-size:11px;line-height:14px;color:#667085;letter-spacing:1.1px;text-transform:uppercase;font-weight:900;margin-bottom:8px;">Task</div>
-            <div style="font-size:22px;line-height:28px;font-weight:900;color:#101828;letter-spacing:-.3px;">{safe_task}</div>
-            <div style="margin-top:16px;height:10px;background:#edf2ff;border-radius:999px;overflow:hidden;">
-              <div style="width:12%;height:10px;background:linear-gradient(90deg,#6675ff,#b15cff);border-radius:999px;"></div>
-            </div>
-            <div style="margin-top:10px;font-size:12px;line-height:18px;color:#667085;">Status: <strong style="color:#6366f1;">New</strong> · Assigned by {safe_assigner}</div>
-          </td>
-          <td width="88" align="center" style="padding:22px 24px;vertical-align:top;">
-            <span style="display:inline-block;background:#eef2ff;color:#4f46e5;font-size:11px;font-weight:900;padding:7px 12px;border-radius:999px;letter-spacing:.6px;">NEW</span>
-          </td>
+          {_stat_pill("🎯", "Action required", "Start now", accent)}
+          {_stat_pill("⚡", "Priority", "Normal", "#f59e0b")}
         </tr>
       </table>
 
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">
-        <tr>
-          <td style="width:50%;padding-right:8px;">
-            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
-              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Priority</div>
-              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Normal</div>
-            </div>
-          </td>
-          <td style="width:50%;padding-left:8px;">
-            <div style="background:#f8fbff;border:1px solid #e6eaf2;border-radius:18px;padding:14px;">
-              <div style="font-size:11px;color:#667085;font-weight:900;text-transform:uppercase;letter-spacing:.8px;">Next step</div>
-              <div style="font-size:16px;color:#101828;font-weight:900;margin-top:4px;">Review & update</div>
-            </div>
-          </td>
-        </tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Open Task →", accent)
+      <!-- Assignment animation ticker -->
+      <div style="margin-top:20px;padding:14px 18px;
+                  background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);
+                  border-radius:12px;font-size:12px;color:rgba(255,255,255,.55);line-height:1.6;">
+        <span style="color:{accent};font-weight:800;">● LIVE</span>&nbsp;
+        Task has been added to your queue · Review and update progress in your dashboard
+      </div>"""
+
+    html = _email_base(
+        subject_label="TASK", accent=accent, header_icon="📋",
+        header_badge="TASK ASSIGNMENT", inner_html=body,
+        cta_url=APP_URL, cta_text="Open Task Dashboard →",
+    )
     send_email(user_email, subject, html, workspace_id)
 
+
 def send_status_change_email(user_email, user_name, task_title, new_stage, changer_name, workspace_id):
-    """Premium email: task stage changed."""
+    """Futuristic status-change email with stage indicator."""
     stage_meta = {
-        "completed":   ("#10b981", "✅", "Completed"),
-        "production":  ("#10b981", "🚀", "In Production"),
-        "in_progress": ("#f59e0b", "⚡", "In Progress"),
-        "review":      ("#8b5cf6", "👀", "In Review"),
-        "backlog":     ("#6b7280", "📥", "Backlog"),
-        "testing":     ("#06b6d4", "🧪", "Testing"),
+        "completed":   ("#10b981", "✅", "Completed",   True,  False),
+        "production":  ("#10b981", "🚀", "In Production", False, False),
+        "in_progress": ("#6366f1", "⚡", "In Progress", False, False),
+        "review":      ("#8b5cf6", "👀", "In Review",   False, False),
+        "backlog":     ("#6b7280", "📥", "Backlog",     False, False),
+        "testing":     ("#06b6d4", "🧪", "Testing",     False, False),
     }
-    accent, icon, label = stage_meta.get(new_stage, ("#6366f1","🔄","Updated"))
-    subject = f"{icon} Task moved to {label}: {task_title}"
-    header  = _header_strip(accent, icon, "Status Update")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
-        {icon} Status changed
-      </p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{changer_name}</strong> updated your task.
+    accent, icon, label, celeb, _ = stage_meta.get(new_stage, ("#6366f1","🔄","Updated",False,False))
+    subject = f"{icon} Task → {label}: {task_title}"
+    safe_user    = _email_escape(user_name)
+    safe_changer = _email_escape(changer_name)
+
+    # Stage pipeline
+    stages = ["backlog","in_progress","review","testing","production","completed"]
+    current_idx = stages.index(new_stage) if new_stage in stages else 0
+    pipeline = ""
+    for i, s in enumerate(stages):
+        sm = stage_meta.get(s, ("#6b7280","·","",False,False))
+        is_cur = (s == new_stage)
+        is_done = (i <= current_idx)
+        dot_color = sm[0] if is_done else "rgba(255,255,255,.12)"
+        dot_style = f"border:2px solid {sm[0]};" if is_cur else ""
+        pipeline += f"""
+          <td align="center" style="width:60px;vertical-align:top;">
+            <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 4px;
+                        background:{dot_color};{dot_style}
+                        text-align:center;line-height:{'24' if is_cur else '28'}px;font-size:13px;">
+              {sm[1] if is_done else ''}
+            </div>
+            <div style="font-size:8px;font-weight:700;color:{'#fff' if is_cur else 'rgba(255,255,255,.3)'};
+                        letter-spacing:.4px;text-transform:uppercase;">{sm[2][:6]}</div>
+          </td>"""
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        {icon} Status updated
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_changer}</strong>
+        moved your task to <strong style="color:{accent};">{label}</strong>.
       </p>
 
-      <!-- Task card -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;
-                    border-left:4px solid {accent};overflow:hidden;margin-bottom:8px;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0 0 16px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <!-- Stage pill -->
-          <table cellpadding="0" cellspacing="0" border="0">
-            <tr>
-              <td style="background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:6px 14px;">
-                <span style="font-size:13px;font-weight:700;color:{accent};">{icon} {label}</span>
-              </td>
-            </tr>
-          </table>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Task →", accent)
+      {_task_card(task_title, accent, [("New status", f"{icon} {label}"), ("Changed by", changer_name)])}
+
+      <!-- Stage pipeline -->
+      <div style="margin-top:18px;padding:18px;
+                  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+                  border-radius:14px;">
+        <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.3);
+                    letter-spacing:1px;text-transform:uppercase;margin-bottom:14px;">Progress pipeline</div>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+          <tr>{pipeline}</tr>
+        </table>
+      </div>"""
+
+    html = _email_base(
+        subject_label="STATUS", accent=accent, header_icon=icon,
+        header_badge=f"STATUS UPDATE · {label.upper()}",
+        inner_html=body, cta_url=APP_URL, cta_text="View Task →",
+        celebration=celeb,
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_comment_email(user_email, user_name, task_title, commenter_name, comment_text, workspace_id):
-    """Premium email: new comment on task."""
+    """Futuristic comment notification email."""
     accent  = "#f59e0b"
     subject = f"💬 {commenter_name} commented on: {task_title}"
-    header  = _header_strip(accent, "💬", "New Comment")
-    # Avatar initials circle
-    initials = "".join(p[0].upper() for p in commenter_name.split()[:2])
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">
-        New comment 💬
-      </p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
+    safe_user     = _email_escape(user_name)
+    safe_comment  = _email_escape(comment_text)
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        💬 New comment
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
         someone left a comment on your task.
       </p>
 
-      <!-- Task label -->
-      <p style="margin:0 0 8px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">On task</p>
-      <p style="margin:0 0 20px;font-size:16px;font-weight:700;color:#e0e0f0;">{task_title}</p>
+      {_avatar_row(commenter_name, accent, "Commented just now")}
+
+      <div style="margin-bottom:16px;font-size:11px;font-weight:800;color:rgba(255,255,255,.35);
+                  letter-spacing:.9px;text-transform:uppercase;">On task</div>
+      <div style="font-size:15px;font-weight:700;color:#ffffff;margin-bottom:18px;">
+        {_email_escape(task_title)}
+      </div>
 
       <!-- Comment bubble -->
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;margin-bottom:8px;">
-        <tr><td style="padding:20px 24px;">
-          <!-- Commenter row -->
-          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
-            <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <div style="width:36px;height:36px;border-radius:50%;background:{accent};
-                             display:inline-flex;align-items:center;justify-content:center;">
-                  <span style="font-size:13px;font-weight:800;color:#fff;">{initials}</span>
-                </div>
-              </td>
-              <td style="vertical-align:middle;">
-                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{commenter_name}</p>
-                <p style="margin:0;font-size:11px;color:#5a5a7a;">just now</p>
-              </td>
-            </tr>
-          </table>
-          <!-- Comment text -->
-          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
-            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
-          </div>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Reply →", accent)
+      <div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.18);
+                  border-left:4px solid {accent};border-radius:14px;padding:18px 20px;
+                  font-size:14px;line-height:1.75;color:rgba(255,255,255,.8);">
+        {safe_comment}
+      </div>"""
+
+    html = _email_base(
+        subject_label="COMMENT", accent=accent, header_icon="💬",
+        header_badge="NEW COMMENT", inner_html=body,
+        cta_url=APP_URL, cta_text="Reply to Comment →",
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
-# ── Extended Email Notification Functions ─────────────────────────────────────
-
 def send_task_reassigned_email(user_email, user_name, task_title, assigner_name, task_id, workspace_id):
-    """Premium email: task reassigned to a different user."""
+    """Futuristic reassignment email."""
     accent  = "#818cf8"
-    subject = f"\U0001f504 Task reassigned to you: {task_title}"
-    header  = _header_strip(accent, "🔄", "Reassignment")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">You're now on this task 🔄</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{assigner_name}</strong> has reassigned this task to you.
+    subject = f"🔄 Task reassigned to you: {task_title}"
+    safe_user     = _email_escape(user_name)
+    safe_assigner = _email_escape(assigner_name)
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        🔄 Task reassigned to you
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_assigner}</strong>
+        has transferred this task to you. You're now the owner — let's ship it!
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Open Task \u2192", accent)
+
+      {_task_card(task_title, accent, [("Reassigned by", assigner_name), ("Status", "Awaiting your action")])}
+
+      <!-- Live indicator -->
+      <div style="margin-top:16px;padding:12px 16px;
+                  background:rgba(129,140,248,.1);border:1px solid rgba(129,140,248,.2);
+                  border-radius:10px;font-size:12px;color:rgba(255,255,255,.5);line-height:1.6;">
+        <span style="color:{accent};font-weight:800;">● REASSIGNED</span>&nbsp;
+        Ownership transferred · Your queue has been updated
+      </div>"""
+
+    html = _email_base(
+        subject_label="REASSIGN", accent=accent, header_icon="🔄",
+        header_badge="TASK REASSIGNMENT", inner_html=body,
+        cta_url=APP_URL, cta_text="Open Task →",
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_due_soon_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    """Premium email: task due in 24 hours."""
+    """Futuristic due-soon warning email with countdown indicators."""
     accent  = "#f59e0b"
-    subject = f"\u23f0 Due Tomorrow: {task_title}"
-    header  = _header_strip(accent, "\u23f0", "Due Reminder")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Due tomorrow \u23f0</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        this task is due <strong style="color:{accent};">tomorrow</strong>. Don't miss it!
+    subject = f"⏰ Due Tomorrow: {task_title}"
+    safe_user = _email_escape(user_name)
+    safe_due  = _email_escape(str(due_date))
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        ⏰ Due tomorrow — heads up!
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        this task is due <strong style="color:{accent};">tomorrow</strong>.
+        You've got less than 24 hours — don't let it slip!
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Task</p>
-          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">\U0001f4c5 Due {due_date}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Complete Task \u2192", accent)
+
+      {_task_card(task_title, accent, [("Due date", due_date), ("Status", "Pending · Action needed"), ("Time left", "< 24 hours")])}
+
+      {_progress_bar(75, accent)}
+
+      <!-- Countdown alert -->
+      <table role="presentation" class="pt-cols" width="100%"
+             cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 4px;">
+        <tr>
+          {_stat_pill("⏰", "Time remaining", "< 24 hrs", accent)}
+          {_stat_pill("🚨", "Urgency", "High", "#ef4444")}
+        </tr>
+      </table>
+
+      <div style="margin-top:16px;padding:14px 18px;
+                  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
+                  border-radius:12px;font-size:12px;color:rgba(255,255,255,.6);line-height:1.6;">
+        <span style="color:{accent};font-weight:800;">⚠ REMINDER</span>&nbsp;
+        Complete or update status before midnight to avoid an overdue flag.
+      </div>"""
+
+    html = _email_base(
+        subject_label="DUE SOON", accent=accent, header_icon="⏰",
+        header_badge="DUE DATE REMINDER", inner_html=body,
+        cta_url=APP_URL, cta_text="Complete Task →",
+        warning=True,
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_overdue_email(user_email, user_name, task_title, due_date, task_id, workspace_id):
-    """Premium email: task overdue."""
+    """Futuristic overdue alert email with urgent pulsing indicators."""
     accent  = "#ef4444"
-    subject = f"\U0001f6a8 Overdue: {task_title}"
-    header  = _header_strip(accent, "\U0001f6a8", "Overdue Alert")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">This task is overdue \U0001f6a8</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        the deadline has passed. Please complete or update this task immediately.
+    subject = f"🚨 Overdue: {task_title}"
+    safe_user = _email_escape(user_name)
+    safe_due  = _email_escape(str(due_date))
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        🚨 Task overdue — immediate action needed
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        the deadline for this task has passed.
+        Please complete it or update the due date immediately.
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Overdue Task</p>
-          <p style="margin:0 0 12px;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">Was due {due_date}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "Update Task \u2192", accent)
+
+      {_task_card(task_title, accent, [("Was due", due_date), ("Status", "OVERDUE · Immediate action required"), ("Days late", "Check dashboard")])}
+
+      <table role="presentation" class="pt-cols" width="100%"
+             cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;">
+        <tr>
+          {_stat_pill("🚨", "Status", "Overdue", accent)}
+          {_stat_pill("⚡", "Action", "Update now", "#f97316")}
+        </tr>
+      </table>
+
+      <!-- Critical alert bar -->
+      <div style="margin-top:16px;padding:14px 18px;
+                  background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);
+                  border-radius:12px;font-size:12px;color:rgba(255,255,255,.65);line-height:1.6;">
+        <span style="color:{accent};font-weight:800;">🔴 CRITICAL</span>&nbsp;
+        This task is blocking your project timeline.
+        Update status or mark complete immediately to clear this alert.
+      </div>"""
+
+    html = _email_base(
+        subject_label="OVERDUE", accent=accent, header_icon="🚨",
+        header_badge="OVERDUE ALERT", inner_html=body,
+        cta_url=APP_URL, cta_text="Update Task Now →",
+        urgent=True,
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_assigned_email(user_email, user_name, ticket_title, reporter_name, ticket_id, priority, workspace_id):
-    """Premium email: support ticket assigned."""
+    """Futuristic support ticket assignment email."""
     priority_meta = {
-        "critical": ("#ef4444", "\U0001f534", "Critical"),
-        "high":     ("#f97316", "\U0001f7e0", "High"),
-        "medium":   ("#f59e0b", "\U0001f7e1", "Medium"),
-        "low":      ("#10b981", "\U0001f7e2", "Low"),
+        "critical": ("#ef4444", "🔴", "Critical"),
+        "high":     ("#f97316", "🟠", "High"),
+        "medium":   ("#f59e0b", "🟡", "Medium"),
+        "low":      ("#10b981", "🟢", "Low"),
     }
-    accent, dot, plabel = priority_meta.get(priority, ("#6366f1", "\U0001f535", "Normal"))
-    subject = f"\U0001f3ab Ticket assigned: {ticket_title}"
-    header  = _header_strip(accent, "\U0001f3ab", "Support Ticket")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">New ticket assigned \U0001f3ab</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{reporter_name}</strong> assigned you a support ticket.
+    accent, dot, plabel = priority_meta.get(priority, ("#6366f1", "🔵", "Normal"))
+    subject = f"🎫 Ticket assigned: {ticket_title}"
+    safe_user     = _email_escape(user_name)
+    safe_reporter = _email_escape(reporter_name)
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        🎫 New support ticket assigned
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_reporter}</strong>
+        has assigned you a support ticket. Please review and respond promptly.
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
-          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{dot} {plabel} Priority</span>
-        </td></tr>
+
+      {_avatar_row(reporter_name, accent, "Reporter")}
+
+      {_task_card(ticket_title, accent, [("Reported by", reporter_name), ("Priority", f"{dot} {plabel}"), ("Status", "Open · Assigned to you")])}
+
+      <table role="presentation" class="pt-cols" width="100%"
+             cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;">
+        <tr>
+          {_stat_pill(dot, "Priority", plabel, accent)}
+          {_stat_pill("🎫", "Type", "Support Ticket", "#818cf8")}
+        </tr>
       </table>"""
-    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+
+    html = _email_base(
+        subject_label="TICKET", accent=accent, header_icon="🎫",
+        header_badge="SUPPORT TICKET", inner_html=body,
+        cta_url=APP_URL, cta_text="View Ticket →",
+        urgent=(priority == "critical"),
+        warning=(priority == "high"),
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_ticket_status_email(user_email, user_name, ticket_title, new_status, changer_name, ticket_id, workspace_id):
-    """Premium email: ticket status updated."""
+    """Futuristic ticket status update email."""
     status_meta = {
-        "open":        ("#6366f1", "\U0001f4c2", "Opened"),
-        "in_progress": ("#f59e0b", "\u26a1",      "In Progress"),
-        "resolved":    ("#10b981", "\u2705",       "Resolved"),
-        "closed":      ("#6b7280", "\U0001f512",   "Closed"),
+        "open":        ("#6366f1", "📂", "Opened"),
+        "in_progress": ("#f59e0b", "⚡", "In Progress"),
+        "resolved":    ("#10b981", "✅", "Resolved"),
+        "closed":      ("#6b7280", "🔒", "Closed"),
     }
-    accent, icon, label = status_meta.get(new_status, ("#6366f1", "\U0001f3ab", "Updated"))
+    accent, icon, label = status_meta.get(new_status, ("#6366f1", "🎫", "Updated"))
     subject = f"{icon} Ticket {label}: {ticket_title}"
-    header  = _header_strip(accent, icon, "Ticket Update")
-    body    = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Ticket {label.lower()} {icon}</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{changer_name}</strong> updated your ticket status.
+    safe_user    = _email_escape(user_name)
+    safe_changer = _email_escape(changer_name)
+    celeb = (new_status == "resolved")
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        {icon} Ticket {label.lower()}
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_changer}</strong>
+        updated your ticket status to <strong style="color:{accent};">{label}</strong>.
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Ticket</p>
-          <p style="margin:0 0 14px;font-size:19px;font-weight:700;color:#fff;">{ticket_title}</p>
-          <span style="display:inline-block;background:{accent}20;border:1px solid {accent}40;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:{accent};">{icon} {label}</span>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Ticket \u2192", accent)
+
+      {_task_card(ticket_title, accent, [("New status", f"{icon} {label}"), ("Updated by", changer_name)])}"""
+
+    html = _email_base(
+        subject_label="TICKET", accent=accent, header_icon=icon,
+        header_badge=f"TICKET {label.upper()}", inner_html=body,
+        cta_url=APP_URL, cta_text="View Ticket →",
+        celebration=celeb,
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
-    """Premium email: @mention in a comment."""
+    """Futuristic @mention notification email."""
     accent   = "#a78bfa"
-    initials = "".join(p[0].upper() for p in mentioner_name.split()[:2])
-    subject  = f"\U0001f4ac {mentioner_name} mentioned you in: {context_title}"
-    header   = _header_strip(accent, "\U0001f4ac", "Mention")
-    body     = f"""
-      <p style="margin:28px 0 6px;font-size:26px;font-weight:800;color:#fff;line-height:1.2;">Someone mentioned you \U0001f4ac</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        you were mentioned in <strong style="color:#fff;">{context_title}</strong>.
+    subject  = f"💬 {mentioner_name} mentioned you in: {context_title}"
+    safe_user    = _email_escape(user_name)
+    safe_comment = _email_escape(comment_text)
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:28px;font-weight:900;
+          color:#ffffff;letter-spacing:-.6px;line-height:1.2;">
+        💬 You were mentioned
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{_email_escape(mentioner_name)}</strong>
+        mentioned you in <strong style="color:#ffffff;">{_email_escape(context_title)}</strong>.
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;overflow:hidden;">
-        <tr><td style="padding:20px 24px;">
-          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:14px;">
-            <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <table cellpadding="0" cellspacing="0" border="0">
-                  <tr><td width="38" height="38" style="width:38px;height:38px;border-radius:50%;background:{accent};text-align:center;vertical-align:middle;">
-                    <span style="font-size:14px;font-weight:800;color:#fff;line-height:38px;">{initials}</span>
-                  </td></tr>
-                </table>
-              </td>
-              <td style="vertical-align:middle;">
-                <p style="margin:0;font-size:14px;font-weight:700;color:#fff;">{mentioner_name}</p>
-                <p style="margin:0;font-size:11px;color:#5a5a7a;">mentioned you</p>
-              </td>
-            </tr>
-          </table>
-          <div style="background:#18181f;border-radius:10px;padding:14px 18px;border-left:3px solid {accent};">
-            <p style="margin:0;font-size:14px;color:#c0c0d8;line-height:1.7;">{comment_text}</p>
-          </div>
-        </td></tr>
-      </table>"""
-    html = _email_base(header, body, APP_URL, "View Thread \u2192", accent)
+
+      {_avatar_row(mentioner_name, accent, "Mentioned you")}
+
+      <!-- Mention quote block -->
+      <div style="background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.2);
+                  border-left:4px solid {accent};border-radius:14px;padding:18px 20px;
+                  margin-bottom:16px;">
+        <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.3);
+                    letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">
+          Mentioned in · {_email_escape(context_title)}
+        </div>
+        <div style="font-size:14px;line-height:1.75;color:rgba(255,255,255,.8);">
+          {safe_comment}
+        </div>
+      </div>"""
+
+    html = _email_base(
+        subject_label="MENTION", accent=accent, header_icon="💬",
+        header_badge="@MENTION", inner_html=body,
+        cta_url=APP_URL, cta_text="View Thread →",
+    )
     send_email(user_email, subject, html, workspace_id)
 
 
 def send_task_completed_email(user_email, user_name, task_title, completer_name, workspace_id):
-    """Premium completion email with confetti-dot celebration row."""
-    accent = "#10b981"
-    subject = f"\u2705 Done! {task_title}"
-    confetti_colors = ["#10b981","#6366f1","#f59e0b","#ef4444","#8b5cf6",
-                       "#06b6d4","#f97316","#10b981","#818cf8","#10b981"]
-    dots = "".join(
-        f'<td width="12" height="12" style="width:12px;height:12px;border-radius:50%;background:{c};">&nbsp;</td>'
-        f'<td width="5">&nbsp;</td>'
-        for c in confetti_colors
-    )
-    confetti = f'<table cellpadding="0" cellspacing="4" border="0" style="margin-bottom:20px;"><tr>{dots}</tr></table>'
-    header   = _header_strip(accent, "\u2705", "Task Complete")
-    body     = f"""
-      {confetti}
-      <p style="margin:0 0 6px;font-size:30px;font-weight:900;color:#fff;line-height:1.2;">Task complete! \U0001f389</p>
-      <p style="margin:0 0 28px;font-size:15px;color:#8888a8;line-height:1.6;">
-        Hi <strong style="color:#e0e0f0;">{user_name}</strong>,
-        <strong style="color:#fff;">{completer_name}</strong> just wrapped this one up.
+    """Futuristic task-completed email with full celebration animation."""
+    accent  = "#10b981"
+    subject = f"✅ Completed! {task_title}"
+    safe_user      = _email_escape(user_name)
+    safe_completer = _email_escape(completer_name)
+
+    body = f"""
+      <h1 class="pt-h1" style="margin:0 0 10px;font-size:32px;font-weight:900;
+          color:#ffffff;letter-spacing:-.8px;line-height:1.2;">
+        🎉 Task complete!
+      </h1>
+      <p style="margin:0 0 22px;font-size:15px;line-height:1.7;color:rgba(255,255,255,.55);">
+        Hi <strong style="color:#ffffff;">{safe_user}</strong>,
+        <strong style="color:{accent};">{safe_completer}</strong>
+        just wrapped this one up. Excellent work by the team! 🤝
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0"
-             style="background:#111118;border:1px solid #2a2a35;border-radius:14px;border-left:4px solid {accent};overflow:hidden;">
-        <tr>
-          <td style="padding:20px 24px;">
-            <p style="margin:0 0 4px;font-size:11px;color:#5a5a7a;letter-spacing:1px;text-transform:uppercase;">Completed</p>
-            <p style="margin:0;font-size:19px;font-weight:700;color:#fff;">{task_title}</p>
-          </td>
-          <td style="padding:20px 24px;text-align:right;vertical-align:middle;">
-            <span style="font-size:28px;">\u2705</span>
-          </td>
-        </tr>
-      </table>
-      <p style="margin:16px 0 0;font-size:13px;color:#4a4a5a;text-align:center;">Great work by the team \U0001f91c</p>"""
-    html = _email_base(header, body, APP_URL, "View Project \u2192", accent)
+
+      {_task_card(task_title, accent, [("Completed by", completer_name), ("Status", "✅ Done")])}
+
+      {_progress_bar(100, accent)}
+
+      <!-- Celebration message -->
+      <div style="margin-top:20px;text-align:center;padding:20px;
+                  background:linear-gradient(135deg,rgba(16,185,129,.1),rgba(16,185,129,.04));
+                  border:1px solid rgba(16,185,129,.2);border-radius:16px;">
+        <div style="font-size:28px;margin-bottom:8px;">🏆</div>
+        <div style="font-size:14px;font-weight:800;color:{accent};margin-bottom:4px;">
+          Mission Accomplished
+        </div>
+        <div style="font-size:12px;color:rgba(255,255,255,.45);">
+          Great work! Keep the momentum going.
+        </div>
+      </div>"""
+
+    html = _email_base(
+        subject_label="COMPLETE", accent=accent, header_icon="✅",
+        header_badge="TASK COMPLETED", inner_html=body,
+        cta_url=APP_URL, cta_text="View Project →",
+        celebration=True,
+    )
     send_email(user_email, subject, html, workspace_id)
+
+
 
 
 # ── Due Date Checker (runs as background thread every hour) ───────────────────
@@ -5480,30 +5815,38 @@ def get_notifs():
 @app.route("/api/notifications/read-all",methods=["PUT"])
 @login_required
 def notifs_read_all():
+    ws, uid = wid(), session["user_id"]
     with get_db() as db:
-        db.execute("UPDATE notifications SET read=1 WHERE workspace_id=?",(wid(),))
-        return jsonify({"ok":True})
+        db.execute("UPDATE notifications SET read=1 WHERE workspace_id=? AND user_id=?", (ws, uid))
+    _cache_bust(ws, "notifications", "notifs", "appdata")
+    return jsonify({"ok": True})
 
 @app.route("/api/notifications/all",methods=["DELETE"])
 @login_required
 def notifs_clear_all():
+    ws, uid = wid(), session["user_id"]
     with get_db() as db:
-        db.execute("DELETE FROM notifications WHERE workspace_id=?",(wid(),))
-        return jsonify({"ok":True})
+        db.execute("DELETE FROM notifications WHERE workspace_id=? AND user_id=?", (ws, uid))
+    _cache_bust(ws, "notifications", "notifs", "appdata")
+    return jsonify({"ok": True})
 
 @app.route("/api/notifications/<nid>", methods=["DELETE"])
 @login_required
 def delete_notif(nid):
+    ws, uid = wid(), session["user_id"]
     with get_db() as db:
-        db.execute("DELETE FROM notifications WHERE id=? AND user_id=?",(nid,session["user_id"]))
-        return jsonify({"ok":True})
+        db.execute("DELETE FROM notifications WHERE id=? AND workspace_id=? AND user_id=?", (nid, ws, uid))
+    _cache_bust(ws, "notifications", "notifs", "appdata")
+    return jsonify({"ok": True})
 
 @app.route("/api/notifications/<nid>/read",methods=["PUT"])
 @login_required
 def read_notif(nid):
+    ws, uid = wid(), session["user_id"]
     with get_db() as db:
-        db.execute("UPDATE notifications SET read=1 WHERE id=? AND workspace_id=?",(nid,wid()))
-        return jsonify({"ok":True})
+        db.execute("UPDATE notifications SET read=1 WHERE id=? AND workspace_id=? AND user_id=?", (nid, ws, uid))
+    _cache_bust(ws, "notifications", "notifs", "appdata")
+    return jsonify({"ok": True})
 
 # ── Web Push API ───────────────────────────────────────────────────────────────
 @app.route("/api/push/vapid-key", methods=["GET"])
