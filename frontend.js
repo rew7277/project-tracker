@@ -4526,14 +4526,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     setStartingMeet(true);
     try{
-      const data=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`});
-      if(data&&data.ok===false){
-        if(data.needsGoogleAuth||data.status===409||(data.data&&data.data.needsGoogleAuth)){
-          if(confirm('Google Calendar permission is required to auto-create Meet links. Connect Google now?')){
-            window.open((data.data&&data.data.authUrl)||'/api/auth/google/login','_blank','noopener,noreferrer');
-          }
-          return;
+      const data=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`},{quiet:true});
+      const needsGoogleAuth = data && (data.needsGoogleAuth || data.status===409 || (data.data&&data.data.needsGoogleAuth));
+      if(needsGoogleAuth){
+        if(confirm('To auto-generate a real Google Meet link and invite code, please connect Google Calendar once. Open Google connection now?')){
+          window.open((data.data&&data.data.authUrl)||data.authUrl||'/api/auth/google/login','_blank','noopener,noreferrer');
         }
+        return;
+      }
+      if(data&&data.ok===false){
         alert(data.error||'Unable to start Google Meet. Please try again.');
         return;
       }

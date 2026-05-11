@@ -5515,11 +5515,16 @@ def create_google_meet_call():
 
     access_token = session.get("google_access_token", "")
     if not access_token:
+        # Return 200 instead of 409 so the UI can show a clean "Connect Google" flow
+        # without a red failed request in the network panel. A real Meet code still
+        # requires Google Calendar OAuth; this response tells the frontend to open
+        # the Google consent screen and retry after connecting.
         return jsonify({
-            "error": "Google Calendar permission is required to create an automatic Google Meet link.",
+            "ok": True,
+            "needsGoogleAuth": True,
             "authUrl": "/api/auth/google/login",
-            "needsGoogleAuth": True
-        }), 409
+            "message": "Google Calendar permission is required to create an automatic Google Meet link."
+        })
 
     try:
         created = _create_google_meet_event(access_token, title, [target["email"]])
