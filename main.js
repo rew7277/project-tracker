@@ -4329,6 +4329,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [replyTo,setReplyTo]=useState(null);
   const [editingId,setEditingId]=useState('');
   const [menuFor,setMenuFor]=useState('');
+  const [menuPos,setMenuPos]=useState(null);
   const [msgSearch,setMsgSearch]=useState('');
   const [previewImage,setPreviewImage]=useState('');
   const [remoteTyping,setRemoteTyping]=useState(false);
@@ -4341,6 +4342,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
   const pendingReactionUntil=useRef(new Map());
+  const openMsgMenu=(ev,m)=>{
+    ev.stopPropagation();
+    setReactionPickerFor('');
+    const r=ev.currentTarget.getBoundingClientRect();
+    const w=176,h=196,pad=10;
+    let left=Math.min(Math.max(r.left-(w/2)+(r.width/2),pad),window.innerWidth-w-pad);
+    let top=r.bottom+8;
+    let placement='down';
+    if(top+h>window.innerHeight-pad){ top=Math.max(pad,r.top-h-8); placement='up'; }
+    setMenuPos({left,top,placement});
+    setMenuFor(v=>v===m.id?'':m.id);
+  };
+  const closeMsgOverlays=()=>{setReactionPickerFor('');setMenuFor('');setMenuPos(null);};
   useEffect(()=>{activeToRef.current=toId;},[toId]);
   const mergePendingReactionState=useCallback((peer,incoming)=>{
     const list=Array.isArray(incoming)?incoming:[];
@@ -4661,7 +4675,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
-      <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${()=>{setReactionPickerFor('');setMenuFor('');}} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
+      <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
@@ -4673,12 +4687,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                 ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'linear-gradient(135deg, rgba(15,23,42,.94), rgba(30,41,59,.90))',backdropFilter:'blur(16px)',borderRadius:22,boxShadow:'0 20px 50px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:20,animation:'dmPickerPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
-                ${!m._pending&&!m._failed?html`<button onClick=${ev=>{ev.stopPropagation();setMenuFor(v=>v===m.id?'':m.id);}} style=${{position:'absolute',top:-8,[isMe?'left':'right']:-28,border:'1px solid var(--bd)',background:'var(--sf)',color:'var(--tx2)',borderRadius:12,width:24,height:24,cursor:'pointer'}}>⋯</button>`:null}
-                ${menuFor===m.id?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',top:20,[isMe?'left':'right']:-12,display:'grid',gap:6,padding:8,border:'1px solid rgba(148,163,184,.22)',background:'linear-gradient(135deg, rgba(15,23,42,.96), rgba(30,41,59,.92))',backdropFilter:'blur(18px)',borderRadius:18,boxShadow:'0 22px 60px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:35,minWidth:154,animation:'dmMenuPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
-                  <button onClick=${()=>{setReplyTo(m);setMenuFor('');}} style=${{border:'1px solid rgba(148,163,184,.18)',background:'rgba(255,255,255,.06)',color:'var(--tx)',borderRadius:14,padding:'9px 10px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',fontSize:12,fontWeight:800,transition:'transform .14s, background .14s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>↩️</span><span>Reply</span></button>
-                  ${isMe&&!m.deleted?html`<button onClick=${()=>startEdit(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'rgba(255,255,255,.06)',color:'var(--tx)',borderRadius:14,padding:'9px 10px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',fontSize:12,fontWeight:800,transition:'transform .14s, background .14s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>✏️</span><span>Edit</span></button>`:null}
-                  <button onClick=${()=>pinMessage(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'rgba(255,255,255,.06)',color:'var(--tx)',borderRadius:14,padding:'9px 10px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',fontSize:12,fontWeight:800,transition:'transform .14s, background .14s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>📌</span><span>${m.pinned||m.pinned===1?'Unpin':'Pin'}</span></button>
-                  ${isMe&&!m.deleted?html`<button onClick=${()=>deleteMessage(m)} style=${{border:'1px solid rgba(239,68,68,.22)',background:'rgba(239,68,68,.10)',color:'#fecaca',borderRadius:14,padding:'9px 10px',display:'flex',alignItems:'center',gap:9,cursor:'pointer',fontSize:12,fontWeight:800,transition:'transform .14s, background .14s'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>🗑️</span><span>Delete</span></button>`:null}
+                ${!m._pending&&!m._failed?html`<button onClick=${ev=>openMsgMenu(ev,m)} style=${{position:'absolute',top:-8,[isMe?'left':'right']:-28,border:'1px solid var(--bd)',background:'var(--sf)',color:'var(--tx2)',borderRadius:12,width:24,height:24,cursor:'pointer'}}>⋯</button>`:null}
+                ${menuFor===m.id?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'fixed',left:(menuPos&&menuPos.left)||24,top:(menuPos&&menuPos.top)||90,display:'grid',gap:8,padding:10,border:'1px solid rgba(148,163,184,.24)',background:'linear-gradient(145deg, rgba(17,24,39,.98), rgba(30,41,59,.94))',backdropFilter:'blur(22px)',borderRadius:22,boxShadow:'0 24px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04) inset',zIndex:9999,minWidth:176,animation:'dmMenuPop .18s cubic-bezier(.2,.9,.25,1.25)',overflow:'hidden'}}>
+                  <button onClick=${()=>{setReplyTo(m);setMenuFor('');setMenuPos(null);}} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>↩️</span><span>Reply</span></button>
+                  ${isMe&&!m.deleted?html`<button onClick=${()=>startEdit(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>✏️</span><span>Edit</span></button>`:null}
+                  <button onClick=${()=>pinMessage(m)} style=${{border:'1px solid rgba(148,163,184,.18)',background:'linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.03))',color:'var(--tx)',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,letterSpacing:'-.01em',transition:'transform .16s ease, background .16s ease, border-color .16s ease',boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>📌</span><span>${m.pinned||m.pinned===1?'Unpin':'Pin'}</span></button>
+                  ${isMe&&!m.deleted?html`<button onClick=${()=>deleteMessage(m)} style=${{border:'1px solid rgba(239,68,68,.25)',background:'linear-gradient(135deg,rgba(239,68,68,.15),rgba(127,29,29,.12))',color:'#fecaca',borderRadius:16,padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontSize:12,fontWeight:850,transition:'transform .16s ease, background .16s ease'}} onMouseEnter=${e=>e.currentTarget.style.transform='translateX(3px)'} onMouseLeave=${e=>e.currentTarget.style.transform='translateX(0)'}><span>🗑️</span><span>Delete</span></button>`:null}
                 </div>`:null}
                 ${Array.isArray(m.reactions)&&m.reactions.length?html`<div style=${{display:'flex',gap:4,flexWrap:'wrap',marginTop:-2,alignSelf:isMe?'flex-end':'flex-start',transform:'translateY(-1px)'}}>
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
@@ -5219,6 +5233,7 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   const [newComment,setNewComment]=useState('');
   const [savingComment,setSavingComment]=useState(false);
   const [showResolved,setShowResolved]=useState(false);
+  const [ticketSearch,setTicketSearch]=useState('');
 
   const canEdit=cu&&cu.role!=='Developer'&&cu.role!=='Viewer';
   const canDelete=cu&&['Admin','Manager','TeamLead'].includes(cu.role);
@@ -5260,9 +5275,11 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
       if(filterPriority&&t.priority!==filterPriority)return false;
       if(filterType&&t.type!==filterType)return false;
       if(filterAssignee&&t.assignee!==filterAssignee)return false;
+      const q=ticketSearch.trim().toLowerCase();
+      if(q&&!String([t.id,t.title,t.description,t.type,t.priority,t.status].join(' ')).toLowerCase().includes(q))return false;
       return true;
     });
-  },[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee]);
+  },[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee,ticketSearch]);
 
   const saveTicket=async()=>{
     if(!nTitle.trim())return;
@@ -5318,6 +5335,9 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
 
   const statCounts=Object.keys(STATUS_CFG).reduce((a,s)=>{a[s]=tickets.filter(t=>t.status===s).length;return a;},{});
   const myTicketsCount=tickets.filter(t=>t.assignee===cu.id&&t.status!=='closed'&&t.status!=='resolved').length;
+  const unresolvedTickets=tickets.filter(t=>!['resolved','closed'].includes(t.status)).length;
+  const criticalTickets=tickets.filter(t=>t.priority==='critical'&&!['resolved','closed'].includes(t.status)).length;
+  const unassignedTickets=tickets.filter(t=>!t.assignee&&!['resolved','closed'].includes(t.status)).length;
 
   const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
 
@@ -5446,6 +5466,18 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
 
   return html`
     <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',background:'var(--bg)'}}>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:10,marginBottom:14}}>
+        ${[
+          {label:'Open workload',val:unresolvedTickets,sub:'not closed/resolved',icon:'⚡',tone:'rgba(59,130,246,.14)'},
+          {label:'Critical',val:criticalTickets,sub:'needs immediate action',icon:'🚨',tone:'rgba(239,68,68,.14)'},
+          {label:'Unassigned',val:unassignedTickets,sub:'needs owner',icon:'👤',tone:'rgba(245,158,11,.14)'},
+          {label:'My queue',val:myTicketsCount,sub:'assigned to me',icon:'🎯',tone:'rgba(139,92,246,.14)'}
+        ].map(card=>html`<div style=${{border:'1px solid var(--bd)',background:'linear-gradient(135deg,var(--sf),var(--sf2))',borderRadius:14,padding:'12px 14px',display:'flex',alignItems:'center',gap:12,boxShadow:'0 10px 30px rgba(0,0,0,.12)'}}>
+          <div style=${{width:36,height:36,borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',background:card.tone,fontSize:17}}>${card.icon}</div>
+          <div><div style=${{fontSize:20,fontWeight:900,color:'var(--tx)',lineHeight:1}}>${card.val}</div><div style=${{fontSize:11,fontWeight:800,color:'var(--tx2)'}}>${card.label}</div><div style=${{fontSize:10,color:'var(--tx3)'}}>${card.sub}</div></div>
+        </div>`)}
+      </div>
+
             <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
         <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
           ${Object.entries(STATUS_CFG).map(([s,c])=>html`
@@ -5486,6 +5518,7 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
           <option value="">All Types</option>
           ${Object.entries(TYPE_CFG).map(([v,c])=>html`<option key=${v} value=${v}>${c.icon} ${c.label}</option>`)}
         </select>
+        <input class="inp" value=${ticketSearch} onInput=${e=>setTicketSearch(e.target.value)} placeholder="Search tickets..." style=${{fontSize:11,height:30,minWidth:220,flex:'1 1 220px'}}/>
         <span style=${{fontSize:11,color:'var(--tx3)',alignSelf:'center',marginLeft:4}}>${visibleTickets.length} ticket${visibleTickets.length!==1?'s':''}</span>
       </div>
 
@@ -5493,8 +5526,9 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
       ${!busy&&visibleTickets.length===0?html`
         <div style=${{textAlign:'center',padding:'48px 16px',color:'var(--tx3)',fontSize:13,background:'var(--sf)',borderRadius:12,border:'1px solid var(--bd)'}}>
           <div style=${{fontSize:36,marginBottom:12}}>🎫</div>
-          <div style=${{fontWeight:600,marginBottom:6}}>No tickets yet</div>
-          <div>Create a ticket to track bugs, features, and tasks</div>
+          <div style=${{fontWeight:700,marginBottom:6,color:'var(--tx2)'}}>${ticketSearch||filterStatus||filterPriority||filterType||filterAssignee?'No tickets match these filters':'No tickets yet'}</div>
+          <div style=${{marginBottom:14}}>${ticketSearch||filterStatus||filterPriority||filterType||filterAssignee?'Try clearing filters or search text.':'Create a ticket to track bugs, features, and tasks'}</div>
+          <button class="btn bp" onClick=${()=>{setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');setShowNew(true);}}>+ Create Ticket</button>
         </div>`:null}
       <div style=${{display:'flex',flexDirection:'column',gap:8}}>
         ${visibleTickets.map(t=>{
