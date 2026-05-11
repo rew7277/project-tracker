@@ -4261,17 +4261,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
+  const [loadingThread,setLoadingThread]=useState('');
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
+  const threadCache=useRef(new Map());
   useEffect(()=>{activeToRef.current=toId;},[toId]);
   const switchToUser=useCallback((id,source='click')=>{
     if(!id||id===activeToRef.current)return;
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
-    setMsgThreadId('');
-    setMsgs([]);
+    const cached=threadCache.current.get(id);
+    if(cached){
+      setMsgThreadId(id);
+      setMsgs(cached);
+      setLoadingThread(id);
+    }else{
+      setMsgThreadId('');
+      setMsgs([]);
+      setLoadingThread(id);
+    }
     setToId(id);
   },[]);
   useEffect(()=>{
@@ -4284,6 +4294,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
+    if(!threadCache.current.has(id))setLoadingThread(id);
     console.debug('[DM] load start', {id,reason,seq});
     const d=await api.get('/api/dm/'+id,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
@@ -4291,18 +4302,23 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return;
     }
     if(Array.isArray(d)){
+      threadCache.current.set(id,d);
       setMsgThreadId(id);
       setMsgs(d);
+      setLoadingThread('');
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:d.length,seq});
     }else{
       setMsgThreadId(id);
-      setMsgs([]);
+      setMsgs(threadCache.current.get(id)||[]);
+      setLoadingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
   },[onDmRead]);
   useEffect(()=>{
-    if(!toId){setMsgThreadId('');setMsgs([]);return;}
+    if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
+    const cached=threadCache.current.get(toId);
+    if(cached){setMsgThreadId(toId);setMsgs(cached);}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
@@ -4310,6 +4326,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
         setMsgThreadId(requestedTo);
+        threadCache.current.set(requestedTo,d);
+        setLoadingThread('');
         setMsgs(prev=>{
           if(d.length>prev.length){playSound('notif');}
           return d;
@@ -4331,18 +4349,30 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setTxt('');
     setSending(true);
     setMsgThreadId(recipient);
-    setMsgs(prev=>[...prev.filter(m=>m.id!==tempId),optimistic]);
+    setMsgs(prev=>{
+      const next=[...prev.filter(m=>m.id!==tempId),optimistic];
+      threadCache.current.set(recipient,next);
+      return next;
+    });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
       const m=await api.post('/api/dm',{recipient,content:c});
       if(recipient===activeToRef.current&&m&&m.id){
         setMsgThreadId(recipient);
-        setMsgs(prev=>prev.map(x=>x.id===tempId?m:x));
+        setMsgs(prev=>{
+          const next=prev.map(x=>x.id===tempId?m:x);
+          threadCache.current.set(recipient,next);
+          return next;
+        });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
       }
     }catch(e){
       console.warn('[DM] send failed', e);
-      setMsgs(prev=>prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x));
+      setMsgs(prev=>{
+        const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
+        threadCache.current.set(recipient,next);
+        return next;
+      });
       setTxt(c);
     }finally{
       setSending(false);
@@ -4353,13 +4383,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
   const toUser=safe(users).find(u=>u.id===toId);
   const visibleMsgs=(msgThreadId===toId)?msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id)):[];
+  const isThreadLoading=!!toId&&loadingThread===toId&&visibleMsgs.length===0;
   const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
   return html`<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
         ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;return html`
-          <button key=${u.id} onMouseDown=${()=>{if(u.id!==activeToRef.current){setMsgThreadId('');setMsgs([]);}}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
+          <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:onlineUsers.has(u.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none',transition:'background .3s,box-shadow .3s'}}></div>
@@ -4384,7 +4415,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
       </div>
       <div ref=${ref} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
+                ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${visibleMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===visibleMsgs.length-1||visibleMsgs[i+1].sender!==m.sender;return html`
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||visibleMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
