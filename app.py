@@ -5217,7 +5217,8 @@ def get_dm(other_id):
             ORDER BY ts""",(wid(),me,other_id,other_id,me)).fetchall()
         db.execute("UPDATE direct_messages SET read=1 WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
                    (wid(),other_id,me))
-        return jsonify([dict(r) for r in rows])
+    _cache_bust(wid(), "dm_unread", "notifications", "notifs", "appdata")
+    return jsonify([dict(r) for r in rows])
 
 @app.route("/api/dm",methods=["POST"])
 @login_required
@@ -5239,8 +5240,12 @@ def send_dm():
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"dm",f"{sender_name}: {preview}",d["recipient"],0,ts()))
         row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone())
-    _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"]})
-    _sse_publish(wid(), "notification_updated", {"reason": "dm"})
+    # Important: bust per-user dashboard/appdata caches before publishing realtime events.
+    # Otherwise recipients receive the SSE immediately but then read stale /api/dm/unread
+    # or /api/notifications data for up to the cache TTL, which feels like a 30-60s delay.
+    _cache_bust(wid(), "dm_unread", "notifications", "notifs", "appdata")
+    _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"], "content": preview})
+    _sse_publish(wid(), "notification_updated", {"reason": "dm", "sender": session["user_id"], "recipient": d["recipient"]})
     return jsonify(row)
 
 @app.route("/api/dm/unread")
