@@ -4267,7 +4267,23 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
+  const pendingReactionUntil=useRef(new Map());
   useEffect(()=>{activeToRef.current=toId;},[toId]);
+  const mergePendingReactionState=useCallback((peer,incoming)=>{
+    const list=Array.isArray(incoming)?incoming:[];
+    const now=Date.now();
+    const localById=new Map((threadCache.current.get(peer)||[]).map(m=>[m.id,m]));
+    return list.map(m=>{
+      const until=pendingReactionUntil.current.get(m.id);
+      if(until&&until>now){
+        const local=localById.get(m.id);
+        if(local)return {...m,reactions:local.reactions||[]};
+      }else if(until){
+        pendingReactionUntil.current.delete(m.id);
+      }
+      return m;
+    });
+  },[]);
   const switchToUser=useCallback((id,source='click')=>{
     if(!id||id===activeToRef.current)return;
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
@@ -4303,9 +4319,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return;
     }
     if(Array.isArray(d)){
-      threadCache.current.set(id,d);
+      const merged=mergePendingReactionState(id,d);
+      threadCache.current.set(id,merged);
       setMsgThreadId(id);
-      setMsgs(d);
+      setMsgs(merged);
       setLoadingThread('');
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:d.length,seq});
@@ -4315,7 +4332,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
-  },[onDmRead]);
+  },[onDmRead,mergePendingReactionState]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
@@ -4326,12 +4343,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
+        const merged=mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
-        threadCache.current.set(requestedTo,d);
+        threadCache.current.set(requestedTo,merged);
         setLoadingThread('');
         setMsgs(prev=>{
-          if(d.length>prev.length){playSound('notif');}
-          return d;
+          if(merged.length>prev.length){playSound('notif');}
+          return merged;
         });
         onDmRead(requestedTo);
       }
@@ -4348,7 +4366,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
-  },[toId,loadMsgs,onDmRead]);
+  },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
   const send=async()=>{
     if(!txt.trim()||!toId||sending)return;
@@ -4398,6 +4416,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reactionEmojis=['👍','❤️','😂','😮','😢','🔥','👏','👀','🚀'];
   const applyReactionMessage=useCallback((updated)=>{
     if(!updated||!updated.id)return;
+    pendingReactionUntil.current.delete(updated.id);
     const peer=updated.sender===cu.id?updated.recipient:updated.sender;
     threadCache.current.set(peer,(threadCache.current.get(peer)||[]).map(m=>m.id===updated.id?{...m,reactions:updated.reactions||[]}:m));
     if(peer===activeToRef.current){
@@ -4432,6 +4451,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[cu.id]);
   const toggleReaction=useCallback(async(messageId,emoji)=>{
     if(!messageId||String(messageId).startsWith('tmpdm'))return;
+    pendingReactionUntil.current.set(messageId,Date.now()+10000);
     optimisticToggleReaction(messageId,emoji);
     setReactionPickerFor('');
     try{
@@ -4439,6 +4459,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(res&&res.message)applyReactionMessage(res.message);
     }catch(e){
       console.warn('[DM] reaction failed',e);
+      pendingReactionUntil.current.delete(messageId);
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
@@ -4471,16 +4492,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             <div style=${{fontSize:11,color:onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)',fontWeight:500}}>${onlineUsers.has(toUser.id)?'Active now':'Offline'}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
       </div>
-      <div ref=${ref} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
+      <div ref=${ref} onClick=${()=>setReactionPickerFor('')} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${visibleMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===visibleMsgs.length-1||visibleMsgs[i+1].sender!==m.sender;return html`
-          <div key=${m.id} onMouseEnter=${()=>setReactionPickerFor(m.id)} onMouseLeave=${()=>setReactionPickerFor(v=>v===m.id?'':v)} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row'}}>
+          <div key=${m.id} onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed)setReactionPickerFor(v=>v===m.id?'':m.id);}} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',cursor:m._pending||m._failed?'default':'pointer'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||visibleMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
                 <div style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:isMe?'var(--ac)':'var(--sf2)',color:isMe?'var(--ac-tx)':'var(--tx)',border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,outline:m._failed?'1px solid var(--rd)':'none'}}>${m.content}</div>
-                ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:4,padding:'5px 6px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:18,boxShadow:'0 10px 30px rgba(0,0,0,.25)',zIndex:20}}>
+                ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:4,padding:'5px 6px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:18,boxShadow:'0 10px 30px rgba(0,0,0,.25)',zIndex:20}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:14,lineHeight:1,padding:'4px 5px',cursor:'pointer',filter:'saturate(1.1)'}}>${e}</button>`)}
                 </div>`:null}
                 ${Array.isArray(m.reactions)&&m.reactions.length?html`<div style=${{display:'flex',gap:4,flexWrap:'wrap',marginTop:-2,alignSelf:isMe?'flex-end':'flex-start',transform:'translateY(-1px)'}}>

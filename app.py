@@ -5275,7 +5275,7 @@ def react_dm():
                        (rid,ws_id,msg_id,me,emoji,ts()))
         rows=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(msg_id,ws_id)).fetchall()
         data=_attach_dm_reactions(db, ws_id, rows)[0] if rows else None
-    _cache_bust(ws_id, "appdata")
+    # Do not bust appdata cache for reactions; it caused stale poll/refetch races and slow UI.
     _sse_publish(ws_id, "dm_reaction", {"message_id": msg_id, "sender": msg["sender"], "recipient": msg["recipient"], "emoji": emoji, "user_id": me, "action": action, "message": data})
     return jsonify({"message_id":msg_id,"action":action,"message":data})
 
