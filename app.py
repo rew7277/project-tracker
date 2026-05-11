@@ -2157,6 +2157,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS direct_messages (
                 id TEXT PRIMARY KEY, workspace_id TEXT, sender TEXT,
                 recipient TEXT, content TEXT, read INTEGER DEFAULT 0, ts TEXT);
+            CREATE TABLE IF NOT EXISTS dm_reactions (
+                id TEXT PRIMARY KEY, workspace_id TEXT, message_id TEXT,
+                user_id TEXT, emoji TEXT, ts TEXT,
+                UNIQUE(workspace_id, message_id, user_id, emoji));
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, content TEXT,
                 user_id TEXT, read INTEGER DEFAULT 0, ts TEXT);
@@ -2200,6 +2204,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_tasks_stage     ON tasks(workspace_id, stage);
             CREATE INDEX IF NOT EXISTS idx_notifs_user     ON notifications(workspace_id, user_id, read);
             CREATE INDEX IF NOT EXISTS idx_dm_recipient    ON direct_messages(workspace_id, recipient, read);
+            CREATE INDEX IF NOT EXISTS idx_dm_reactions_msg ON dm_reactions(workspace_id, message_id);
             CREATE INDEX IF NOT EXISTS idx_messages_proj   ON messages(workspace_id, project);
             CREATE INDEX IF NOT EXISTS idx_timelogs_user   ON time_logs(workspace_id, user_id);
             CREATE INDEX IF NOT EXISTS idx_timelogs_date   ON time_logs(workspace_id, date);
@@ -2273,6 +2278,8 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_users_ws_active ON users(workspace_id, last_active)",
             "CREATE INDEX IF NOT EXISTS idx_users_id ON users(id)",
             "CREATE INDEX IF NOT EXISTS idx_dm_sender_ws ON direct_messages(workspace_id, sender, recipient, read)",
+            "CREATE TABLE IF NOT EXISTS dm_reactions (id TEXT PRIMARY KEY, workspace_id TEXT, message_id TEXT, user_id TEXT, emoji TEXT, ts TEXT, UNIQUE(workspace_id, message_id, user_id, emoji))",
+            "CREATE INDEX IF NOT EXISTS idx_dm_reactions_msg ON dm_reactions(workspace_id, message_id)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
@@ -5207,18 +5214,70 @@ def send_message():
     return jsonify(row)
 
 # ── Direct Messages ───────────────────────────────────────────────────────────
+def _attach_dm_reactions(db, ws_id, messages):
+    """Attach grouped reaction counts/users to each DM row."""
+    out=[dict(r) for r in messages]
+    ids=[m.get("id") for m in out if m.get("id")]
+    if not ids:
+        return out
+    qmarks=",".join(["?"]*len(ids))
+    reaction_rows=db.execute(f"""SELECT message_id, emoji, user_id FROM dm_reactions
+        WHERE workspace_id=? AND message_id IN ({qmarks})
+        ORDER BY ts""", [ws_id]+ids).fetchall()
+    grouped={mid:{} for mid in ids}
+    for r in reaction_rows:
+        msg_group=grouped.setdefault(r["message_id"], {})
+        emoji_group=msg_group.setdefault(r["emoji"], {"emoji":r["emoji"], "count":0, "users":[]})
+        emoji_group["count"]+=1
+        emoji_group["users"].append(r["user_id"])
+    for m in out:
+        m["reactions"]=list(grouped.get(m.get("id"), {}).values())
+    return out
+
 @app.route("/api/dm/<other_id>")
 @login_required
 def get_dm(other_id):
     me=session["user_id"]
+    ws_id=wid()
     with get_db() as db:
         rows=db.execute("""SELECT * FROM direct_messages
             WHERE workspace_id=? AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
-            ORDER BY ts""",(wid(),me,other_id,other_id,me)).fetchall()
+            ORDER BY ts""",(ws_id,me,other_id,other_id,me)).fetchall()
         db.execute("UPDATE direct_messages SET read=1 WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                   (wid(),other_id,me))
-    _cache_bust(wid(), "dm_unread", "notifications", "notifs", "appdata")
-    return jsonify([dict(r) for r in rows])
+                   (ws_id,other_id,me))
+        data=_attach_dm_reactions(db, ws_id, rows)
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    return jsonify(data)
+
+@app.route("/api/dm/react",methods=["POST"])
+@login_required
+def react_dm():
+    d=request.json or {}
+    msg_id=(d.get("message_id") or "").strip()
+    emoji=(d.get("emoji") or "").strip()
+    allowed={"👍","❤️","😂","😮","😢","🔥","👏","👀","🚀"}
+    if not msg_id or emoji not in allowed:
+        return jsonify({"error":"Invalid reaction"}),400
+    ws_id=wid(); me=session["user_id"]
+    with get_db() as db:
+        msg=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(msg_id,ws_id)).fetchone()
+        if not msg or (msg["sender"]!=me and msg["recipient"]!=me):
+            return jsonify({"error":"Message not found"}),404
+        existing=db.execute("SELECT id FROM dm_reactions WHERE workspace_id=? AND message_id=? AND user_id=? AND emoji=?",
+                            (ws_id,msg_id,me,emoji)).fetchone()
+        action="added"
+        if existing:
+            db.execute("DELETE FROM dm_reactions WHERE id=?",(existing["id"],))
+            action="removed"
+        else:
+            rid=f"rx{int(datetime.now().timestamp()*1000)}{abs(hash(me+msg_id+emoji))%10000}"
+            db.execute("INSERT OR IGNORE INTO dm_reactions(id,workspace_id,message_id,user_id,emoji,ts) VALUES (?,?,?,?,?,?)",
+                       (rid,ws_id,msg_id,me,emoji,ts()))
+        rows=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(msg_id,ws_id)).fetchall()
+        data=_attach_dm_reactions(db, ws_id, rows)[0] if rows else None
+    _cache_bust(ws_id, "appdata")
+    _sse_publish(ws_id, "dm_reaction", {"message_id": msg_id, "sender": msg["sender"], "recipient": msg["recipient"], "emoji": emoji, "user_id": me, "action": action})
+    return jsonify({"message_id":msg_id,"action":action,"message":data})
 
 @app.route("/api/dm",methods=["POST"])
 @login_required
