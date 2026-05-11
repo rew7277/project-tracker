@@ -127,6 +127,10 @@ const ago=iso=>{const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)retu
 const safe=a=>(Array.isArray(a)?a:[]);
 // Normalize project.members: DB stores it as a JSON string, UI needs a real array
 const parseMembers=m=>{if(Array.isArray(m))return m;try{const p=JSON.parse(m||'[]');return Array.isArray(p)?p:[];}catch{return[];}};
+const normRole=r=>String(r||'').trim().toLowerCase().replace(/[\s_-]+/g,'');
+function hasOpsAccess(cu){const r=normRole(cu&&cu.role);return ['admin','owner','workspaceowner','manager','projectmanager','teamlead','superadmin'].includes(r);}
+function parseIdList(v){if(Array.isArray(v))return v;if(v==null||v==='')return [];const s=String(v).trim();if(!s)return [];if(s[0]==='['||s[0]==='{'){try{const parsed=JSON.parse(s);return Array.isArray(parsed)?parsed:[];}catch{return [];}}return s.split(',').map(x=>x.trim()).filter(Boolean);}
+
 
 function Av({u,size=32}){
   const imgSrc=(u&&u.avatar_data&&u.avatar_data.startsWith('data:image'))?u.avatar_data:
@@ -1198,7 +1202,7 @@ function PersonalTwoFAToggle({cu,setCu}){
 
 function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set(),offlineMode=false}){
   const fmtTime=s=>{const m=Math.floor(s/60);const sec=s%60;return m+':'+(sec<10?'0':'')+sec;};
-  const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
+  const isAdminManager=hasOpsAccess(cu);
   const baseView=(view||'dashboard').split(':')[0];
 
   const NAV_ICONS={
@@ -3062,7 +3066,7 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
 /* ─── Dashboard ───────────────────────────────────────────────────────────── */
 function Dashboard({cu,tasks,projects,users,onNav,activeTeam,teams,setTeamCtx,tickets:propTickets}){
   const t=safe(tasks);const p=safe(projects);const u=safe(users);
-  const isAdminManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
+  const isAdminManager=hasOpsAccess(cu);
   const [teamDropOpen,setTeamDropOpen]=useState(false);
   const [teamSearch,setTeamSearch]=useState('');
   const teamDropRef=useRef(null);
@@ -3343,7 +3347,7 @@ function OpsCommandCenter({cu,tasks,projects,users,tickets,notifs,onNav}){
       <div style=${{fontSize:10,color:'var(--tx3)',marginTop:2}}>${sub}</div>
     </div>`;
   return html`
-    <div class="fi" style=${{height:'100%',overflowY:'auto',padding:'16px 20px',display:'flex',flexDirection:'column',gap:14}}>
+    <div class="fi ops-command-center" style=${{height:'100%',minHeight:'100%',overflowY:'auto',padding:'16px 20px',display:'flex',flexDirection:'column',gap:14,background:'var(--bg)',color:'var(--tx)'}}>
       <div style=${{padding:18,borderRadius:22,background:'radial-gradient(circle at top left,rgba(90,140,255,.22),transparent 35%),linear-gradient(135deg,var(--sf),var(--bg))',border:'1px solid var(--bd2)',display:'flex',alignItems:'center',gap:14,boxShadow:'0 22px 80px rgba(0,0,0,.22)'}}>
         <div style=${{width:48,height:48,borderRadius:18,background:'linear-gradient(135deg,var(--ac),var(--pu))',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,boxShadow:'0 0 32px var(--ac3)'}}>🛰️</div>
         <div style=${{flex:1,minWidth:0}}>
@@ -3971,7 +3975,7 @@ function MessagesView({projects,users,cu,tasks}){
 
   const sp=allProjects.find(p=>p.id===pid);
   const projTasks=safe(tasks).filter(t=>t.project===pid);
-  const projMembers=safe(sp&&sp.members?JSON.parse(sp.members||'[]'):[]).map(id=>safe(users).find(u=>u.id===id)).filter(Boolean);
+  const projMembers=parseIdList(sp&&sp.members).map(id=>safe(users).find(u=>u.id===id)).filter(Boolean);
   const doneTasks=projTasks.filter(t=>t.stage==='completed').length;
   const blockedTasks=projTasks.filter(t=>t.stage==='blocked').length;
   const pc=projTasks.length?Math.round(projTasks.reduce((a,t)=>a+(t.pct||0),0)/projTasks.length):0;
@@ -8393,7 +8397,7 @@ function App(){
   const _hadSession=(()=>{try{return localStorage.getItem('pf_had_session')==='1';}catch{return false;}})();
   const [loading,setLoading]=useState(_hadSession);
   // Read initial view from URL path or ?page= param
-  const VALID_VIEWS=['dashboard','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
+  const VALID_VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
   useEffect(()=>{
     try{
@@ -8425,7 +8429,7 @@ function App(){
   });
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
-    dashboard:'Dashboard',projects:'Projects',tasks:'Kanban Board',
+    dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
     messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',
     timeline:'Timeline Tracker',reminders:'Reminders',
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
@@ -8955,7 +8959,7 @@ function App(){
   },[cu,isDevRole,data.teams,teamCtx,setTeamCtx]);
 
   const activeTeam=useMemo(()=>teamCtx?safe(data.teams).find(t=>t.id===teamCtx)||null:null,[teamCtx,data.teams]);
-  const teamMemberIds=useMemo(()=>activeTeam?new Set(JSON.parse(activeTeam.member_ids||'[]')):new Set(),[activeTeam]);
+  const teamMemberIds=useMemo(()=>activeTeam?new Set(parseIdList(activeTeam.member_ids)):new Set(),[activeTeam]);
   const scopedProjects=data.projects;
   const scopedTasks=data.tasks;
   const scopedUsers=useMemo(()=>{
@@ -9052,8 +9056,8 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
-            ${baseView==='ops'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
-            ${baseView==='ops'&&!(cu.role==='Admin'||cu.role==='Manager')?html`
+            ${baseView==='ops'&&hasOpsAccess(cu)?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
+            ${baseView==='ops'&&!hasOpsAccess(cu)?html`
               <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg)',padding:24}}>
                 <div style=${{maxWidth:440,textAlign:'center',padding:24,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 20px 70px rgba(0,0,0,.25)'}}>
                   <div style=${{fontSize:42,marginBottom:10}}>🔐</div>
