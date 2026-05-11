@@ -2029,41 +2029,127 @@ def _due_date_email_checker():
 # Start due-date background checker
 _cthread.Thread(target=_due_date_email_checker, daemon=True).start()
 
+# ── Push Notification Worker Pool ────────────────────────────────────────────
+# A bounded pool of worker threads processes push sends sequentially.
+# Replaces the old pattern of spawning one thread per recipient per event.
+# Pool size is tunable via PUSH_POOL_SIZE env var (default: 5).
+import queue as _push_q_mod
+_PUSH_POOL_SIZE    = int(os.environ.get("PUSH_POOL_SIZE", "5"))
+_push_queue        = _push_q_mod.Queue(maxsize=500)
+_push_pool_started = False
+_push_pool_lock    = threading.Lock()
+
+def _push_worker():
+    while True:
+        try:
+            fn, args, kwargs = _push_queue.get(timeout=5)
+        except _push_q_mod.Empty:
+            continue
+        try:
+            fn(*args, **kwargs)
+        except Exception as _e:
+            log.error("[push_worker] %s", _e)
+        finally:
+            _push_queue.task_done()
+
+def _ensure_push_pool():
+    global _push_pool_started
+    if _push_pool_started:
+        return
+    with _push_pool_lock:
+        if not _push_pool_started:
+            for _ in range(_PUSH_POOL_SIZE):
+                t = threading.Thread(target=_push_worker, daemon=True)
+                t.start()
+            _push_pool_started = True
+            log.info("[push_pool] Started %d push worker threads", _PUSH_POOL_SIZE)
+
+def _enqueue_push(fn, *args, **kwargs):
+    """Submit a push task to the bounded worker pool.
+
+    Replaces: threading.Thread(target=fn, args=args, daemon=True).start()
+    Usage:    _enqueue_push(push_notification_to_user, db, uid, title, body, url)
+
+    If the queue is full (>500 pending), the task is dropped with a warning
+    rather than blocking the request thread or spawning an unbounded thread.
+    """
+    _ensure_push_pool()
+    try:
+        _push_queue.put_nowait((fn, args, kwargs))
+    except _push_q_mod.Full:
+        log.warning("[push_pool] Queue full — dropping push for %s", fn.__name__)
+
+
 # ── Web Push (VAPID) ──────────────────────────────────────────────────────────
+# Keys are read from environment variables VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY
+# (set these as stable Railway env vars so subscriptions survive deploys).
+# Falls back to the legacy file only when the env vars are absent — never
+# regenerates keys on a running instance, which would invalidate all existing
+# browser push subscriptions.
 VAPID_KEY_FILE = os.path.join(DATA_DIR, ".pf_vapid")
 
 def get_vapid_keys():
-    """Load or generate VAPID key pair (raw bytes stored as hex)."""
+    """Load VAPID key pair.
+
+    Priority order:
+      1. VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY environment variables (preferred).
+      2. Legacy key file on disk (migration path).
+      3. Generate-and-save only when neither source exists (first-run only).
+
+    Railway's ephemeral filesystem means a newly deployed instance may not
+    have the key file; using env vars keeps keys stable across deploys.
+    Set VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY in your Railway service
+    variables once, and they survive every redeploy.
+    """
+    # 1. Prefer stable env vars — never lost across Railway redeploys
+    env_priv = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
+    env_pub  = os.environ.get("VAPID_PUBLIC_KEY",  "").strip()
+    if env_priv and env_pub:
+        return {"private": env_priv, "public": env_pub}
+
+    # 2. Fall back to legacy file (migration: first deploy after adding env vars)
     if os.path.exists(VAPID_KEY_FILE):
         try:
             with open(VAPID_KEY_FILE, "r") as f:
                 d = json.load(f)
                 if d.get("private") and d.get("public"):
+                    log.warning(
+                        "[VAPID] Using key file — set VAPID_PRIVATE_KEY and "
+                        "VAPID_PUBLIC_KEY env vars on Railway to make keys "
+                        "persistent across deploys. private=%s…",
+                        d["private"][:12]
+                    )
                     return d
-        except: pass
+        except Exception:
+            pass
+
+    # 3. First-run only: generate, save to file, and warn loudly
     try:
-        import struct
-        priv_bytes = os.urandom(32)
-        priv_hex = priv_bytes.hex()
-        keys = {"private": priv_hex, "public": "", "generated": ts()}
+        keys = {"private": "", "public": "", "generated": ts()}
         try:
             from cryptography.hazmat.primitives.asymmetric.ec import (
-                generate_private_key, SECP256R1, EllipticCurvePublicKey)
+                generate_private_key, SECP256R1)
             from cryptography.hazmat.primitives.serialization import (
                 Encoding, PublicFormat, PrivateFormat, NoEncryption)
-            import base64
             ec_key = generate_private_key(SECP256R1())
-            pub_bytes = ec_key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-            priv_bytes2 = ec_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+            pub_bytes  = ec_key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+            priv_bytes = ec_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
             keys = {
-                "private": base64.urlsafe_b64encode(priv_bytes2).decode(),
-                "public": base64.urlsafe_b64encode(pub_bytes).decode().rstrip("="),
-                "generated": ts()
+                "private":   base64.urlsafe_b64encode(priv_bytes).decode(),
+                "public":    base64.urlsafe_b64encode(pub_bytes).decode().rstrip("="),
+                "generated": ts(),
             }
         except ImportError:
             pass
         with open(VAPID_KEY_FILE, "w") as f:
             json.dump(keys, f)
+        log.error(
+            "[VAPID] Generated new key pair and saved to file. "
+            "All existing push subscriptions are now INVALID. "
+            "Add these to Railway env vars immediately:\n"
+            "  VAPID_PRIVATE_KEY=%s\n  VAPID_PUBLIC_KEY=%s",
+            keys["private"], keys["public"]
+        )
         return keys
     except Exception as e:
         log.error("[VAPID] Key generation error: %s", e)
@@ -4638,9 +4724,8 @@ def create_project():
                 nid=f"n{int(datetime.now().timestamp()*1000)}"
                 db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts(),pid,'project'))
-                threading.Thread(target=push_notification_to_user,
-                    args=(db,uid,f"📁 Added to project: {d['name']}",
-                          f"{cname} added you to '{d['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
+                _enqueue_push(push_notification_to_user, *(db,uid,f"📁 Added to project: {d['name']}",
+                          f"{cname} added you to '{d['name']}'",f"/?action=project&id={pid}"))
         # Inject into appdata cache FIRST so workers with stale cache get the new project immediately.
         _cache_inject_item(wid(), "projects", dict(p))
         # Bust the FULL workspace cache — this forces the next /api/app-data background
@@ -4685,9 +4770,8 @@ def update_project(pid):
             placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(newly_added))
             db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
             for uid in newly_added:
-                threading.Thread(target=push_notification_to_user,
-                    args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
-                          f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
+                _enqueue_push(push_notification_to_user, *(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
+                          f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"))
     # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
     # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
     # that's why added members weren't visible until cache expired.
@@ -4829,15 +4913,13 @@ def create_task():
                 threading.Thread(target=send_task_assigned_email,
                     args=(assignee_user["email"],assignee_user["name"],d["title"],cname,tid,wid()),
                     daemon=True).start()
-            threading.Thread(target=push_notification_to_user,
-                args=(db,d["assignee"],f"✅ New task assigned: {d['title']}",
-                      f"{cname} assigned you this task [{d.get('priority','medium')}]",_task_url),
-                daemon=True).start()
+            _enqueue_push(push_notification_to_user, db, d["assignee"],
+                f"✅ New task assigned: {d['title']}",
+                f"{cname} assigned you this task [{d.get('priority','medium')}]", _task_url)
         for uid in proj_members:
             if uid==session["user_id"] or uid==d.get("assignee"): continue
-            threading.Thread(target=push_notification_to_user,
-                args=(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
-                      f"{cname} created '{d['title']}'",_task_url),daemon=True).start()
+            _enqueue_push(push_notification_to_user, *(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
+                      f"{cname} created '{d['title']}'",_task_url))
         t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
         if d.get("project") and proj:
             assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
@@ -4975,10 +5057,8 @@ def update_task(tid):
                     threading.Thread(target=send_status_change_email,
                         args=(assignee_user["email"],assignee_user["name"],t["title"],d["stage"],changer_name,wid()),
                         daemon=True).start()
-                threading.Thread(target=push_notification_to_user,
-                    args=(db, t["assignee"], f"🔄 Task updated: {t['title']}",
-                          f"{changer_name} moved it to {d['stage']}", f"/?action=task&id={tid}"),
-                    daemon=True).start()
+                _enqueue_push(push_notification_to_user, *(db, t["assignee"], f"🔄 Task updated: {t['title']}",
+                          f"{changer_name} moved it to {d['stage']}", f"/?action=task&id={tid}"))
             if t["project"]:
                 proj=db.execute("SELECT members FROM projects WHERE id=? AND workspace_id=?",(t["project"],wid())).fetchone()
                 if proj:
@@ -4991,10 +5071,8 @@ def update_task(tid):
                         nid2=f"n{base_ts2+20+i2}"
                         db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
                                    (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts(),tid,'task'))
-                        threading.Thread(target=push_notification_to_user,
-                            args=(db, uid, f"🔄 {t['title']} → {d['stage']}",
-                                  f"{aname} updated the task stage", f"/?action=task&id={tid}"),
-                            daemon=True).start()
+                        _enqueue_push(push_notification_to_user, *(db, uid, f"🔄 {t['title']} → {d['stage']}",
+                                  f"{aname} updated the task stage", f"/?action=task&id={tid}"))
                 sysmid=f"m{base_ts2+2}"
                 db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                            (sysmid,wid(),"system",t["project"],
@@ -5036,10 +5114,9 @@ def update_task(tid):
                                           t["title"], comment_text_raw, wid()),
                                     daemon=True).start()
                             break
-                threading.Thread(target=push_notification_to_user,
-                    args=(db, t["assignee"], f"💬 Comment on: {t['title']}",
-                          f"{cname}: {latest.get('text','')[:80]}", "/"),
-                    daemon=True).start()
+                _enqueue_push(push_notification_to_user, db, t["assignee"],
+                    f"💬 Comment on: {t['title']}",
+                    f"{cname}: {latest.get('text','')[:80]}", "/")
         _cache_bust_ws(wid())
         updated_task = dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
         # Push SSE — all workspace clients get the new stage/assignee immediately
@@ -5106,14 +5183,29 @@ def delete_subtask(sid):
 @app.route("/api/tasks/<tid>",methods=["DELETE"])
 @login_required
 def del_task(tid):
+    """Soft-delete: sets deleted_at instead of removing the row.
+    Tasks can be recovered by an Admin. A future /api/tasks/<tid>/purge
+    endpoint (Admin-only) can hard-delete when needed.
+    """
     with get_db() as db:
         cu=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()
         cu_role=cu["role"] if cu else "Viewer"
         if cu_role not in ("Admin","Manager","TeamLead"):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
-        db.execute("DELETE FROM tasks WHERE id=? AND workspace_id=?",(tid,wid()))
+        task=db.execute(
+            "SELECT id FROM tasks WHERE id=? AND workspace_id=? AND deleted_at=''",
+            (tid,wid())
+        ).fetchone()
+        if not task:
+            return jsonify({"error":"Task not found or already deleted"}),404
+        deleted_ts = ts()
+        db.execute(
+            "UPDATE tasks SET deleted_at=? WHERE id=? AND workspace_id=?",
+            (deleted_ts, tid, wid())
+        )
     _cache_bust_ws(wid())
-    return jsonify({"ok":True})
+    _sse_publish(wid(), "task_updated", {"id": tid, "action": "deleted"})
+    return jsonify({"ok":True,"deleted_at":deleted_ts})
 
 # ── Files ─────────────────────────────────────────────────────────────────────
 @app.route("/api/files")
@@ -5250,14 +5342,54 @@ def _attach_dm_reactions(db, ws_id, messages):
 @app.route("/api/dm/<other_id>")
 @login_required
 def get_dm(other_id):
+    """Return DM conversation between the current user and other_id.
+
+    Supports incremental fetch via ?since=<timestamp_ms>.
+    Clients should store the ts of the newest message they have and pass
+    it on subsequent polls so only new messages are transferred.
+    Example: GET /api/dm/u123?since=1715000000000
+
+    On the first load (no since param) the last 200 messages are returned
+    to cap response size on long-running conversations.
+    """
     me=session["user_id"]
     ws_id=wid()
+    since=request.args.get("since","").strip()
     with get_db() as db:
-        rows=db.execute("""SELECT * FROM direct_messages
-            WHERE workspace_id=? AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
-            ORDER BY ts""",(ws_id,me,other_id,other_id,me)).fetchall()
-        db.execute("UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                   (ts(),ws_id,other_id,me))
+        if since:
+            # Incremental: only messages newer than the client's last known ts.
+            # ts column stores ISO-8601 strings — lexicographic comparison works
+            # because they are zero-padded. Clients pass epoch-ms; convert here.
+            try:
+                since_ms = int(since)
+                from datetime import timezone
+                since_dt = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc)
+                since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
+            except (ValueError, TypeError):
+                since_str = since  # caller passed an ISO string directly
+            rows=db.execute(
+                """SELECT * FROM direct_messages
+                   WHERE workspace_id=?
+                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
+                     AND ts > ?
+                   ORDER BY ts""",
+                (ws_id, me, other_id, other_id, me, since_str)
+            ).fetchall()
+        else:
+            # Full load — cap at 200 most recent to bound response size.
+            rows=db.execute(
+                """SELECT * FROM direct_messages
+                   WHERE workspace_id=?
+                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
+                   ORDER BY ts DESC LIMIT 200""",
+                (ws_id, me, other_id, other_id, me)
+            ).fetchall()
+            rows = list(reversed(rows))  # restore chronological order
+        db.execute(
+            "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) "
+            "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+            (ts(), ws_id, other_id, me)
+        )
         data=_attach_dm_reactions(db, ws_id, rows)
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     return jsonify(data)
@@ -5415,10 +5547,8 @@ def create_reminder():
                    (rid,wid(),session["user_id"],d.get("task_id",""),d.get("task_title","Reminder"),
                     d["remind_at"],d.get("minutes_before",10),0,ts()))
         row=db.execute("SELECT * FROM reminders WHERE id=?",(rid,)).fetchone()
-        threading.Thread(target=push_notification_to_user,
-            args=(db, session["user_id"], "⏰ Reminder set",
-                  f"'{d.get('task_title','Reminder')}' — you'll be notified before the time.", "/"),
-            daemon=True).start()
+        _enqueue_push(push_notification_to_user, db, session["user_id"], "⏰ Reminder set",
+            f"{d.get('task_title','Reminder')} — you'll be notified before the time.", "/")
         result=dict(row)
     _sse_publish(wid(), "reminder_updated", {"id": rid, "action": "created"})
     return jsonify(result)
@@ -5436,10 +5566,8 @@ def update_reminder(rid):
         db.execute("UPDATE reminders SET remind_at=?,minutes_before=?,task_title=?,fired=0 WHERE id=? AND user_id=?",
                    (remind_at,minutes_before,task_title,rid,session["user_id"]))
         row=db.execute("SELECT * FROM reminders WHERE id=?",(rid,)).fetchone()
-        threading.Thread(target=push_notification_to_user,
-            args=(db, session["user_id"], "⏰ Reminder updated",
-                  f"'{task_title}' has been rescheduled.", "/"),
-            daemon=True).start()
+        _enqueue_push(push_notification_to_user, *(db, session["user_id"], "⏰ Reminder updated",
+                  f"'{task_title}' has been rescheduled.", "/"))
         return jsonify(dict(row))
 
 @app.route("/api/reminders/<rid>", methods=["DELETE"])
@@ -8270,25 +8398,69 @@ def _sse_publish(workspace_id, event_type, data):
 @app.route("/api/stream")
 @login_required
 def sse_stream():
-    """Server-Sent Events endpoint.
-    Uses a short 15s heartbeat timeout so gthread workers are not held
-    indefinitely — clients reconnect automatically via EventSource.
-    With gevent workers (recommended) this is fully non-blocking.
+    """Server-Sent Events endpoint with periodic session re-validation.
+
+    Every SSE_REAUTH_INTERVAL heartbeats the generator checks that the user
+    is still active and not logged out/deactivated. If the check fails it
+    pushes a "force_logout" event so the client redirects to the login page,
+    then terminates the stream. This prevents a browser tab that stayed open
+    after logout (or account deactivation) from continuing to receive
+    workspace events indefinitely.
+
+    Tuning:
+      SSE_REAUTH_INTERVAL — how many heartbeat cycles between auth checks
+                            (default 15, i.e. every ~2 min with an 8s timeout).
     """
     ws_id = wid()
     uid   = session.get("user_id", "")
+    login_at = session.get("login_at", "")
     q = _queue.Queue(maxsize=50)
     with _sse_lock:
         _sse_clients.setdefault(ws_id, []).append(q)
 
+    # How often to re-check the session (in heartbeat cycles, each ~8 s)
+    _SSE_REAUTH_INTERVAL = int(os.environ.get("SSE_REAUTH_INTERVAL", "15"))
+
+    def _session_still_valid():
+        """Return True if the user is still active and not remotely logged out."""
+        if not uid:
+            return False
+        try:
+            rows = _raw_pg(
+                "SELECT deleted_at, logged_out_at FROM users WHERE id=?",
+                (uid,), fetch=True
+            )
+            if not rows:
+                return False
+            u = rows[0]
+            # Account deactivated
+            if u.get("deleted_at", ""):
+                return False
+            # Remote logout: server recorded a logout_at newer than login_at
+            logged_out_at = u.get("logged_out_at", "") or ""
+            if logged_out_at and login_at and logged_out_at > login_at:
+                return False
+            return True
+        except Exception as _e:
+            log.warning("[SSE] session check error for uid=%s: %s", uid, _e)
+            return True  # fail-open: keep stream alive if DB is momentarily unavailable
+
     def generate():
         yield "data: {\"type\":\"connected\"}\n\n"
+        heartbeat_count = 0
         try:
             while True:
                 try:
                     msg = q.get(timeout=8)   # 8s: survives Railway/nginx 30s proxy idle timeout
                     yield f"data: {json.dumps(msg)}\n\n"
                 except _queue.Empty:
+                    heartbeat_count += 1
+                    # Periodic session re-validation (every ~2 min by default)
+                    if heartbeat_count % _SSE_REAUTH_INTERVAL == 0:
+                        if not _session_still_valid():
+                            log.info("[SSE] uid=%s session invalid — closing stream", uid)
+                            yield "data: {\"type\":\"force_logout\"}\n\n"
+                            return
                     # Heartbeat keeps connection alive through proxies
                     yield ": heartbeat\n\n"
         except (GeneratorExit, Exception):
