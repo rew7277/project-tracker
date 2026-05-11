@@ -4093,7 +4093,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
   const ref=useRef(null);
-  const msgPaneRef=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   useEffect(()=>{activeToRef.current=toId;},[toId]);
@@ -4104,8 +4103,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
     setMsgThreadId('');
     setMsgs([]);
-    setLoading(true);
-    if(msgPaneRef.current){ msgPaneRef.current.innerHTML=''; }
     setToId(id);
   },[]);
   useEffect(()=>{
@@ -4118,7 +4115,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    setLoading(true);
+    if(reason==='selected'||reason==='notification')setLoading(true);
     console.debug('[DM] load start', {id,reason,seq});
     const d=await api.get('/api/dm/'+id,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
@@ -4192,7 +4189,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
         ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;return html`
-          <button key=${u.id} onMouseDown=${()=>{if(u.id!==activeToRef.current){setMsgThreadId('');setMsgs([]);if(msgPaneRef.current)msgPaneRef.current.innerHTML='';}}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
+          <button key=${u.id} onMouseDown=${()=>{if(u.id!==activeToRef.current){setMsgThreadId('');setMsgs([]);}}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:onlineUsers.has(u.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none',transition:'background .3s,box-shadow .3s'}}></div>
@@ -4216,7 +4213,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             <div style=${{fontSize:11,color:onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)',fontWeight:500}}>${loading?'Loading conversation…':(onlineUsers.has(toUser.id)?'Active now':'Offline')}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
       </div>
-      <div ref=${el=>{ref.current=el;msgPaneRef.current=el;}} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
+      <div ref=${ref} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
         ${loading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
         ${!loading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${!loading?visibleMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===visibleMsgs.length-1||visibleMsgs[i+1].sender!==m.sender;return html`
