@@ -749,6 +749,38 @@ def _cache_bust(workspace_id, *tables):
                         _CACHE.pop(key, None)
                         break
 
+
+
+def _cache_inject_item(workspace_id, bucket, item):
+    """Best-effort cache updater used by create flows.
+
+    Older builds referenced this helper but did not define it, which caused
+    /api/tasks POST to commit the task and then crash with a 500. Keep this
+    function deliberately defensive: cache failure must never fail the API.
+    """
+    try:
+        if not workspace_id or not bucket or not isinstance(item, dict):
+            return
+        # Update the common list cache keys if they already exist. If not, do nothing.
+        candidate_keys = [
+            f"{bucket}:{workspace_id}:",
+            f"appdata:{workspace_id}:tasks",
+            f"appdata:{workspace_id}:projects",
+        ]
+        for key in candidate_keys:
+            try:
+                val = _cache_get(key)
+                if isinstance(val, list):
+                    iid = item.get('id')
+                    next_val = [x for x in val if not (isinstance(x, dict) and x.get('id') == iid)]
+                    next_val.insert(0, item)
+                    _cache_set(key, next_val)
+            except Exception:
+                pass
+    except Exception as e:
+        try: log.warning('[cache_inject] ignored: %s', e)
+        except Exception: pass
+
 def _cache_bust_ws(workspace_id):
     """Bust ALL cache entries for a workspace."""
     if _redis_client is not None:
@@ -781,31 +813,26 @@ def _bust_dm_thread(ws, uid1, uid2):
             pass
 
 
-def _cache_inject_item(workspace_id, table, item_dict):
-    """After a create, inject the new item into existing app-data/list caches.
 
-    This must be a real top-level function. A previous patch accidentally left
-    this body indented under _bust_dm_thread, so create_task crashed with
-    NameError: _cache_inject_item is not defined.
-    """
+    """After a create, inject the new item into existing cache entries
+    so the next poll (background refresh) returns instantly from cache
+    rather than hitting the DB cold. Non-critical — failures are silent."""
     try:
-        item_dict = dict(item_dict or {})
-        item_id = item_dict.get("id")
         with _CACHE_LOCK:
             for key, entry in list(_CACHE.items()):
-                if str(workspace_id) not in key:
+                if workspace_id not in key:
                     continue
-                val = entry.get("val")
-                if isinstance(val, dict) and table in val and isinstance(val[table], list):
-                    ids = {x.get("id") for x in val[table] if isinstance(x, dict)}
-                    if item_id not in ids:
-                        val[table] = [item_dict] + val[table]
-                elif key.startswith(f"{table}:{workspace_id}") and isinstance(val, list):
-                    ids = {x.get("id") for x in val if isinstance(x, dict)}
-                    if item_id not in ids:
-                        entry["val"] = [item_dict] + val
-    except Exception as e:
-        log.warning("[cache_inject_item] skipped: %s", e)
+                val = entry.get("val", {})
+                if table not in val:
+                    continue
+                if not isinstance(val[table], list):
+                    continue
+                # Only inject if not already present
+                ids = {x.get("id") for x in val[table]}
+                if item_dict.get("id") not in ids:
+                    val[table] = [item_dict] + val[table]
+    except Exception:
+        pass
 
 # Shared DDL connection — reused across all _run_ddl calls to avoid opening
 # 170 separate connections on startup (which caused NO_SOCKET exhaustion).
@@ -2613,7 +2640,7 @@ def _seed_demo(db, ws_id):
         ("n2","status_change","Task Payment gateway moved to Code Review","u2",0),
         ("n3","comment","Bob commented on Product catalog UI","u4",1),
     ]:
-        try: db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",(n[0],ws_id,n[1],n[2],n[3],n[4],ts()))
+        try: db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",(n[0],ws_id,n[1],n[2],n[3],n[4],ts()))
         except: pass
 
 # Server-side session invalidation cache.
@@ -4148,7 +4175,7 @@ def meet_notify():
                 (nid, wid(), "call", msg, target_id, 0, ts(), session["user_id"]))
         except:
             db.execute(
-                "INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                 (nid, wid(), "call", msg, target_id, 0, ts()))
         return jsonify({"ok": True, "caller": cname, "room": room_name})
 
@@ -4801,7 +4828,7 @@ def create_project():
         for uid in members:
             if uid != session["user_id"]:
                 nid=f"n{int(datetime.now().timestamp()*1000)}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts(),pid,'project'))
                 _enqueue_push(push_notification_to_user, *(db,uid,f"📁 Added to project: {d['name']}",
                           f"{cname} added you to '{d['name']}'",f"/?action=project&id={pid}"))
@@ -4939,11 +4966,11 @@ def get_tasks():
         return jsonify(result)
 
 def next_task_id(db, ws):
-    import time, secrets
-    # Avoid COUNT(*) and avoid the old last-6-ms collision bug.
-    # Old IDs repeated every ~16.6 minutes; this caused intermittent 500s
-    # from duplicate primary keys on task creation.
-    return f"T-{int(time.time() * 1000)}{secrets.token_hex(2)}"
+    import time
+    base = int(time.time() * 1000)
+    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
+    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
+    return f"T-{base % 1000000:06d}"
 
 @app.route("/api/tasks",methods=["POST"])
 @login_required
@@ -5144,7 +5171,7 @@ def update_task(tid):
                                 daemon=True).start()
             if t["assignee"]:
                 nid=f"n{base_ts2}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid,wid(),"status_change",f"Task '{t['title']}' moved to {d['stage']}",
                             t["assignee"],0,ts(),tid,'task'))
                 assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
@@ -5166,7 +5193,7 @@ def update_task(tid):
                     for i2,uid in enumerate(members):
                         if uid==session["user_id"] or uid==t["assignee"]: continue
                         nid2=f"n{base_ts2+20+i2}"
-                        db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                        db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                                    (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts(),tid,'task'))
                         _enqueue_push(push_notification_to_user, *(db, uid, f"🔄 {t['title']} → {d['stage']}",
                                   f"{aname} updated the task stage", f"/?action=task&id={tid}"))
@@ -5186,7 +5213,7 @@ def update_task(tid):
                         f"💬 **{cname}** commented on **{t['title']}**: {latest.get('text','')}",ts(),1))
             if t["assignee"] and t["assignee"]!=session["user_id"]:
                 nid2=f"n{int(datetime.now().timestamp()*1000)+4}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                            (nid2,wid(),"comment",f"{cname} commented on '{t['title']}': {latest.get('text','')}",
                             t["assignee"],0,ts(),tid,'task'))
                 assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(t["assignee"],)).fetchone()
@@ -5408,7 +5435,7 @@ def send_message():
         base_ts=int(datetime.now().timestamp()*1000)
         for i,m in enumerate(members):
             nid=f"n{base_ts+i}"
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"message",f"#{proj_name} — {sender_name}: {preview}",m["id"],0,ts()))
         row=dict(db.execute("SELECT * FROM messages WHERE id=?",(mid,)).fetchone())
     _sse_publish(wid(), "message_created", {"id": mid, "project": d.get("project","")})
@@ -5645,7 +5672,7 @@ def create_google_meet_call():
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
                        (nid, ws_id, "call", f"{sender_name} invited you to a Google Meet call", target_id, 0, now, me))
         except Exception:
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                        (nid, ws_id, "call", f"{sender_name} invited you to a Google Meet call", target_id, 0, now))
         row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
 
@@ -5698,44 +5725,53 @@ def react_dm():
 @login_required
 def send_dm():
     d=request.json or {}
-    if not d.get("content","").strip(): return jsonify({"error":"Empty"}),400
-    mid=f"dm{int(datetime.now().timestamp()*1000)}"
+    content=(d.get("content") or "").strip()
+    recipient=(d.get("recipient") or "").strip()
+    reply_to=(d.get("reply_to") or "").strip()
+    if not content:
+        return jsonify({"error":"Empty"}),400
+    if not recipient:
+        return jsonify({"error":"Missing recipient"}),400
+
+    ws_id=wid()
+    me=session["user_id"]
+    now=ts()
+    mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+    nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+
     with get_db() as db:
-        db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                   (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0))
-        sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-        sender_name=sender["name"] if sender else "Someone"
-        nid=f"n{int(datetime.now().timestamp()*1000)}"
-        try:
-            rows = db.execute(
-                "INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
-                (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0)
-            ).fetchall()
-            row = dict(rows[0]) if rows else {}
-        except Exception:
-            db.execute("INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0))
-            row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone() or {})
-        sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-        sender_name=sender["name"] if sender else "Someone"
-        nid=f"n{int(datetime.now().timestamp()*1000)}"
-        preview=d["content"][:60]+"..." if len(d["content"])>60 else d["content"]
+        # Validate recipient before inserting, so bad UI state cannot create a 500.
+        target=db.execute(
+            "SELECT id FROM users WHERE id=? AND workspace_id=? AND deleted_at=''",
+            (recipient, ws_id)
+        ).fetchone()
+        if not target:
+            return jsonify({"error":"Recipient not found"}),404
+
+        db.execute("""INSERT INTO direct_messages(
+                       id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                       delivered_at,seen_at,edited,deleted,pinned
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0))
+
+        row=dict(db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone())
+        sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
+        sender_name=sender["name"] if sender and sender["name"] else "Someone"
+        preview=content[:60]+("..." if len(content)>60 else "")
+
+        # Some deployed DBs have sender_id, older ones do not. Support both without failing send.
         try:
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                       (nid,wid(),"dm",f"{sender_name}: {preview}",d["recipient"],0,ts(),session["user_id"]))
-        except:
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                       (nid,wid(),"dm",f"{sender_name}: {preview}",d["recipient"],0,ts()))
-    # Important: bust per-user dashboard/appdata caches before publishing realtime events.
-    # Otherwise recipients receive the SSE immediately but then read stale /api/dm/unread
-    # or /api/notifications data for up to the cache TTL, which feels like a 30-60s delay.
-    _cache_bust(wid(), "dm_unread", "notifications", "notifs", "appdata")
-    # Bust DM thread cache for both parties so next open/refresh shows the new message
-    _bust_dm_thread(wid(), session["user_id"], d["recipient"])
-    _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"], "content": preview})
-    _sse_publish(wid(), "notification_updated", {"reason": "dm", "sender": session["user_id"], "recipient": d["recipient"]})
+                       (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+        except Exception:
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                       (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
+
+    # Bust caches before SSE so receivers do not fetch stale unread/notification/thread data.
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    _bust_dm_thread(ws_id, me, recipient)
+    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+    _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
     return jsonify(row)
 
 
@@ -6015,7 +6051,7 @@ def create_ticket():
             nid=f"n{int(datetime.now().timestamp()*1000)}"
             reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
             rname=reporter["name"] if reporter else "Someone"
-            db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                        (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
             # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()

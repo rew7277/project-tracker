@@ -114,11 +114,6 @@ const api={
   upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
 };
 
-// Tiny persistent chat cache: makes DM/channel content appear immediately after refresh.
-// Network calls still refresh in the background; this only avoids blank/placeholder flashes.
-const chatCacheGet=(key)=>{try{const raw=localStorage.getItem(key);if(!raw)return null;const o=JSON.parse(raw);if(!o||!Array.isArray(o.data))return null;return o.data;}catch{return null;}};
-const chatCacheSet=(key,data)=>{try{if(Array.isArray(data))localStorage.setItem(key,JSON.stringify({ts:Date.now(),data:data.slice(-250)}));}catch{}};
-
 const STAGES={
   backlog:    {label:'Backlog', color:'#94a3b8',bg:'rgba(148,163,184,.13)'}, planning:   {label:'Planning', color:'var(--cy)',bg:'rgba(96,165,250,.13)'}, development:{label:'Dev', color:'#9b8ef4',bg:'rgba(167,139,250,.13)'}, code_review:{label:'Review', color:'#22d3ee',bg:'rgba(34,211,238,.13)'}, testing:    {label:'Testing', color:'var(--pu)',bg:'rgba(251,191,36,.13)'}, uat:        {label:'UAT', color:'#f472b6',bg:'rgba(244,114,182,.13)'}, release:    {label:'Release', color:'#fb923c',bg:'rgba(251,146,60,.13)'}, production: {label:'Production',color:'#34d399',bg:'rgba(52,211,153,.13)'}, completed:  {label:'Completed', color:'#4ade80',bg:'rgba(74,222,128,.13)'}, blocked:    {label:'Blocked', color:'var(--rd2)',bg:'rgba(248,113,113,.13)'},
 };
@@ -1757,6 +1752,13 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
       payload={title:title.trim(),description:desc,project:pid,assignee:ass,priority:pri,stage,due,pct,comments:cmts,team_id:teamId,story_points:storyPoints,task_type:taskType,labels:taskLabels,sprint};
     }
     if(task&&task.id)payload.id=task.id;
+    if(!rmEnabled&&!opts.keepOpen){
+      const closeNow=()=>{setSaving(false);onClose();};
+      if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
+      else closeNow();
+      setTimeout(()=>Promise.resolve(onSave(payload)).catch(()=>{}),0);
+      return payload;
+    }
     const result=await onSave(payload);
     setSaving(false);
     if(result&&result.error){setErr(result.error);return null;}
@@ -2074,17 +2076,23 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
   const pc=projTasks.length?Math.round(projTasks.reduce((a,t)=>a+(t.pct||0),0)/projTasks.length):(project.progress||0);
   const stageGroups=KCOLS.map(s=>({s,tasks:projTasks.filter(t=>t.stage===s)})).filter(g=>g.tasks.length>0);
 
-  const saveEdit=async()=>{
-    setSaving(true);
-    const saved=await api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId});
-    // Optimistically patch the project in global state RIGHT NOW so the Members tab
-    // never reads stale data — even if app-data poll fires before onReload() completes
-    if(saved&&!saved.error){
-      setData&&setData(prev=>({...prev,
-        projects:prev.projects.map(p=>p.id===project.id?{...p,...saved}:p)
-      }));
-    }
-    await onReload();setSaving(false);setEdit(false);
+  const saveEdit=()=>{
+    const optimistic={...project,name,description:desc,target_date:tDate,color,members,team_id:projTeamId,_pending:true,_localTs:Date.now()};
+    const closeNow=()=>{
+      setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?optimistic:p)}));
+      setSaving(false);setEdit(false);
+    };
+    if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
+    else closeNow();
+    api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId},{quiet:true}).then(saved=>{
+      if(saved&&!saved.error){
+        setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?{...p,...saved,_localTs:Date.now()}:p)}));
+      }else{
+        setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?{...p,_pending:false,_failed:true}:p)}));
+      }
+    }).catch(()=>{
+      setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?{...p,_pending:false,_failed:true}:p)}));
+    });
   };
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
@@ -3958,10 +3966,12 @@ function MessagesView({projects,users,cu,tasks}){
   const pidRef=useRef('');
   useEffect(()=>{pidRef.current=pid;},[pid]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
-  const msgCacheRef=useRef(new Map());
+  const _chanCacheKey='pfChannelMessageCache:v2';
+  const _loadChanCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_chanCacheKey)||'{}')));}catch{return new Map();}};
+  const _saveChanCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_chanCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_chanCacheKey,JSON.stringify(raw));}catch{}};
+  const msgCacheRef=useRef(_loadChanCache());
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
-  const [refreshingChannel,setRefreshingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
   const fileInputRef=useRef(null);
@@ -3977,28 +3987,21 @@ function MessagesView({projects,users,cu,tasks}){
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
     const seq=++msgReqSeq.current;
-    let cached=msgCacheRef.current.get(id);
-    if(!cached){
-      cached=chatCacheGet('pt:channel:'+id);
-      if(cached) msgCacheRef.current.set(id,cached);
-    }
+    const cached=msgCacheRef.current.get(id);
     if(cached){
       setMsgs(cached);
       setLoadingChannel('');
-      setRefreshingChannel(id);
     }else if(mode==='switch'){
       setMsgs([]);
       setLoadingChannel(id);
-      setRefreshingChannel(id);
     }
     const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
-      chatCacheSet('pt:channel:'+id,d);
+      _saveChanCache(id,d);
       setMsgs(d);
       setLoadingChannel('');
-      setRefreshingChannel('');
       if(d.length>0){
         const latestTs=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
         lastSeenMsgRef.current[id]=latestTs;
@@ -4007,16 +4010,14 @@ function MessagesView({projects,users,cu,tasks}){
       setChannelUnread(prev=>({...prev,[id]:0}));
     }else{
       setLoadingChannel('');
-      setRefreshingChannel('');
     }
   },[]);
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
-    let cached=msgCacheRef.current.get(pid);
-    if(!cached){cached=chatCacheGet('pt:channel:'+pid); if(cached)msgCacheRef.current.set(pid,cached);}
-    if(cached){setMsgs(cached);setLoadingChannel('');setRefreshingChannel(pid);}
-    else {setMsgs([]);setLoadingChannel(pid);setRefreshingChannel(pid);}
+    const cached=msgCacheRef.current.get(pid);
+    if(cached){setMsgs(cached);setLoadingChannel('');}
+    else {setMsgs([]);setLoadingChannel(pid);}
     loadMsgs(pid,'switch');
   },[pid,loadMsgs]);
 
@@ -4026,9 +4027,8 @@ function MessagesView({projects,users,cu,tasks}){
       api.get('/api/messages?project='+pid).then(d=>{
         if(Array.isArray(d)){
           msgCacheRef.current.set(pid,d);
-          chatCacheSet('pt:channel:'+pid,d);
+          _saveChanCache(pid,d);
           setLoadingChannel('');
-          setRefreshingChannel('');
           setMsgs(prev=>{
             if(d.length>prev.length){
               playSound('notif');
@@ -4064,10 +4064,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
     const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
-    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
     const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4147,8 +4147,7 @@ function MessagesView({projects,users,cu,tasks}){
       if(cancelled)return;
       if(Array.isArray(d)){
         msgCacheRef.current.set(id,d);
-        chatCacheSet('pt:channel:'+id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');setRefreshingChannel('');}
+        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
       }
     };
     (async()=>{
@@ -4316,11 +4315,7 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${(loadingChannel===pid || (refreshingChannel===pid && msgs.length===0))?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
-          <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
-          <p>Opening channel…</p>
-        </div>`:null}
-        ${loadingChannel!==pid&&refreshingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4384,7 +4379,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
-  const [refreshingThread,setRefreshingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
@@ -4404,7 +4398,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
-  const threadCache=useRef(new Map());
+  const _dmCacheKey='pfDmThreadCache:v2';
+  const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
+  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
+  const threadCache=useRef(_loadDmCache());
   const pendingReactionUntil=useRef(new Map());
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
@@ -4447,18 +4444,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
-    let cached=threadCache.current.get(id);
-    if(!cached){cached=chatCacheGet('pt:dm:'+id); if(cached)threadCache.current.set(id,cached);}
+    const cached=threadCache.current.get(id);
     if(cached){
       setMsgThreadId(id);
       setMsgs(cached);
       setLoadingThread('');
-      setRefreshingThread(id);
     }else{
       setMsgThreadId('');
       setMsgs([]);
       setLoadingThread(id);
-      setRefreshingThread(id);
     }
     setToId(id);
   },[]);
@@ -4473,7 +4467,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const seq=++reqSeq.current;
     activeToRef.current=id;
     if(!threadCache.current.has(id))setLoadingThread(id);
-    setRefreshingThread(id);
     console.debug('[DM] load start', {id,reason,seq});
     const d=await api.get('/api/dm/'+id,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
@@ -4483,27 +4476,24 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(Array.isArray(d)){
       const merged=mergePendingReactionState(id,d);
       threadCache.current.set(id,merged);
-      chatCacheSet('pt:dm:'+id,merged);
+      _saveDmCache(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
-      setRefreshingThread('');
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:d.length,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
       setLoadingThread('');
-      setRefreshingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
   },[onDmRead,mergePendingReactionState]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
-    let cached=threadCache.current.get(toId);
-    if(!cached){cached=chatCacheGet('pt:dm:'+toId); if(cached)threadCache.current.set(toId,cached);}
-    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');setRefreshingThread(toId);}
-    else {setLoadingThread(toId);setRefreshingThread(toId);}
+    const cached=threadCache.current.get(toId);
+    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
+    else setLoadingThread(toId);
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
@@ -4513,9 +4503,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const merged=mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
-        chatCacheSet('pt:dm:'+requestedTo,merged);
+        _saveDmCache(requestedTo,merged);
         setLoadingThread('');
-        setRefreshingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
           return merged;
@@ -4553,7 +4542,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(Array.isArray(d)){
         const merged=mergePendingReactionState(id,d);
         threadCache.current.set(id,merged);
-        chatCacheSet('pt:dm:'+id,merged);
+        _saveDmCache(id,merged);
         if(!activeToRef.current && id===ids[0]){
           activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
         }else if(id===activeToRef.current){
@@ -4576,7 +4565,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!updated||!updated.id)return;
     const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
     const patchList=list=>list.map(x=>x.id===updated.id?{...x,...updated}:x);
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   },[cu.id]);
   const send=async()=>{
@@ -4586,7 +4575,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(editingId){
       const editId=editingId;
       setTxt('');setEditingId('');setSending(true);
-      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
       try{const r=await api.post('/api/dm/edit',{message_id:editId,content:c});if(r&&r.message)applyDmPatch(r.message,recipient);}
       catch(e){console.warn('[DM] edit failed',e);loadMsgs(recipient,'edit-rollback');}
       finally{setSending(false);}return;
@@ -4599,6 +4588,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
       threadCache.current.set(recipient,next);
+      _saveDmCache(recipient,next);
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
@@ -4609,6 +4599,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgs(prev=>{
           const next=prev.map(x=>x.id===tempId?m:x);
           threadCache.current.set(recipient,next);
+          _saveDmCache(recipient,next);
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
@@ -4618,6 +4609,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setMsgs(prev=>{
         const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
         threadCache.current.set(recipient,next);
+        _saveDmCache(recipient,next);
         return next;
       });
       setTxt(c);
@@ -4630,7 +4622,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!m||!m.id||String(m.id).startsWith('tmpdm'))return;
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
     try{const r=await api.post('/api/dm/delete',{message_id:m.id});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] delete failed',e);loadMsgs(peer,'delete-rollback');}
   };
   const pinMessage=async(m)=>{
@@ -4638,7 +4630,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
     const nextPin=!(m.pinned||m.pinned===1);
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
     try{const r=await api.post('/api/dm/pin',{message_id:m.id,pinned:nextPin});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] pin failed',e);loadMsgs(peer,'pin-rollback');}
   };
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
@@ -4647,7 +4639,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!blob||!toId)return;
     const fd=new FormData();fd.append('file',new File([blob],'voice-note.webm',{type:'audio/webm'}));
     const uploaded=await api.upload('/api/files',fd);
-    if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
+    if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
   };
   const startGoogleMeetCall=async()=>{
     if(!toId||startingMeet)return;
@@ -4700,9 +4692,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const tempId='tmpdm'+Date.now();
         const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
         setReplyTo(null);setMsgThreadId(recipient);
-        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);return next;});
+        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
-        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
+        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
       }
     }catch(e){console.warn('[DM] attachment upload failed',e);}
     finally{setAttaching(false);}
@@ -4729,7 +4721,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(until&&until>Date.now())return {...m,...updated,reactions:m.reactions||updated.reactions||[],_reactionSyncing:false};
       return {...m,...updated,reactions:updated.reactions||[]};
     });
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
     if(until)setTimeout(()=>pendingReactionUntil.current.delete(updated.id),1800);
   },[cu.id]);
@@ -4773,6 +4765,33 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
+  // Warm channel message cache immediately. First click on a channel should render
+  // from memory; the network refresh then silently reconciles in the background.
+  const channelPrefetchedRef=useRef(false);
+  useEffect(()=>{
+    if(channelPrefetchedRef.current||!allProjects.length)return;
+    channelPrefetchedRef.current=true;
+    let cancelled=false;
+    const ids=allProjects.map(p=>p.id).filter(Boolean);
+    const fetchOne=async(id)=>{
+      if(msgCacheRef.current.has(id))return;
+      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
+      if(cancelled)return;
+      if(Array.isArray(d)){
+        msgCacheRef.current.set(id,d);
+        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
+      }
+    };
+    (async()=>{
+      const q=[...ids];
+      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
+        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
+      });
+      await Promise.all(workers);
+    })();
+    return()=>{cancelled=true;};
+  },[allProjects.length]);
+
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
@@ -4805,8 +4824,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${(isThreadLoading || (refreshingThread===toId && visibleMsgs.length===0))?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
-                ${!(isThreadLoading || refreshingThread===toId)&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+                ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
@@ -6480,6 +6498,7 @@ function AIAssistant({cu,projects,tasks,users}){
       if(Array.isArray(d)){
         const merged=mergePendingReactionState(id,d);
         threadCache.current.set(id,merged);
+        _saveDmCache(id,merged);
         if(!activeToRef.current && id===ids[0]){
           activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
         }else if(id===activeToRef.current){
