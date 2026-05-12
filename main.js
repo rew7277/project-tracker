@@ -4127,11 +4127,27 @@ function MessagesView({projects,users,cu,tasks}){
     return()=>clearInterval(id);
   },[]);
 
-  const [pid,setPid]=useState('');
+  const [pid,setPid]=useState(()=>{try{return localStorage.getItem((cu&&cu.id?'pfLastChannel:'+cu.id:'pfLastChannel'))||'';}catch(e){return '';}});
   const pidRef=useRef('');
-  useEffect(()=>{pidRef.current=pid;},[pid]);
+  useEffect(()=>{pidRef.current=pid;if(pid){try{localStorage.setItem((cu&&cu.id?'pfLastChannel:'+cu.id:'pfLastChannel'),pid);}catch(e){}}},[pid,cu&&cu.id]);
+  useEffect(()=>{if(!pid&&allProjects&&allProjects.length)setPid(allProjects[0].id);},[pid,allProjects.length]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
   const msgCacheRef=useRef(new Map());
+  const channelCacheKey=cu&&cu.id?'pfChannelMsgCache:'+cu.id:'pfChannelMsgCache';
+  const channelTouchedRef=useRef(new Set());
+  const persistChannelCache=useCallback(()=>{
+    try{
+      const obj={};
+      msgCacheRef.current.forEach((v,k)=>{obj[k]=Array.isArray(v)?v.slice(-200):[];});
+      localStorage.setItem(channelCacheKey,JSON.stringify(obj));
+    }catch(e){}
+  },[channelCacheKey]);
+  useEffect(()=>{
+    try{
+      const raw=JSON.parse(localStorage.getItem(channelCacheKey)||'{}');
+      Object.entries(raw||{}).forEach(([k,v])=>{if(Array.isArray(v))msgCacheRef.current.set(k,v);});
+    }catch(e){}
+  },[channelCacheKey]);
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
@@ -4161,6 +4177,7 @@ function MessagesView({projects,users,cu,tasks}){
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
+      persistChannelCache();
       setMsgs(d);
       setLoadingChannel('');
       // Mark channel as read — store the latest message ts
@@ -4173,13 +4190,13 @@ function MessagesView({projects,users,cu,tasks}){
     }else{
       setLoadingChannel('');
     }
-  },[]);
+  },[persistChannelCache]);
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
     const cached=msgCacheRef.current.get(pid);
     if(cached){setMsgs(cached);setLoadingChannel('');}
-    loadMsgs(pid,'switch');
+    loadMsgs(pid,cached?'refresh':'switch');
   },[pid,loadMsgs]);
 
   useEffect(()=>{
@@ -4198,6 +4215,7 @@ function MessagesView({projects,users,cu,tasks}){
                 setChannelUnread(prev3=>({...prev3,[pid]:0}));
               }
             }
+            msgCacheRef.current.set(pid,d);persistChannelCache();
             return d;
           });
         }
@@ -4249,6 +4267,24 @@ function MessagesView({projects,users,cu,tasks}){
     ev.target.value='';
     await sendChannelAttachmentFile(file);
   };
+
+  // Preload every channel once per view-open. Previously messages were fetched only
+  // after clicking a project, so the UI no longer shows a temporary placeholder. This warms
+  // the cache in the background and uses localStorage on refresh for instant display.
+  useEffect(()=>{
+    safe(allProjects).forEach(p=>{
+      const id=p&&p.id;
+      if(!id||channelTouchedRef.current.has(id)||msgCacheRef.current.has(id))return;
+      channelTouchedRef.current.add(id);
+      api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true}).then(d=>{
+        if(Array.isArray(d)){
+          msgCacheRef.current.set(id,d);
+          persistChannelCache();
+          if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
+        }
+      }).catch(()=>{});
+    });
+  },[allProjects.length,persistChannelCache]);
 
   // Fixed order ref — set once, never changes (no re-sorting unless new msg arrives)
   const fixedOrderRef=useRef(null);
@@ -4446,11 +4482,7 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
-          <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
-          <p>Opening channel…</p>
-        </div>`:null}
-        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${(!loadingChannel&&msgs.length===0&&msgCacheRef.current.has(pid))?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4507,8 +4539,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(others[0]&&others[0].id||'');
-  const [msgs,setMsgs]=useState([]);
+  const dmCacheKey=cu&&cu.id?'pfDmThreadCache:'+cu.id:'pfDmThreadCache';
+  const lastDmKey=cu&&cu.id?'pfLastDmPeer:'+cu.id:'pfLastDmPeer';
+  const initialPeer=(()=>{try{return initialUserId||localStorage.getItem(lastDmKey)||(others[0]&&others[0].id)||'';}catch(e){return initialUserId||(others[0]&&others[0].id)||'';}})();
+  const [toId,setToId]=useState(initialPeer);
+  const initialMsgs=(()=>{try{const raw=JSON.parse(localStorage.getItem(dmCacheKey)||'{}');return Array.isArray(raw[initialPeer])?raw[initialPeer]:[];}catch(e){return [];}})();
+  const [msgs,setMsgs]=useState(initialMsgs);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
@@ -4534,6 +4570,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
+  const persistDmCache=useCallback(()=>{
+    try{
+      const obj={};
+      threadCache.current.forEach((v,k)=>{obj[k]=Array.isArray(v)?v.slice(-200):[];});
+      localStorage.setItem(dmCacheKey,JSON.stringify(obj));
+    }catch(e){}
+  },[dmCacheKey]);
+  useEffect(()=>{
+    try{
+      const raw=JSON.parse(localStorage.getItem(dmCacheKey)||'{}');
+      Object.entries(raw||{}).forEach(([k,v])=>{if(Array.isArray(v))threadCache.current.set(k,v);});
+      if(initialPeer&&Array.isArray(raw[initialPeer])){setMsgThreadId(initialPeer);setMsgs(raw[initialPeer]);}
+    }catch(e){}
+  },[dmCacheKey]);
   const pendingReactionUntil=useRef(new Map());
   // Pre-warm every DM thread immediately. The backend has a short-lived DM cache,
   // so this is cheap after the first call and removes the first-click loading screen.
@@ -4545,11 +4595,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       api.get('/api/dm/'+encodeURIComponent(uid),{quiet:true}).then(d=>{
         if(Array.isArray(d)){
           threadCache.current.set(uid,d);
+          persistDmCache();
           if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(d);setLoadingThread('');}
         }
       }).catch(()=>{});
     });
-  },[others.length,dmUnread.length]);
+  },[others.length,dmUnread.length,persistDmCache]);
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
@@ -4601,8 +4652,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setMsgs([]);
       setLoadingThread(''); // no blocking spinner; show empty shell while fetch fills in
     }
+    try{localStorage.setItem(lastDmKey,id);}catch(e){}
     setToId(id);
-  },[]);
+  },[lastDmKey]);
   useEffect(()=>{
     if(initialUserId){
       const u=safe(users).find(u=>u.id===initialUserId);
@@ -4638,6 +4690,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         merged=mergePendingReactionState(id,d);
       }
       threadCache.current.set(id,merged);
+      persistDmCache();
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
@@ -4649,7 +4702,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
-  },[onDmRead,mergePendingReactionState]);
+  },[onDmRead,mergePendingReactionState,persistDmCache]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
@@ -4672,6 +4725,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           : mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
+        persistDmCache();
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -4715,7 +4769,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
-      threadCache.current.set(recipient,next);
+      threadCache.current.set(recipient,next);persistDmCache();
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
@@ -4725,7 +4779,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgThreadId(recipient);
         setMsgs(prev=>{
           const next=prev.map(x=>x.id===tempId?m:x);
-          threadCache.current.set(recipient,next);
+          threadCache.current.set(recipient,next);persistDmCache();
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
@@ -4734,7 +4788,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       console.warn('[DM] send failed', e);
       setMsgs(prev=>{
         const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
-        threadCache.current.set(recipient,next);
+        threadCache.current.set(recipient,next);persistDmCache();
         return next;
       });
       setTxt(c);
@@ -4930,7 +4984,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
-                ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>

@@ -1,4 +1,122 @@
 
+// Favicon is now served as PNG via /favicon.ico — no JS override needed
+
+
+(function(){
+'use strict';
+
+window._pfSWReady = false;
+window._pfPushSub = null;
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js', {scope:'/'})
+    .then(function(reg){
+      window._pfSWReady = true;
+      window._pfSWReg   = reg;
+
+      navigator.serviceWorker.addEventListener('message', function(e){
+        if(e.data && e.data.type === 'PF_NAVIGATE'){
+          window.location.hash = e.data.url || '/';
+          window.focus();
+        }
+        if(e.data && e.data.type === 'PF_NOTIF_CLICK'){
+          window.focus();
+          var tag=e.data.tag;
+          if(tag&&window._pfNotifHandlers&&window._pfNotifHandlers[tag]){
+            try{window._pfNotifHandlers[tag]();}catch(err){}
+            delete window._pfNotifHandlers[tag];
+          }
+        }
+      });
+
+      _pfSetupPush(reg);
+    })
+    .catch(function(e){ console.warn('[PF] SW registration failed:', e); });
+}
+
+function _pfUrlB64(base64String){
+  var padding='='.repeat((4-base64String.length%4)%4);
+  var base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
+  var rawData=window.atob(base64);
+  var outputArray=new Uint8Array(rawData.length);
+  for(var i=0;i<rawData.length;++i) outputArray[i]=rawData.charCodeAt(i);
+  return outputArray;
+}
+
+async function _pfSetupPush(reg){
+  if(!('PushManager' in window)) return;
+
+  var vapidKey='';
+  try{
+    var r=await fetch('/api/push/vapid-key',{credentials:'include'});
+    var d=await r.json();
+    vapidKey=d.publicKey||'';
+  }catch(e){ return; }
+
+  if(!vapidKey){
+    return;
+  }
+
+  var perm = Notification.permission;
+  if(perm==='default'){
+    perm = await Notification.requestPermission();
+  }
+  if(perm!=='granted') return;
+
+  var existingSub = await reg.pushManager.getSubscription();
+  if(existingSub){
+    window._pfPushSub = existingSub;
+    _pfSendSubToServer(existingSub);
+    return;
+  }
+
+  try{
+    var sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: _pfUrlB64(vapidKey)
+    });
+    window._pfPushSub = sub;
+    _pfSendSubToServer(sub);
+  }catch(e){
+    console.warn('[PF] Push subscribe failed:', e);
+  }
+}
+
+function _pfSendSubToServer(sub){
+  // Guard: only send push subscription if React has confirmed an active session.
+  // window._pfCurrentUser is set by the App useEffect after /api/auth/me succeeds,
+  // preventing a redundant 401 call before auth state is resolved.
+  if(!window._pfCurrentUser) return;
+  var subJson = sub.toJSON();
+  fetch('/api/push/subscribe',{
+    method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      endpoint: subJson.endpoint, keys: subJson.keys
+    })
+  }).catch(function(){});
+}
+
+window._pfLastPollTrigger = null;
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState === 'visible'){
+    if(typeof window._pfOnVisible === 'function'){
+      window._pfOnVisible();
+    }
+  }
+});
+
+window._pfPushUnsubscribe = async function(){
+  if(window._pfPushSub){
+    try{
+      await window._pfPushSub.unsubscribe();
+      await fetch('/api/push/unsubscribe',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:window._pfPushSub.endpoint})});
+      window._pfPushSub = null;
+    }catch(e){}
+  }
+};
+
+})();
+
+
+
 (function(){
 'use strict';
 
@@ -73,14 +191,31 @@ const _apiCleanMessage = (message, status) => {
   if (!msg || msg.length > 180 || /^doctype html/i.test(msg)) msg = status ? `Server returned HTTP ${status}` : 'Network error';
   return msg;
 };
+const _API_SILENT_PREFIXES = [
+  '/api/auth/me',          // expected on logged-out/expired sessions
+  '/api/app-data',         // background refresh; show banner in UI, not toast spam
+  '/api/presence',         // heartbeat/polling
+  '/api/notifications',    // SSE/fallback polling
+  '/api/reminders/due',    // reminder polling
+  '/api/dm/unread',        // DM polling
+  '/api/timelogs'          // dashboard background poll
+];
+const _apiShouldToast = (url, status) => {
+  const u = String(url || '').split('?')[0];
+  if (_API_SILENT_PREFIXES.some(p => u === p || u.startsWith(p + '/'))) return false;
+  if (status === 401 || status === 403) return false;
+  return true;
+};
 const _apiNotifyError = (url, message, status) => {
   message = _apiCleanMessage(message, status);
-  const key = `${status || 0}:${url}:${message || ''}`;
+  const key = `${status || 0}:${String(url || '').split('?')[0]}:${message || ''}`;
   const now = Date.now();
-  if ((now - (_apiErrorSeen.get(key) || 0)) < 15000) return; // prevent polling-error toast spam
+  // One visible toast per unique API problem every 2 minutes. Background polls are console-only.
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 120000) return;
   _apiErrorSeen.set(key, now);
-  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
   console.warn('[API]', status || 'network', url, message);
+  if (!_apiShouldToast(url, status)) return;
+  window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
 };
 const _apiRequest = async (u, opts = {}) => {
   try {
@@ -93,7 +228,7 @@ const _apiRequest = async (u, opts = {}) => {
     const data = await _apiRead(r);
     if (!r.ok) {
       const message = data?.error || data?.message || `HTTP ${r.status}`;
-      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
+      if(!opts.quiet) _apiNotifyError(u, message, r.status);
       return { ok:false, error:message, status:r.status, data };
     }
     const etag = r.headers.get('ETag');
@@ -101,17 +236,17 @@ const _apiRequest = async (u, opts = {}) => {
     return data;
   } catch (e) {
     if (e.name === 'AbortError') return null;
-    _apiNotifyError(u, e.message || 'Network error', 0);
+    if(!opts.quiet) _apiNotifyError(u, e.message || 'Network error', 0);
     return { ok:false, error:e.message || 'Network error', status:0 };
   }
 };
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:u=>_apiRequest(u),
-  post:(u,b)=>_apiRequest(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
-  put:(u,b)=>_apiRequest(u,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b ?? {})}),
-  del:u=>_apiRequest(u,{method:'DELETE'}),
-  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
+  get:(u,opts={})=>_apiRequest(u,opts),
+  post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
+  upload:(u,fd,opts={})=>_apiRequest(u,{...opts,method:'POST',body:fd}),
 };
 
 const STAGES={
@@ -216,7 +351,7 @@ function AuthScreen({onLogin}){
       const p=new URLSearchParams(window.location.search);
       if(p.get('google_auth')==='1'){
         fetch('/api/auth/me').then(r=>r.ok?r.json():null).then(u=>{
-          if(u&&u.id){history.replaceState(null,'','/');onLogin(u);}
+          if(u&&u.id){history.replaceState(null,'',workspaceBasePath(u));onLogin(u);}
         }).catch(()=>{});
       }
     }catch(e){}
@@ -1753,9 +1888,16 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
     }
     if(task&&task.id)payload.id=task.id;
     if(!rmEnabled&&!opts.keepOpen){
+      // TRUE INSTANT SAVE: close the modal first, then let the parent do the
+      // optimistic UI update + API write in the background. This avoids the
+      // button/spinner feeling stuck while the server sends notifications, writes
+      // activity rows, or waits on slow hosting cold-starts.
       const closeNow=()=>{setSaving(false);onClose();};
-      if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
-      else closeNow();
+      if(window.ReactDOM&&typeof ReactDOM.flushSync==='function'){
+        ReactDOM.flushSync(closeNow);
+      } else {
+        closeNow();
+      }
       setTimeout(()=>Promise.resolve(onSave(payload)).catch(()=>{}),0);
       return payload;
     }
@@ -2084,6 +2226,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     };
     if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
     else closeNow();
+
     api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId},{quiet:true}).then(saved=>{
       if(saved&&!saved.error){
         setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?{...p,...saved,_localTs:Date.now()}:p)}));
@@ -2109,28 +2252,30 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     }catch(_){}
     onReload();
   };
-  const saveTask=async p=>{
-    let r;
+  const saveTask=p=>{
+    // Fully optimistic + fire-and-forget. The modal closes instantly; the server
+    // confirmation patches the temporary task in the background. This removes the
+    // visible ~2s wait caused by task notifications/email work on the backend.
     if(p.id&&allTasks.find(t=>t.id===p.id)){
-      // UPDATE: optimistic patch
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-      r=await api.put('/api/tasks/'+p.id,p);
-    } else {
-      // CREATE: post then show immediately
-      // Pre-optimistic: show task immediately before API responds
-      const tempId2='tmp_'+Date.now();
-      const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
-      setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
-      r=await api.post('/api/tasks',{...p,project:project.id});
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p,_pending:true}:t)}));
+      api.put('/api/tasks/'+p.id,p).then(r=>{
+        if(r&&!r.error)setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...r,_localTs:Date.now()}:t)}));
+      }).catch(()=>{onReload&&onReload();});
+      return {...p,_pending:true};
+    }
+    const tempId2='tmp_'+Date.now();
+    const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
+    setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
+    api.post('/api/tasks',{...p,project:project.id},{quiet:true}).then(r=>{
       if(r&&r.id){
         setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...r,_localTs:Date.now()}:t)}));
-      } else {
+      }else{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
       }
-    }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>onReload(),2000);
-    return r;
+    }).catch(()=>{
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...t,_pending:false,_failed:true}:t)}));
+    });
+    return tempT2;
   };
   const delTask=async id=>{
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
@@ -2315,14 +2460,14 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      history.pushState(null,'','/projects/'+slug);
+      history.pushState(null,'',workspaceBasePath(cu)+'projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      if(window.location.pathname.startsWith('/projects/')){
-        history.pushState(null,'','/projects');
+      if(routeViewFromPath(['projects'])==='projects'){
+        history.pushState(null,'',workspaceBasePath(cu)+'projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2386,7 +2531,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(!Array.isArray(realProj.members)){try{realProj.members=parseIdList(realProj.members);}catch{realProj.members=[];}}
       setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
       // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
-      setTimeout(()=>reload(),2000);
+      // SSE triggers reload — no extra delay needed
     }catch(e){
       setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>!p._pending)}));
       setErr('Error creating project: '+(e.message||'Unknown error'));
@@ -2616,7 +2761,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,initialTaskId,onClearInitialTask,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2644,6 +2789,30 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     document.addEventListener('keydown',h);
     return()=>document.removeEventListener('keydown',h);
   },[]);
+
+  useEffect(()=>{
+    if(!initialTaskId)return;
+    let cancelled=false;
+    const openTask=(t)=>{
+      if(!t||cancelled)return;
+      setEditT(t);
+      if(t.project)setPid(t.project);
+      setShowResolved(true);
+      onClearInitialTask&&onClearInitialTask();
+      try{history.replaceState(null,'',workspaceBasePath(cu)+'tasks');}catch(e){}
+    };
+    const existing=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
+    if(existing){openTask(existing);return;}
+    // Deep links from email can arrive before app-data has this task.
+    // Fetch the exact task by ID, inject it into state, then open the modal.
+    api.get('/api/tasks/'+encodeURIComponent(initialTaskId),{quiet:true}).then(t=>{
+      if(t&&t.id&&!cancelled){
+        setData&&setData(prev=>({ ...prev, tasks:[t,...safe(prev.tasks).filter(x=>String(x.id)!==String(t.id))] }));
+        openTask(t);
+      }
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[initialTaskId,tasks]);
 
   useEffect(()=>{
     if(initialStage){setStageF(initialStage);setShowFilters(true);}
@@ -2733,23 +2902,25 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         _localTs:Date.now(),_pending:true
       };
       setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
-      // API call in background
-      r=await api.post('/api/tasks',p);
-      if(r&&r.id){
-        // Replace temp with real task from server
-        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
-      } else {
-        // Rollback temp task on error
+      // API call in background. Do not block the modal/button on email/push side effects.
+      api.post('/api/tasks',p,{quiet:true}).then(real=>{
+        if(real&&real.id){
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...real,_localTs:Date.now()}:t)}));
+          // SSE triggers reload — no extra delay needed
+        } else {
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
+        }
+      }).catch(()=>{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
-      }
+      });
+      r=tempTask;
     }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>reload(),2000);
+    // SSE (task_updated) already triggers load() — no extra reload needed
     return r;
   };
   const delT=async id=>{
@@ -3879,12 +4050,6 @@ function renderChatContent(text){
   if(fileUrl&&isImg){
     return safe.replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open image</a>').replace(/\n/g,'<br>');
   }
-  const meetMatch2=raw.match(/https:\/\/meet\.google\.com\/[A-Za-z0-9-]+/i);
-  if(meetMatch2){
-    const url=meetMatch2[0];
-    const code=(raw.match(/Code:\s*([A-Za-z0-9-]+)/i)||[])[1]||url.split('/').pop();
-    return `<div style="min-width:240px;display:grid;gap:8px"><div style="display:flex;align-items:center;gap:8px;font-weight:900"><span style="width:30px;height:30px;border-radius:999px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center">📹</span><span>Google Meet call</span></div><div style="font-size:11px;opacity:.82;font-family:monospace">Invite code: ${escapeHtml(code)}</div><a href="${url}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:12px;padding:9px 12px;background:#2563eb;color:#fff;text-decoration:none;font-weight:900">Join Google Meet ↗</a></div>`;
-  }
   return safe
     .replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:700">$1</a>')
     .replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open attachment</a>')
@@ -3962,14 +4127,27 @@ function MessagesView({projects,users,cu,tasks}){
     return()=>clearInterval(id);
   },[]);
 
-  const [pid,setPid]=useState('');
+  const [pid,setPid]=useState(()=>{try{return localStorage.getItem((cu&&cu.id?'pfLastChannel:'+cu.id:'pfLastChannel'))||'';}catch(e){return '';}});
   const pidRef=useRef('');
-  useEffect(()=>{pidRef.current=pid;},[pid]);
+  useEffect(()=>{pidRef.current=pid;if(pid){try{localStorage.setItem((cu&&cu.id?'pfLastChannel:'+cu.id:'pfLastChannel'),pid);}catch(e){}}},[pid,cu&&cu.id]);
+  useEffect(()=>{if(!pid&&allProjects&&allProjects.length)setPid(allProjects[0].id);},[pid,allProjects.length]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
-  const _chanCacheKey='pfChannelMessageCache:v2';
-  const _loadChanCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_chanCacheKey)||'{}')));}catch{return new Map();}};
-  const _saveChanCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_chanCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_chanCacheKey,JSON.stringify(raw));}catch{}};
-  const msgCacheRef=useRef(_loadChanCache());
+  const msgCacheRef=useRef(new Map());
+  const channelCacheKey=cu&&cu.id?'pfChannelMsgCache:'+cu.id:'pfChannelMsgCache';
+  const channelTouchedRef=useRef(new Set());
+  const persistChannelCache=useCallback(()=>{
+    try{
+      const obj={};
+      msgCacheRef.current.forEach((v,k)=>{obj[k]=Array.isArray(v)?v.slice(-200):[];});
+      localStorage.setItem(channelCacheKey,JSON.stringify(obj));
+    }catch(e){}
+  },[channelCacheKey]);
+  useEffect(()=>{
+    try{
+      const raw=JSON.parse(localStorage.getItem(channelCacheKey)||'{}');
+      Object.entries(raw||{}).forEach(([k,v])=>{if(Array.isArray(v))msgCacheRef.current.set(k,v);});
+    }catch(e){}
+  },[channelCacheKey]);
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
@@ -3999,9 +4177,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
-      _saveChanCache(id,d);
+      persistChannelCache();
       setMsgs(d);
       setLoadingChannel('');
+      // Mark channel as read — store the latest message ts
       if(d.length>0){
         const latestTs=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
         lastSeenMsgRef.current[id]=latestTs;
@@ -4011,14 +4190,13 @@ function MessagesView({projects,users,cu,tasks}){
     }else{
       setLoadingChannel('');
     }
-  },[]);
+  },[persistChannelCache]);
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
     const cached=msgCacheRef.current.get(pid);
     if(cached){setMsgs(cached);setLoadingChannel('');}
-    else {setMsgs([]);setLoadingChannel(pid);}
-    loadMsgs(pid,'switch');
+    loadMsgs(pid,cached?'refresh':'switch');
   },[pid,loadMsgs]);
 
   useEffect(()=>{
@@ -4026,9 +4204,6 @@ function MessagesView({projects,users,cu,tasks}){
     const id=setInterval(()=>{
       api.get('/api/messages?project='+pid).then(d=>{
         if(Array.isArray(d)){
-          msgCacheRef.current.set(pid,d);
-          _saveChanCache(pid,d);
-          setLoadingChannel('');
           setMsgs(prev=>{
             if(d.length>prev.length){
               playSound('notif');
@@ -4040,6 +4215,7 @@ function MessagesView({projects,users,cu,tasks}){
                 setChannelUnread(prev3=>({...prev3,[pid]:0}));
               }
             }
+            msgCacheRef.current.set(pid,d);persistChannelCache();
             return d;
           });
         }
@@ -4064,10 +4240,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
     const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
-    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
     const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4091,6 +4267,24 @@ function MessagesView({projects,users,cu,tasks}){
     ev.target.value='';
     await sendChannelAttachmentFile(file);
   };
+
+  // Preload every channel once per view-open. Previously messages were fetched only
+  // after clicking a project, so the UI no longer shows a temporary placeholder. This warms
+  // the cache in the background and uses localStorage on refresh for instant display.
+  useEffect(()=>{
+    safe(allProjects).forEach(p=>{
+      const id=p&&p.id;
+      if(!id||channelTouchedRef.current.has(id)||msgCacheRef.current.has(id))return;
+      channelTouchedRef.current.add(id);
+      api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true}).then(d=>{
+        if(Array.isArray(d)){
+          msgCacheRef.current.set(id,d);
+          persistChannelCache();
+          if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
+        }
+      }).catch(()=>{});
+    });
+  },[allProjects.length,persistChannelCache]);
 
   // Fixed order ref — set once, never changes (no re-sorting unless new msg arrives)
   const fixedOrderRef=useRef(null);
@@ -4132,33 +4326,6 @@ function MessagesView({projects,users,cu,tasks}){
     }
     return rows;
   },[allProjects,chanSearch,newMsgProjects]);
-
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
 
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
 
@@ -4315,7 +4482,7 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${(!loadingChannel&&msgs.length===0&&msgCacheRef.current.has(pid))?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4372,8 +4539,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(initialUserId||'');
-  const [msgs,setMsgs]=useState([]);
+  const dmCacheKey=cu&&cu.id?'pfDmThreadCache:'+cu.id:'pfDmThreadCache';
+  const lastDmKey=cu&&cu.id?'pfLastDmPeer:'+cu.id:'pfLastDmPeer';
+  const initialPeer=(()=>{try{return initialUserId||localStorage.getItem(lastDmKey)||(others[0]&&others[0].id)||'';}catch(e){return initialUserId||(others[0]&&others[0].id)||'';}})();
+  const [toId,setToId]=useState(initialPeer);
+  const initialMsgs=(()=>{try{const raw=JSON.parse(localStorage.getItem(dmCacheKey)||'{}');return Array.isArray(raw[initialPeer])?raw[initialPeer]:[];}catch(e){return [];}})();
+  const [msgs,setMsgs]=useState(initialMsgs);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
@@ -4398,11 +4569,38 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
-  const _dmCacheKey='pfDmThreadCache:v2';
-  const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
-  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
-  const threadCache=useRef(_loadDmCache());
+  const threadCache=useRef(new Map());
+  const persistDmCache=useCallback(()=>{
+    try{
+      const obj={};
+      threadCache.current.forEach((v,k)=>{obj[k]=Array.isArray(v)?v.slice(-200):[];});
+      localStorage.setItem(dmCacheKey,JSON.stringify(obj));
+    }catch(e){}
+  },[dmCacheKey]);
+  useEffect(()=>{
+    try{
+      const raw=JSON.parse(localStorage.getItem(dmCacheKey)||'{}');
+      Object.entries(raw||{}).forEach(([k,v])=>{if(Array.isArray(v))threadCache.current.set(k,v);});
+      if(initialPeer&&Array.isArray(raw[initialPeer])){setMsgThreadId(initialPeer);setMsgs(raw[initialPeer]);}
+    }catch(e){}
+  },[dmCacheKey]);
   const pendingReactionUntil=useRef(new Map());
+  // Pre-warm every DM thread immediately. The backend has a short-lived DM cache,
+  // so this is cheap after the first call and removes the first-click loading screen.
+  useEffect(()=>{
+    const ids=[...safe(dmUnread).map(x=>x.sender),...safe(others).map(u=>u.id)]
+      .filter((v,i,a)=>v&&a.indexOf(v)===i);
+    ids.forEach(uid=>{
+      if(threadCache.current.has(uid))return;
+      api.get('/api/dm/'+encodeURIComponent(uid),{quiet:true}).then(d=>{
+        if(Array.isArray(d)){
+          threadCache.current.set(uid,d);
+          persistDmCache();
+          if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(d);setLoadingThread('');}
+        }
+      }).catch(()=>{});
+    });
+  },[others.length,dmUnread.length,persistDmCache]);
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
@@ -4448,14 +4646,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(cached){
       setMsgThreadId(id);
       setMsgs(cached);
-      setLoadingThread('');
+      setLoadingThread(''); // cache hit — no spinner, background refresh will update silently
     }else{
-      setMsgThreadId('');
+      setMsgThreadId(id);
       setMsgs([]);
-      setLoadingThread(id);
+      setLoadingThread(''); // no blocking spinner; show empty shell while fetch fills in
     }
+    try{localStorage.setItem(lastDmKey,id);}catch(e){}
     setToId(id);
-  },[]);
+  },[lastDmKey]);
   useEffect(()=>{
     if(initialUserId){
       const u=safe(users).find(u=>u.id===initialUserId);
@@ -4466,44 +4665,67 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread(id);
+    if(!threadCache.current.has(id))setLoadingThread('');
     console.debug('[DM] load start', {id,reason,seq});
-    const d=await api.get('/api/dm/'+id,{quiet:true});
+    // Use ?since= when we have cached messages — only fetch new ones instead of full 200-msg reload
+    const existing=threadCache.current.get(id)||[];
+    const lastMsg=existing.length?existing[existing.length-1]:null;
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
     }
     if(Array.isArray(d)){
-      const merged=mergePendingReactionState(id,d);
+      let merged;
+      if(sinceParam&&d.length===0){
+        // No new messages — keep existing cache, just re-render
+        merged=mergePendingReactionState(id,existing);
+      } else if(sinceParam&&existing.length){
+        // Incremental: merge new messages into existing cache (deduplicate by id)
+        const existingIds=new Set(existing.map(m=>m.id));
+        const newMsgs=d.filter(m=>!existingIds.has(m.id));
+        merged=mergePendingReactionState(id,[...existing,...newMsgs]);
+      } else {
+        merged=mergePendingReactionState(id,d);
+      }
       threadCache.current.set(id,merged);
-      _saveDmCache(id,merged);
+      persistDmCache();
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
       onDmRead(id);
-      console.debug('[DM] load ok', {id,count:d.length,seq});
+      console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
       setLoadingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
-  },[onDmRead,mergePendingReactionState]);
+  },[onDmRead,mergePendingReactionState,persistDmCache]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
-    else setLoadingThread(toId);
+    if(cached){setMsgThreadId(toId);setMsgs(cached);}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
-      const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
+      // Use ?since= for incremental fetch — only get NEW messages instead of re-fetching all 200
+      const cached=threadCache.current.get(requestedTo)||[];
+      const lastMsg=cached.length?cached[cached.length-1]:null;
+      const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+      const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
-        const merged=mergePendingReactionState(requestedTo,d);
+        if(sinceParam&&d.length===0)return; // No new messages — nothing to do
+        const existing=threadCache.current.get(requestedTo)||[];
+        // Merge new incremental messages into existing cache
+        const merged=sinceParam
+          ? mergePendingReactionState(requestedTo,[...existing,...d])
+          : mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
-        _saveDmCache(requestedTo,merged);
+        persistDmCache();
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -4527,47 +4749,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
   },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
-
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
-  const applyDmPatch=useCallback((updated,peerHint)=>{
-    if(!updated||!updated.id)return;
-    const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
-    const patchList=list=>list.map(x=>x.id===updated.id?{...x,...updated}:x);
-    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
-    if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
-  },[cu.id]);
   const send=async()=>{
     if(!txt.trim()||!toId||sending)return;
     const recipient=toId;
@@ -4575,7 +4757,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(editingId){
       const editId=editingId;
       setTxt('');setEditingId('');setSending(true);
-      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);return next;});
       try{const r=await api.post('/api/dm/edit',{message_id:editId,content:c});if(r&&r.message)applyDmPatch(r.message,recipient);}
       catch(e){console.warn('[DM] edit failed',e);loadMsgs(recipient,'edit-rollback');}
       finally{setSending(false);}return;
@@ -4587,8 +4769,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
-      threadCache.current.set(recipient,next);
-      _saveDmCache(recipient,next);
+      threadCache.current.set(recipient,next);persistDmCache();
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
@@ -4598,8 +4779,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgThreadId(recipient);
         setMsgs(prev=>{
           const next=prev.map(x=>x.id===tempId?m:x);
-          threadCache.current.set(recipient,next);
-          _saveDmCache(recipient,next);
+          threadCache.current.set(recipient,next);persistDmCache();
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
@@ -4608,8 +4788,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       console.warn('[DM] send failed', e);
       setMsgs(prev=>{
         const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
-        threadCache.current.set(recipient,next);
-        _saveDmCache(recipient,next);
+        threadCache.current.set(recipient,next);persistDmCache();
         return next;
       });
       setTxt(c);
@@ -4618,11 +4797,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       window.dispatchEvent(new CustomEvent('pt:refresh',{detail:{type:'dm_sent',recipient}}));
     }
   };
+  const applyDmPatch=useCallback((updated,peerHint)=>{
+    if(!updated||!updated.id)return;
+    const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
+    const patchList=list=>list.map(x=>x.id===updated.id?{...x,...updated}:x);
+    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
+  },[cu.id]);
   const deleteMessage=async(m)=>{
     if(!m||!m.id||String(m.id).startsWith('tmpdm'))return;
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);return next;});
     try{const r=await api.post('/api/dm/delete',{message_id:m.id});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] delete failed',e);loadMsgs(peer,'delete-rollback');}
   };
   const pinMessage=async(m)=>{
@@ -4630,7 +4816,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
     const nextPin=!(m.pinned||m.pinned===1);
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);return next;});
     try{const r=await api.post('/api/dm/pin',{message_id:m.id,pinned:nextPin});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] pin failed',e);loadMsgs(peer,'pin-rollback');}
   };
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
@@ -4639,7 +4825,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!blob||!toId)return;
     const fd=new FormData();fd.append('file',new File([blob],'voice-note.webm',{type:'audio/webm'}));
     const uploaded=await api.upload('/api/files',fd);
-    if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
+    if(uploaded&&uploaded.id){const old=txt;setTxt('🎤 Voice note\n/api/files/'+uploaded.id);await new Promise(r=>setTimeout(r,0));await send();setTxt(old);}
   };
   const startGoogleMeetCall=async()=>{
     if(!toId||startingMeet)return;
@@ -4692,9 +4878,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const tempId='tmpdm'+Date.now();
         const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
         setReplyTo(null);setMsgThreadId(recipient);
-        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
+        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
-        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
+        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
       }
     }catch(e){console.warn('[DM] attachment upload failed',e);}
     finally{setAttaching(false);}
@@ -4721,7 +4907,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(until&&until>Date.now())return {...m,...updated,reactions:m.reactions||updated.reactions||[],_reactionSyncing:false};
       return {...m,...updated,reactions:updated.reactions||[]};
     });
-    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
+    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
     if(until)setTimeout(()=>pendingReactionUntil.current.delete(updated.id),1800);
   },[cu.id]);
@@ -4765,33 +4951,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
-
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
@@ -4824,7 +4983,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
@@ -4876,15 +5035,30 @@ function NotifsView({notifs,reload,setData,onNavigate}){
     task_assigned:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,c:'var(--ac)',nav:'tasks',label:'View Tasks'}, status_change:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>`,c:'var(--cy)',nav:'tasks',label:'View Tasks'}, comment:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,c:'var(--pu)',nav:'tasks',label:'View Tasks'}, deadline:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'var(--am)',nav:'tasks',label:'View Tasks'}, dm:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="12" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/></svg>`,c:'#06b6d4',nav:'dm',label:'Open Messages'}, project_added:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/></svg>`,c:'#10b981',nav:'projects',label:'View Projects'}, reminder:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'#f59e0b',nav:'tasks',label:'View Tasks'}, call:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.28a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.29 6.29l1.24-.82a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,c:'#22c55e',nav:'dashboard',label:'Join Instant Meet'}, };
   const unread=safe(notifs).filter(n=>!n.read).length;
   const handleClick=async(n)=>{
-    if(!n.read) await api.put('/api/notifications/'+n.id+'/read',{});
+    // Optimistically mark read so the notification row clears instantly.
+    if(setData)setData(prev=>({...prev,notifs:(prev.notifs||[]).map(x=>x.id===n.id?{...x,read:1}:x)}));
+    if(!n.read) api.put('/api/notifications/'+n.id+'/read',{}).catch(e=>console.warn('[Notifications] mark-read failed',e));
     const T=NT[n.type]||NT.comment;
-    if(T.nav&&onNavigate){onNavigate(T.nav);}
-    reload();
+    if(n.type==='dm'){
+      const sid=n.sender_id||n.sender||n.entity_id||'';
+      console.debug('[Notifications] opening DM notification', {notification:n.id,sender:sid});
+      if(sid&&window._pfSetDmTarget)window._pfSetDmTarget(sid);
+      if(onNavigate)onNavigate('dm');
+      // Refresh the target conversation immediately after the DM view mounts.
+      setTimeout(()=>window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'notification_click',sender:sid}})),80);
+    }else if(T.nav&&onNavigate){onNavigate(T.nav);}
+    reload&&reload(undefined,true);
   };
   const clearAll=async()=>{
-    // Optimistic update — instantly mark all as read in UI, no visible lag
+    console.debug('[Notifications] mark-all-read clicked', {unread});
     if(setData)setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));
-    api.put('/api/notifications/read-all',{}).then(()=>reload()).catch(()=>reload());
+    try{
+      const r=await api.put('/api/notifications/read-all',{});
+      console.debug('[Notifications] mark-all-read result', r);
+    }catch(e){
+      console.warn('[Notifications] mark-all-read failed', e);
+    }
+    reload();
   };
   return html`<div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',boxSizing:'border-box'}}>
     <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -5455,10 +5629,31 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
 
   const saveTicket=async()=>{
     if(!nTitle.trim())return;
-    setSaving(true);
     const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    try{ if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);} else {await api.post('/api/tickets',payload);} }
-    finally{setSaving(false);setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');load();}
+    if(editTicket){
+      // EDIT: optimistic update
+      setSaving(true);
+      setTickets(prev=>prev.map(t=>t.id===editTicket.id?{...t,...payload}:t));
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{await api.put('/api/tickets/'+editTicket.id,payload);}
+      finally{setSaving(false);load();}
+    } else {
+      // CREATE: optimistic — show ticket immediately, close modal, save in background
+      const tempId='tmptkt_'+Date.now();
+      const tempTicket={...payload,id:tempId,reporter:cu.id,created:new Date().toISOString(),updated:new Date().toISOString(),tags:'[]',_pending:true};
+      setTickets(prev=>[tempTicket,...prev]);
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{
+        const result=await api.post('/api/tickets',payload);
+        if(result&&result.id){
+          setTickets(prev=>prev.map(t=>t.id===tempId?{...result}:t));
+        } else {
+          setTickets(prev=>prev.filter(t=>t.id!==tempId));
+        }
+      }catch(e){
+        setTickets(prev=>prev.filter(t=>t.id!==tempId));
+      }
+    }
   };
   const openEdit=(t)=>{setEditTicket(t);setNTitle(t.title||'');setNDesc(t.description||'');setNType(t.type||'bug');setNPriority(t.priority||'medium');setNAssignee(t.assignee||'');setNProject(t.project||'');setNStatus(t.status||'open');setShowNew(true);};
   const openDetail=async(t)=>{setDetailTicket(t);setCopilotOpen(true);try{const c=await api.get('/api/tickets/'+t.id+'/comments');setComments(Array.isArray(c)?c:[]);}catch(e){setComments([]);}};
@@ -5735,7 +5930,7 @@ function WorkspaceSettings({cu,onReload}){
     if(smtpPassword&&!smtpPassword.startsWith('•'))payload.smtp_password=smtpPassword;
     await api.put('/api/workspace',payload);
     setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2000);
-    await onReload();
+    onReload();
   };
 
   const sendTestEmail=async()=>{
@@ -6482,39 +6677,6 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
-
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
@@ -8627,6 +8789,43 @@ function VaultView({cu}){
 
 
 
+
+function workspaceSlugFromUser(u){
+  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
+}
+function workspaceBasePath(u){return '/'+workspaceSlugFromUser(u)+'/';}
+function pathParts(){try{return window.location.pathname.split('/').filter(Boolean);}catch(e){return [];}}
+function routeViewFromPath(validViews){
+  try{
+    const parts=pathParts();
+    if(!parts.length)return '';
+    if(validViews.includes(parts[0]))return parts[0];
+    if(parts.length>=2&&validViews.includes(parts[1]))return parts[1];
+  }catch(e){}
+  return '';
+}
+function projectIdFromPath(){
+  try{
+    const parts=pathParts();
+    if(parts[0]==='projects'&&parts[1])return parts[1];
+    if(parts.length>=3&&parts[1]==='projects')return parts[2];
+  }catch(e){}
+  return '';
+}
+
+function deepLinkFromSearch(){
+  try{
+    const sp=new URLSearchParams(window.location.search);
+    const action=(sp.get('action')||'').toLowerCase();
+    const id=sp.get('id')||sp.get('task_id')||sp.get('ticket_id')||sp.get('project_id')||'';
+    if(action==='task')return {view:'tasks',taskId:id};
+    if(action==='ticket')return {view:'tickets',ticketId:id};
+    if(action==='project')return {view:'projects',projectId:id};
+    if(['dashboard','ops','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action};
+  }catch(e){}
+  return {};
+}
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -8635,42 +8834,41 @@ function App(){
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
+  const [initialProjectId,setInitialProjectId]=useState(()=>deepLinkFromSearch().projectId||null);
+  const [initialTaskId,setInitialTaskId]=useState(()=>deepLinkFromSearch().taskId||null);
+  const [initialTicketId,setInitialTicketId]=useState(()=>deepLinkFromSearch().ticketId||null);
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      if(p.startsWith('/projects/')&&p.length>10){
-        const pid=p.split('/')[2];
-        if(pid)setInitialProjectId(pid);
-        setView('projects');
-      }
+      const dl=deepLinkFromSearch();
+      if(dl.view)setView(dl.view);
+      if(dl.taskId)setInitialTaskId(dl.taskId);
+      if(dl.ticketId)setInitialTicketId(dl.ticketId);
+      if(dl.projectId)setInitialProjectId(dl.projectId);
+      const pid=projectIdFromPath();
+      if(pid){setInitialProjectId(pid);setView('projects');}
     }catch(e){}
   },[]);
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
+      const p=routeViewFromPath(Object.keys(VIEW_T));
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
     }catch(e){}
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      const dl=deepLinkFromSearch();
+      if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
+      const p=routeViewFromPath(VALID_VIEWS);
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
     return 'dashboard';
   });
-  // Production hard-sync: the browser URL is the source of truth on first paint.
-  // This prevents /tasks or /dashboard from staying stuck on the previous Ops view after cache/hydration.
-  useEffect(()=>{
-    try{
-      const p=window.location.pathname.replace(/^\//,'').split('/')[0].trim();
-      if(p&&VALID_VIEWS.includes(p)&&p!==view) setView(p);
-    }catch(e){}
-  },[]);
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
@@ -8684,7 +8882,7 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        history.pushState(null,'',workspaceBasePath(cu)+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -8693,7 +8891,7 @@ function App(){
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+        const p=routeViewFromPath(VALID_VIEWS);
         if(p&&VALID_VIEWS.includes(p)) setView(p);
         else setView('dashboard');
       }catch(e){}
@@ -8702,7 +8900,6 @@ function App(){
     return()=>window.removeEventListener('popstate',onPop);
   },[]);
   const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
-  const [initialProjectId,setInitialProjectId]=useState(null);
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -8749,16 +8946,16 @@ function App(){
           try{
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
-            if(['task_updated','project_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-              // Bust cache and reload — the server has already bust its own cache
-              load(teamCtx);
-            }
+            window.dispatchEvent(new CustomEvent('pt:realtime',{detail:msg}));
+            // pt:realtime listener (below) handles debounced reload — no double-fire here
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
-              api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
-              // Notify the active DM panel to refresh messages immediately
+              // Use /api/poll (served from cache) to refresh both DM unread and notifications at once
+              api.get('/api/poll').then(r=>{
+                if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
+              }).catch(()=>{});
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
             }
             if(msg.type==='presence'){
@@ -8855,9 +9052,11 @@ function App(){
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] Authentication failed or server error, clearing session');
-        setCu(null);
-        setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+        console.warn('[Load] dashboard bootstrap failed; keeping current screen to avoid toast/refresh loops', d && d.error);
+        if(d && (d.status===401 || d.status===403)){
+          setCu(null);
+          setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+        }
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
@@ -8945,7 +9144,7 @@ function App(){
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
   // NOTE: The 30s projects+tasks interval has been removed.
-  // /api/app-data (called by load()) already fetches both on every poll.
+  // /api/dashboard/bootstrap (called by load()) already fetches both on every poll.
   // Additionally, the SSE stream now triggers load() immediately on any
   // task/project mutation — so this extra interval was both redundant and
   // doubling DB load (2 extra queries every 30s per connected user).
@@ -8966,48 +9165,51 @@ function App(){
   },[dark]);
 
   const prevDmsRef=useRef([]);
-  useEffect(()=>{
-    if(!cu)return;
-    api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}});
-    const id=setInterval(()=>{
-      api.get('/api/dm/unread').then(d=>{
-        if(!Array.isArray(d))return;
-        const prev=prevDmsRef.current;
-        d.forEach(x=>{
-          const old=prev.find(p=>p.sender===x.sender);
-          if(!old||(x.cnt||0)>(old.cnt||0)){
-            const sender=data.users.find(u=>u.id===x.sender);
-            const sname=sender?sender.name:'Someone';
-            window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
-            showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
-            playSound('notif');
-          }
-        });
-        prevDmsRef.current=d;
-        setDmUnread(d);
-      });
-    },15000); // fallback only — SSE is primary for environments where SSE is delayed/disconnected
-    return()=>clearInterval(id);
-  },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
-
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
   const NTITLES={
     task_assigned:'✅ Task assigned to you', status_change:'🔄 Task status changed', comment:'💬 New comment on task', deadline:'⏰ Deadline approaching', dm:'📨 New direct message', project_added:'📁 Added to a project', reminder:'⏰ Reminder', call:'📞 Huddle call', message:'#️⃣ New channel message', };
   const NNAV={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
+
+  // Unified poll: dm_unread + notifications in ONE request instead of two.
+  // Saves a full DB connection per polling cycle per user.
   useEffect(()=>{
     if(!cu)return;
 
     const pollOnce=()=>{
-      api.get('/api/notifications').then(d=>{
-        if(!Array.isArray(d))return;
+      api.get('/api/poll').then(result=>{
+        if(!result||result.error)return;
+
+        // ── DM unread ──────────────────────────────────────────────
+        const dms=result.dm_unread;
+        if(Array.isArray(dms)){
+          const prev=prevDmsRef.current;
+          dms.forEach(x=>{
+            const old=prev.find(p=>p.sender===x.sender);
+            if(!old||(x.cnt||0)>(old.cnt||0)){
+              const sender=data.users.find(u=>u.id===x.sender);
+              const sname=sender?sender.name:'Someone';
+              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
+              showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
+              playSound('notif');
+            }
+          });
+          prevDmsRef.current=dms;
+          setDmUnread(dms);
+        }
+
+        // ── Notifications ──────────────────────────────────────────
+        const notifs=result.notifications;
+        if(!Array.isArray(notifs))return;
         if(prevNotifIdsRef.current===null){
-          prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-          setData(prev=>({...prev,notifs:d}));
+          prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+          setData(prev=>({...prev,notifs}));
+          const unread=notifs.filter(n=>!n.read).length;
+          const dmTotal=(result.dm_unread||[]).reduce((a,x)=>a+(x.cnt||0),0);
+          updateBadge(unread+dmTotal);
           return;
         }
-        const brandNew=d.filter(n=>!prevNotifIdsRef.current.has(n.id));
+        const brandNew=notifs.filter(n=>!prevNotifIdsRef.current.has(n.id));
         brandNew.forEach(n=>{
-          if(n.type==='dm')return; // DMs handled by separate poll
           if(n.type==='call') return;
           const title=NTITLES[n.type]||'Project Tracker';
           const nav=NNAV[n.type]||'notifs';
@@ -9021,52 +9223,33 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='task'){
               _setView('tasks');
-              setTimeout(()=>{
-                const taskEl=document.querySelector(`[data-task-id="${n.entity_id}"]`);
-                if(taskEl)taskEl.click();
-              },100);
+              setTimeout(()=>{const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
-            else if(n.entity_id && n.entity_type==='project'){
-              setActiveProject(n.entity_id);
-              _setView('projects');
-            }
+            else if(n.entity_id && n.entity_type==='project'){setActiveProject(n.entity_id);_setView('projects');}
             else if(n.entity_id && n.entity_type==='ticket'){
               _setView('tickets');
-              setTimeout(()=>{
-                const ticketEl=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);
-                if(ticketEl)ticketEl.click();
-              },100);
+              setTimeout(()=>{const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
-            else if(n.entity_type==='message' && n.entity_id){
-              setActiveProject(n.entity_id);
-              _setView('messages');
-            }
+            else if(n.entity_type==='message' && n.entity_id){setActiveProject(n.entity_id);_setView('messages');}
             else{_setView(nav);}
           },{tag:'notif-'+n.id});
           playSound('notif');
         });
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        const dmTotal=dmUnread.reduce((a,x)=>a+(x.cnt||0),0);
+        prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+        setData(prev=>({...prev,notifs}));
+        const unread=notifs.filter(n=>!n.read).length;
+        const dmTotal=(Array.isArray(dms)?dms:dmUnread).reduce((a,x)=>a+(x.cnt||0),0);
         updateBadge(unread+dmTotal);
       });
     };
 
-    api.get('/api/notifications').then(d=>{
-      if(Array.isArray(d)){
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        updateBadge(unread+dmUnread.reduce((a,x)=>a+(x.cnt||0),0));
-      }
-    });
-
+    // Startup jitter: 5–13 s delay so poll doesn't collide with bootstrap on mount
+    const startDelay=5000+Math.random()*8000;
+    const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-
-    const id=setInterval(pollOnce, 20000); // fallback only — SSE is primary
-    return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
-  },[cu,addToast]);
+    const id=setInterval(pollOnce,20000); // fallback only — SSE is primary
+    return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
+  },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 
   const onDmRead=useCallback(sid=>{
     setDmUnread(prev=>prev.filter(x=>x.sender!==sid));
@@ -9123,16 +9306,20 @@ function App(){
 
   useEffect(()=>{
     if(!cu)return;
-    const onRefresh=()=>load(undefined,{bust:true});
+    // Server already clears its cache on write — no client-side bust needed for SSE reloads
+    const onRefresh=()=>load(undefined,false);
+    let _realtimeDebounceTimer=null;
     const onRealtime=(e)=>{
       const msg=e.detail||{};
       if(['project_updated','task_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-        onRefresh();
+        // Debounce: batch rapid SSE events (e.g. bulk task updates) into one reload
+        clearTimeout(_realtimeDebounceTimer);
+        _realtimeDebounceTimer=setTimeout(()=>onRefresh(),800);
       }
     };
     window.addEventListener('pt:refresh', onRefresh);
     window.addEventListener('pt:realtime', onRealtime);
-    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+    return()=>{clearTimeout(_realtimeDebounceTimer);window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
   },[cu,load]);
 
   useEffect(()=>{
@@ -9180,9 +9367,11 @@ function App(){
         setUpcomingReminders(rems.filter(r=>!r.fired&&new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));
       }
     };
-    checkDue();
+    // Startup jitter: delay 10–20 s so reminders/due doesn't fire at t=0 with bootstrap
+    const remStartDelay=10000+Math.random()*10000;
+    const remStartTimer=setTimeout(()=>checkDue(),remStartDelay);
     const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
-    return()=>clearInterval(id);
+    return()=>{clearTimeout(remStartTimer);clearInterval(id);};
   },[cu,addToast]);
 
   const isDevRole=cu&&cu.role!=='Admin'&&cu.role!=='Manager';
@@ -9291,6 +9480,14 @@ function App(){
                 if(senderId)setDmTargetUser(senderId);
               }
             }
+            // Deep-link: route directly to the specific task or project
+            if(n.entity_id&&n.entity_type==='task'){
+              setInitialTaskId(n.entity_id);
+            } else if(n.entity_id&&n.entity_type==='project'){
+              setInitialProjectId(n.entity_id);
+            } else if(n.entity_id&&n.entity_type==='ticket'){
+              setInitialTaskId(null); // tickets view opens normally
+            }
             setView(dest);
           }}
           onMarkAllRead=${async()=>{setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));await api.put('/api/notifications/read-all',{});load();}}
@@ -9315,12 +9512,16 @@ function App(){
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
+              initialTaskId=${initialTaskId}
+              onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
-            ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
+            <div style=${{display:baseView==='dm'?'flex':'none',flex:1,overflow:'hidden',flexDirection:'column',height:'100%'}}>
+              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>
+            </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${setView}/>`:null}
-            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
+            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
@@ -9471,3 +9672,4 @@ if(window._vwHideBoot)window._vwHideBoot();
 };
 waitForLibs(window._pfStartApp);
 })();
+
