@@ -4130,6 +4130,9 @@ function MessagesView({projects,users,cu,tasks}){
   const msgCacheRef=useRef(new Map());
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
+  const channelCacheKey=(id)=>'pt_channel_msgs_'+id;
+  const readChannelCache=(id)=>{try{const v=JSON.parse(localStorage.getItem(channelCacheKey(id))||'[]');return Array.isArray(v)?v:[];}catch{return [];}};
+  const writeChannelCache=(id,list)=>{try{localStorage.setItem(channelCacheKey(id),JSON.stringify((Array.isArray(list)?list:[]).slice(-250)));}catch{}};
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
   const fileInputRef=useRef(null);
@@ -4145,11 +4148,15 @@ function MessagesView({projects,users,cu,tasks}){
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
     const seq=++msgReqSeq.current;
-    const cached=msgCacheRef.current.get(id);
-    if(cached){
+    const cached=msgCacheRef.current.get(id)||readChannelCache(id);
+    if(cached&&cached.length){
+      msgCacheRef.current.set(id,cached);
       setMsgs(cached);
       setLoadingChannel('');
     }else if(mode==='switch'){
+      // First ever open has no browser cache yet. Do not show the old
+      // "Opening channel" screen or the empty-state flash; keep the pane quiet
+      // until the network response arrives.
       setMsgs([]);
       setLoadingChannel(id);
     }
@@ -4157,6 +4164,7 @@ function MessagesView({projects,users,cu,tasks}){
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
+      writeChannelCache(id,d);
       setMsgs(d);
       setLoadingChannel('');
       // Mark channel as read — store the latest message ts
@@ -4173,10 +4181,27 @@ function MessagesView({projects,users,cu,tasks}){
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
-    const cached=msgCacheRef.current.get(pid);
-    if(cached){setMsgs(cached);setLoadingChannel('');}
+    const cached=msgCacheRef.current.get(pid)||readChannelCache(pid);
+    if(cached&&cached.length){msgCacheRef.current.set(pid,cached);setMsgs(cached);setLoadingChannel('');}
     loadMsgs(pid,'switch');
   },[pid,loadMsgs]);
+
+  // Warm channel caches after the channel list loads. This makes a later click
+  // render from memory/localStorage instead of waiting for /api/messages.
+  useEffect(()=>{
+    safe(allProjects).forEach(p=>{
+      if(!p||!p.id||msgCacheRef.current.has(p.id))return;
+      const cached=readChannelCache(p.id);
+      if(cached&&cached.length)msgCacheRef.current.set(p.id,cached);
+      api.get('/api/messages?project='+encodeURIComponent(p.id),{quiet:true}).then(d=>{
+        if(Array.isArray(d)){
+          msgCacheRef.current.set(p.id,d);
+          writeChannelCache(p.id,d);
+          if(p.id===pidRef.current){setMsgs(d);setLoadingChannel('');}
+        }
+      }).catch(()=>{});
+    });
+  },[allProjects.length]);
 
   useEffect(()=>{
     if(!pid)return;
@@ -4189,6 +4214,8 @@ function MessagesView({projects,users,cu,tasks}){
               if(d.length>0){
                 const latest=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
                 setLastMsgTs(prev2=>({...prev2,[pid]:latest}));
+                msgCacheRef.current.set(pid,d);
+                writeChannelCache(pid,d);
                 lastSeenMsgRef.current[pid]=latest;
                 saveLastSeen(lastSeenMsgRef.current);
                 setChannelUnread(prev3=>({...prev3,[pid]:0}));
@@ -4218,10 +4245,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
     const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
-    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);writeChannelCache(pid,next);return next;});
     const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);writeChannelCache(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4442,10 +4469,6 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
-          <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
-          <p>Opening channel…</p>
-        </div>`:null}
         ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
@@ -4530,6 +4553,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
+  const dmCacheKey=(id)=>'pt_dm_thread_'+(cu&&cu.id?cu.id:'me')+'_'+id;
+  const readDmCache=(id)=>{try{const v=JSON.parse(localStorage.getItem(dmCacheKey(id))||'[]');return Array.isArray(v)?v:[];}catch{return [];}};
+  const writeDmCache=(id,list)=>{try{localStorage.setItem(dmCacheKey(id),JSON.stringify((Array.isArray(list)?list:[]).slice(-250)));}catch{}};
   const pendingReactionUntil=useRef(new Map());
   // Pre-warm every DM thread immediately. The backend has a short-lived DM cache,
   // so this is cheap after the first call and removes the first-click loading screen.
@@ -4538,9 +4564,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       .filter((v,i,a)=>v&&a.indexOf(v)===i);
     ids.forEach(uid=>{
       if(threadCache.current.has(uid))return;
+      const cached=readDmCache(uid);
+      if(cached&&cached.length){
+        threadCache.current.set(uid,cached);
+        if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(cached);setLoadingThread('');}
+      }
       api.get('/api/dm/'+encodeURIComponent(uid),{quiet:true}).then(d=>{
         if(Array.isArray(d)){
           threadCache.current.set(uid,d);
+          writeDmCache(uid,d);
           if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(d);setLoadingThread('');}
         }
       }).catch(()=>{});
@@ -4587,15 +4619,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
-    const cached=threadCache.current.get(id);
-    if(cached){
+    const cached=threadCache.current.get(id)||readDmCache(id);
+    if(cached&&cached.length){
+      threadCache.current.set(id,cached);
       setMsgThreadId(id);
       setMsgs(cached);
       setLoadingThread(''); // cache hit — no spinner, background refresh will update silently
     }else{
       setMsgThreadId(id);
       setMsgs([]);
-      setLoadingThread(''); // no blocking spinner; show empty shell while fetch fills in
+      setLoadingThread(id); // hide empty-state flash while fetch fills in
     }
     setToId(id);
   },[]);
@@ -4609,10 +4642,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread('');
+    if(!threadCache.current.has(id)&&!(readDmCache(id)||[]).length)setLoadingThread(id);
     console.debug('[DM] load start', {id,reason,seq});
     // Use ?since= when we have cached messages — only fetch new ones instead of full 200-msg reload
-    const existing=threadCache.current.get(id)||[];
+    const existing=threadCache.current.get(id)||readDmCache(id)||[];
     const lastMsg=existing.length?existing[existing.length-1]:null;
     const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
     const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
@@ -4634,6 +4667,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         merged=mergePendingReactionState(id,d);
       }
       threadCache.current.set(id,merged);
+      writeDmCache(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
@@ -4648,8 +4682,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[onDmRead,mergePendingReactionState]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
-    const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);}
+    const cached=threadCache.current.get(toId)||readDmCache(toId);
+    if(cached&&cached.length){threadCache.current.set(toId,cached);setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
@@ -4668,6 +4702,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           : mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
+        writeDmCache(requestedTo,merged);
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -4699,7 +4734,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(editingId){
       const editId=editingId;
       setTxt('');setEditingId('');setSending(true);
-      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);writeDmCache(recipient,next);return next;});
       try{const r=await api.post('/api/dm/edit',{message_id:editId,content:c});if(r&&r.message)applyDmPatch(r.message,recipient);}
       catch(e){console.warn('[DM] edit failed',e);loadMsgs(recipient,'edit-rollback');}
       finally{setSending(false);}return;
@@ -4743,7 +4778,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!updated||!updated.id)return;
     const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
     const patchList=list=>list.map(x=>x.id===updated.id?{...x,...updated}:x);
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const next=patchList(threadCache.current.get(peer)||readDmCache(peer)||[]);threadCache.current.set(peer,next);writeDmCache(peer,next);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   },[cu.id]);
   const deleteMessage=async(m)=>{
@@ -4820,9 +4855,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const tempId='tmpdm'+Date.now();
         const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
         setReplyTo(null);setMsgThreadId(recipient);
-        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);return next;});
+        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);writeDmCache(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
-        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
+        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);writeDmCache(recipient,next);return next;});}
       }
     }catch(e){console.warn('[DM] attachment upload failed',e);}
     finally{setAttaching(false);}
@@ -4849,7 +4884,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(until&&until>Date.now())return {...m,...updated,reactions:m.reactions||updated.reactions||[],_reactionSyncing:false};
       return {...m,...updated,reactions:updated.reactions||[]};
     });
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const next=patchList(threadCache.current.get(peer)||readDmCache(peer)||[]);threadCache.current.set(peer,next);writeDmCache(peer,next);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
     if(until)setTimeout(()=>pendingReactionUntil.current.delete(updated.id),1800);
   },[cu.id]);
@@ -4874,7 +4909,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const updated=next.find(m=>m.id===messageId);
       if(updated){
         const peer=updated.sender===cu.id?updated.recipient:updated.sender;
-        threadCache.current.set(peer,updateList(threadCache.current.get(peer)||prev));
+        threadCache.current.set(peer,updateList(threadCache.current.get(peer)||readDmCache(peer)||prev));writeDmCache(peer,threadCache.current.get(peer));
       }
       return next;
     });
@@ -4925,7 +4960,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
