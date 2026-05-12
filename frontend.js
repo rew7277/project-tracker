@@ -4182,10 +4182,25 @@ function MessagesView({projects,users,cu,tasks}){
     return()=>{cancelled=true;};
   },[allProjects.length]);
 
+  useEffect(()=>{
+    if(!incomingCall){ stopRingtone(); return; }
+    startRingtone();
+    callTimeoutRef.current=setTimeout(()=>{
+      const call=incomingCall;
+      if(!call)return;
+      dismissedCallIds.current.add(call.callId);
+      setIncomingCall(null);
+      stopRingtone();
+      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
+    },45000);
+    return()=>stopRingtone();
+  },[incomingCall,startRingtone,stopRingtone]);
+
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
     if(!call)return;
     dismissedCallIds.current.add(call.callId);
+    stopRingtone();
     setIncomingCall(null);
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
@@ -4441,6 +4456,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [startingMeet,setStartingMeet]=useState(false);
   const [incomingCall,setIncomingCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
+  const ringtoneRef=useRef(null);
+  const ringtoneCtxRef=useRef(null);
+  const callTimeoutRef=useRef(null);
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
   const [activeCallUsers,setActiveCallUsers]=useState(new Set());
@@ -4465,6 +4483,34 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'https://meet.google.com/new').trim();
     return {callId:id,from,meetUrl,peerId:m.sender,messageId:m.id};
   };
+  const stopRingtone=useCallback(()=>{
+    try{ if(ringtoneRef.current){ if(ringtoneRef.current._id)clearInterval(ringtoneRef.current._id); ringtoneRef.current.pause(); ringtoneRef.current.currentTime=0; } }catch{}
+    try{ if(ringtoneCtxRef.current){ ringtoneCtxRef.current.close(); } }catch{}
+    ringtoneRef.current=null; ringtoneCtxRef.current=null;
+    if(callTimeoutRef.current){ clearTimeout(callTimeoutRef.current); callTimeoutRef.current=null; }
+  },[]);
+  const startRingtone=useCallback(()=>{
+    stopRingtone();
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      if(Ctx){
+        const ctx=new Ctx(); const gain=ctx.createGain(); gain.gain.value=0.045; gain.connect(ctx.destination);
+        const tick=()=>{
+          if(!ringtoneCtxRef.current)return;
+          const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain);
+          osc.start(); osc.stop(ctx.currentTime+0.18);
+          setTimeout(()=>{try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
+        };
+        ringtoneCtxRef.current=ctx; tick(); ringtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1200)};
+        const oldStop=stopRingtone;
+        return;
+      }
+    }catch{}
+    try{
+      const audio=new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+      audio.loop=true; audio.play().catch(()=>{}); ringtoneRef.current=audio;
+    }catch{}
+  },[stopRingtone]);
 
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
@@ -4578,6 +4624,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
+      if(msg&&msg.type==='call_status'&&data){
+        const ids=new Set(data.users||[]);
+        if(data.status==='in_call') setActiveCallUsers(ids);
+        if(['rejected','ended','missed'].includes(data.status)){
+          setActiveCallUsers(new Set());
+          if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
+        }
+        if(data.status==='ringing'&&data.recipient===cu.id&&!dismissedCallIds.current.has(data.callId)){
+          const sender=(users||[]).find(u=>u.id===data.sender)||{};
+          setIncomingCall({callId:data.callId,from:sender.name||'Someone',meetUrl:data.meetUrl||'https://meet.google.com/new',peerId:data.sender});
+        }
+        return;
+      }
       if(msg&&msg.type==='dm_created'&&data){
         const m=data.message||data;
         const inc=parseIncomingCall(m);
@@ -4594,7 +4653,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
-  },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
+  },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone]);
   // Prefetch DM threads as soon as the DM screen opens, so clicking a member
   // uses memory cache instead of showing the empty/start placeholder while the API responds.
   const dmPrefetchedRef=useRef(false);
@@ -8827,9 +8886,9 @@ function App(){
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
-            if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
+            if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'||msg.type==='call_status'){
               api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
-              // Notify the active DM panel to refresh messages immediately
+              // Notify the active DM panel to refresh messages/call state immediately.
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
             }
             if(msg.type==='presence'){

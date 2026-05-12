@@ -5679,7 +5679,7 @@ def respond_instant_call():
     action = (d.get("action") or "").strip().lower()
     peer_id = (d.get("peerId") or d.get("targetId") or "").strip()
     meet_url = (d.get("meetUrl") or "https://meet.google.com/new").strip() or "https://meet.google.com/new"
-    if action not in ("accept", "reject", "end"):
+    if action not in ("accept", "reject", "end", "missed"):
         return jsonify({"ok": False, "error": "Invalid call action"}), 400
     ws_id = wid(); me = session["user_id"]; now = ts()
     with get_db() as db:
@@ -5690,7 +5690,7 @@ def respond_instant_call():
             if msg:
                 peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
         if peer_id:
-            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else f"📴 {me_name} ended the call")
+            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else (f"📴 Missed call from {me_name}" if action == "missed" else f"📴 {me_name} ended the call"))
             mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
             db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -5698,7 +5698,7 @@ def respond_instant_call():
             row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
         else:
             row = None
-    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else "ended")
+    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
     users = [x for x in [me, peer_id] if x]
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     if peer_id: _bust_dm_thread(ws_id, me, peer_id)
