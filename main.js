@@ -2248,27 +2248,30 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     }catch(_){}
     onReload();
   };
-  const saveTask=async p=>{
-    let r;
+  const saveTask=p=>{
+    // Fully optimistic + fire-and-forget. The modal closes instantly; the server
+    // confirmation patches the temporary task in the background. This removes the
+    // visible ~2s wait caused by task notifications/email work on the backend.
     if(p.id&&allTasks.find(t=>t.id===p.id)){
-      // UPDATE: optimistic patch
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-      r=await api.put('/api/tasks/'+p.id,p);
-    } else {
-      // CREATE: post then show immediately
-      // Pre-optimistic: show task immediately before API responds
-      const tempId2='tmp_'+Date.now();
-      const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
-      setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
-      r=await api.post('/api/tasks',{...p,project:project.id});
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p,_pending:true}:t)}));
+      api.put('/api/tasks/'+p.id,p).then(r=>{
+        if(r&&!r.error)setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...r,_localTs:Date.now()}:t)}));
+      }).catch(()=>{onReload&&onReload();});
+      return {...p,_pending:true};
+    }
+    const tempId2='tmp_'+Date.now();
+    const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
+    setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
+    api.post('/api/tasks',{...p,project:project.id},{quiet:true}).then(r=>{
       if(r&&r.id){
         setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...r,_localTs:Date.now()}:t)}));
-      } else {
+      }else{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
       }
-    }
-    // SSE (task_updated) already triggers load() on all clients — no delay needed
-    return r;
+    }).catch(()=>{
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...t,_pending:false,_failed:true}:t)}));
+    });
+    return tempT2;
   };
   const delTask=async id=>{
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
@@ -4124,6 +4127,9 @@ function MessagesView({projects,users,cu,tasks}){
   const pidRef=useRef('');
   useEffect(()=>{pidRef.current=pid;},[pid]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
+  const msgCacheRef=useRef(new Map());
+  const msgReqSeq=useRef(0);
+  const [loadingChannel,setLoadingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
   const fileInputRef=useRef(null);
@@ -4136,11 +4142,23 @@ function MessagesView({projects,users,cu,tasks}){
   const [chanSearch,setChanSearch]=useState('');
   const [newestFirst,setNewestFirst]=useState(false);
 
-  const loadMsgs=useCallback(async(id)=>{
+  const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
-    const d=await api.get('/api/messages?project='+id);
+    const seq=++msgReqSeq.current;
+    const cached=msgCacheRef.current.get(id);
+    if(cached){
+      setMsgs(cached);
+      setLoadingChannel('');
+    }else if(mode==='switch'){
+      setMsgs([]);
+      setLoadingChannel(id);
+    }
+    const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
+    if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
+      msgCacheRef.current.set(id,d);
       setMsgs(d);
+      setLoadingChannel('');
       // Mark channel as read — store the latest message ts
       if(d.length>0){
         const latestTs=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
@@ -4148,10 +4166,17 @@ function MessagesView({projects,users,cu,tasks}){
         saveLastSeen(lastSeenMsgRef.current);
       }
       setChannelUnread(prev=>({...prev,[id]:0}));
+    }else{
+      setLoadingChannel('');
     }
   },[]);
 
-  useEffect(()=>{loadMsgs(pid);},[pid]);
+  useEffect(()=>{
+    if(!pid){setMsgs([]);setLoadingChannel('');return;}
+    const cached=msgCacheRef.current.get(pid);
+    if(cached){setMsgs(cached);setLoadingChannel('');}
+    loadMsgs(pid,'switch');
+  },[pid,loadMsgs]);
 
   useEffect(()=>{
     if(!pid)return;
@@ -4192,9 +4217,11 @@ function MessagesView({projects,users,cu,tasks}){
     const body=(textOverride!==undefined?textOverride:txt).trim();
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
-    const m=await api.post('/api/messages',{project:pid,content:body});
+    const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
+    const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>[...prev,m]);
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4415,7 +4442,11 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+          <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
+          <p>Opening channel…</p>
+        </div>`:null}
+        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4500,26 +4531,21 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
   const pendingReactionUntil=useRef(new Map());
-  // Pre-warm DM thread cache for the most recently active contacts so switching
-  // conversations shows messages instantly instead of the ⏳ spinner.
+  // Pre-warm every DM thread immediately. The backend has a short-lived DM cache,
+  // so this is cheap after the first call and removes the first-click loading screen.
   useEffect(()=>{
-    const topIds=[
-      // Prioritize contacts with unread messages first, then remaining users
-      ...safe(dmUnread).map(x=>x.sender),
-      ...safe(others).map(u=>u.id)
-    ].filter((v,i,a)=>a.indexOf(v)===i).slice(0,5); // dedupe, limit to 5
-    topIds.forEach((uid,i)=>{
-      if(threadCache.current.has(uid))return; // already cached
-      // Stagger prefetches so we don't hammer the server simultaneously
-      setTimeout(()=>{
-        if(threadCache.current.has(uid))return;
-        api.get('/api/dm/'+uid,{quiet:true}).then(d=>{
-          if(Array.isArray(d))threadCache.current.set(uid,d);
-        }).catch(()=>{});
-      }, i*400); // 0ms, 400ms, 800ms, 1200ms, 1600ms
+    const ids=[...safe(dmUnread).map(x=>x.sender),...safe(others).map(u=>u.id)]
+      .filter((v,i,a)=>v&&a.indexOf(v)===i);
+    ids.forEach(uid=>{
+      if(threadCache.current.has(uid))return;
+      api.get('/api/dm/'+encodeURIComponent(uid),{quiet:true}).then(d=>{
+        if(Array.isArray(d)){
+          threadCache.current.set(uid,d);
+          if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(d);setLoadingThread('');}
+        }
+      }).catch(()=>{});
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[]);
+  },[others.length,dmUnread.length]);
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
@@ -4567,9 +4593,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setMsgs(cached);
       setLoadingThread(''); // cache hit — no spinner, background refresh will update silently
     }else{
-      setMsgThreadId('');
+      setMsgThreadId(id);
       setMsgs([]);
-      setLoadingThread(id); // no cache — show spinner
+      setLoadingThread(''); // no blocking spinner; show empty shell while fetch fills in
     }
     setToId(id);
   },[]);
@@ -4583,7 +4609,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread(id);
+    if(!threadCache.current.has(id))setLoadingThread('');
     console.debug('[DM] load start', {id,reason,seq});
     // Use ?since= when we have cached messages — only fetch new ones instead of full 200-msg reload
     const existing=threadCache.current.get(id)||[];
@@ -4899,7 +4925,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⏳</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Loading conversation…</div></div>`:null}
+                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
                 ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
