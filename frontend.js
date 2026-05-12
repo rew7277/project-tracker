@@ -4453,17 +4453,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const parseIncomingCall=(m)=>{
     if(!m||!m.content)return null;
     const raw=String(m.content||'');
-    const id=((raw.match(/CALL_INVITE:([^
-]+)/)||[])[1]||'').trim();
+    const id=((raw.match(/CALL_INVITE:([^\n]+)/)||[])[1]||'').trim();
     if(!id || dismissedCallIds.current.has(id))return null;
-    const status=((raw.match(/CALL_STATUS:([^
-]+)/)||[])[1]||'ringing').trim().toLowerCase();
+    const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
     if(status && status!=='ringing')return null;
     if(m.recipient && m.recipient!==cu.id)return null;
-    const from=((raw.match(/CALL_FROM:([^
-]+)/)||[])[1]||((users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
-    const meetUrl=((raw.match(/MEET_LINK:([^
-]+)/)||[])[1]||'https://meet.google.com/new').trim();
+    const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
+    const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'https://meet.google.com/new').trim();
     return {callId:id,from,meetUrl,peerId:m.sender,messageId:m.id};
   };
 
