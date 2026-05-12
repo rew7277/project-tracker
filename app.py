@@ -781,26 +781,31 @@ def _bust_dm_thread(ws, uid1, uid2):
             pass
 
 
+def _cache_inject_item(workspace_id, table, item_dict):
+    """After a create, inject the new item into existing app-data/list caches.
 
-    """After a create, inject the new item into existing cache entries
-    so the next poll (background refresh) returns instantly from cache
-    rather than hitting the DB cold. Non-critical — failures are silent."""
+    This must be a real top-level function. A previous patch accidentally left
+    this body indented under _bust_dm_thread, so create_task crashed with
+    NameError: _cache_inject_item is not defined.
+    """
     try:
+        item_dict = dict(item_dict or {})
+        item_id = item_dict.get("id")
         with _CACHE_LOCK:
             for key, entry in list(_CACHE.items()):
-                if workspace_id not in key:
+                if str(workspace_id) not in key:
                     continue
-                val = entry.get("val", {})
-                if table not in val:
-                    continue
-                if not isinstance(val[table], list):
-                    continue
-                # Only inject if not already present
-                ids = {x.get("id") for x in val[table]}
-                if item_dict.get("id") not in ids:
-                    val[table] = [item_dict] + val[table]
-    except Exception:
-        pass
+                val = entry.get("val")
+                if isinstance(val, dict) and table in val and isinstance(val[table], list):
+                    ids = {x.get("id") for x in val[table] if isinstance(x, dict)}
+                    if item_id not in ids:
+                        val[table] = [item_dict] + val[table]
+                elif key.startswith(f"{table}:{workspace_id}") and isinstance(val, list):
+                    ids = {x.get("id") for x in val if isinstance(x, dict)}
+                    if item_id not in ids:
+                        entry["val"] = [item_dict] + val
+    except Exception as e:
+        log.warning("[cache_inject_item] skipped: %s", e)
 
 # Shared DDL connection — reused across all _run_ddl calls to avoid opening
 # 170 separate connections on startup (which caused NO_SOCKET exhaustion).
@@ -4934,11 +4939,11 @@ def get_tasks():
         return jsonify(result)
 
 def next_task_id(db, ws):
-    import time
-    base = int(time.time() * 1000)
-    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
-    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
-    return f"T-{base % 1000000:06d}"
+    import time, secrets
+    # Avoid COUNT(*) and avoid the old last-6-ms collision bug.
+    # Old IDs repeated every ~16.6 minutes; this caused intermittent 500s
+    # from duplicate primary keys on task creation.
+    return f"T-{int(time.time() * 1000)}{secrets.token_hex(2)}"
 
 @app.route("/api/tasks",methods=["POST"])
 @login_required

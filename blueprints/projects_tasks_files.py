@@ -438,11 +438,11 @@ def get_tasks():
         return jsonify(result)
 
 def next_task_id(db, ws):
-    import time
-    base = int(time.time() * 1000)
-    # Use timestamp-only ID — avoids a slow COUNT(*) query on every task creation.
-    # Format: T-<last6digits_of_ms_timestamp> — unique within a workspace.
-    return f"T-{base % 1000000:06d}"
+    import time, secrets
+    # Avoid COUNT(*) and avoid the old last-6-ms collision bug.
+    # Old IDs repeated every ~16.6 minutes; this caused intermittent 500s
+    # from duplicate primary keys on task creation.
+    return f"T-{int(time.time() * 1000)}{secrets.token_hex(2)}"
 
 @bp.route("/api/tasks",methods=["POST"])
 @login_required

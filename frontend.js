@@ -114,6 +114,11 @@ const api={
   upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
 };
 
+// Tiny persistent chat cache: makes DM/channel content appear immediately after refresh.
+// Network calls still refresh in the background; this only avoids blank/placeholder flashes.
+const chatCacheGet=(key)=>{try{const raw=localStorage.getItem(key);if(!raw)return null;const o=JSON.parse(raw);if(!o||!Array.isArray(o.data))return null;return o.data;}catch{return null;}};
+const chatCacheSet=(key,data)=>{try{if(Array.isArray(data))localStorage.setItem(key,JSON.stringify({ts:Date.now(),data:data.slice(-250)}));}catch{}};
+
 const STAGES={
   backlog:    {label:'Backlog', color:'#94a3b8',bg:'rgba(148,163,184,.13)'}, planning:   {label:'Planning', color:'var(--cy)',bg:'rgba(96,165,250,.13)'}, development:{label:'Dev', color:'#9b8ef4',bg:'rgba(167,139,250,.13)'}, code_review:{label:'Review', color:'#22d3ee',bg:'rgba(34,211,238,.13)'}, testing:    {label:'Testing', color:'var(--pu)',bg:'rgba(251,191,36,.13)'}, uat:        {label:'UAT', color:'#f472b6',bg:'rgba(244,114,182,.13)'}, release:    {label:'Release', color:'#fb923c',bg:'rgba(251,146,60,.13)'}, production: {label:'Production',color:'#34d399',bg:'rgba(52,211,153,.13)'}, completed:  {label:'Completed', color:'#4ade80',bg:'rgba(74,222,128,.13)'}, blocked:    {label:'Blocked', color:'var(--rd2)',bg:'rgba(248,113,113,.13)'},
 };
@@ -3956,6 +3961,7 @@ function MessagesView({projects,users,cu,tasks}){
   const msgCacheRef=useRef(new Map());
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
+  const [refreshingChannel,setRefreshingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
   const fileInputRef=useRef(null);
@@ -3971,20 +3977,28 @@ function MessagesView({projects,users,cu,tasks}){
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
     const seq=++msgReqSeq.current;
-    const cached=msgCacheRef.current.get(id);
+    let cached=msgCacheRef.current.get(id);
+    if(!cached){
+      cached=chatCacheGet('pt:channel:'+id);
+      if(cached) msgCacheRef.current.set(id,cached);
+    }
     if(cached){
       setMsgs(cached);
       setLoadingChannel('');
+      setRefreshingChannel(id);
     }else if(mode==='switch'){
       setMsgs([]);
       setLoadingChannel(id);
+      setRefreshingChannel(id);
     }
     const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
+      chatCacheSet('pt:channel:'+id,d);
       setMsgs(d);
       setLoadingChannel('');
+      setRefreshingChannel('');
       if(d.length>0){
         const latestTs=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
         lastSeenMsgRef.current[id]=latestTs;
@@ -3993,14 +4007,16 @@ function MessagesView({projects,users,cu,tasks}){
       setChannelUnread(prev=>({...prev,[id]:0}));
     }else{
       setLoadingChannel('');
+      setRefreshingChannel('');
     }
   },[]);
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
-    const cached=msgCacheRef.current.get(pid);
-    if(cached){setMsgs(cached);setLoadingChannel('');}
-    else {setMsgs([]);setLoadingChannel(pid);}
+    let cached=msgCacheRef.current.get(pid);
+    if(!cached){cached=chatCacheGet('pt:channel:'+pid); if(cached)msgCacheRef.current.set(pid,cached);}
+    if(cached){setMsgs(cached);setLoadingChannel('');setRefreshingChannel(pid);}
+    else {setMsgs([]);setLoadingChannel(pid);setRefreshingChannel(pid);}
     loadMsgs(pid,'switch');
   },[pid,loadMsgs]);
 
@@ -4010,7 +4026,9 @@ function MessagesView({projects,users,cu,tasks}){
       api.get('/api/messages?project='+pid).then(d=>{
         if(Array.isArray(d)){
           msgCacheRef.current.set(pid,d);
+          chatCacheSet('pt:channel:'+pid,d);
           setLoadingChannel('');
+          setRefreshingChannel('');
           setMsgs(prev=>{
             if(d.length>prev.length){
               playSound('notif');
@@ -4129,7 +4147,8 @@ function MessagesView({projects,users,cu,tasks}){
       if(cancelled)return;
       if(Array.isArray(d)){
         msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
+        chatCacheSet('pt:channel:'+id,d);
+        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');setRefreshingChannel('');}
       }
     };
     (async()=>{
@@ -4297,11 +4316,11 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${(loadingChannel===pid || (refreshingChannel===pid && msgs.length===0))?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
           <p>Opening channel…</p>
         </div>`:null}
-        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${loadingChannel!==pid&&refreshingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4365,6 +4384,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
+  const [refreshingThread,setRefreshingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
   const [attaching,setAttaching]=useState(false);
@@ -4427,15 +4447,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
-    const cached=threadCache.current.get(id);
+    let cached=threadCache.current.get(id);
+    if(!cached){cached=chatCacheGet('pt:dm:'+id); if(cached)threadCache.current.set(id,cached);}
     if(cached){
       setMsgThreadId(id);
       setMsgs(cached);
       setLoadingThread('');
+      setRefreshingThread(id);
     }else{
       setMsgThreadId('');
       setMsgs([]);
       setLoadingThread(id);
+      setRefreshingThread(id);
     }
     setToId(id);
   },[]);
@@ -4450,6 +4473,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const seq=++reqSeq.current;
     activeToRef.current=id;
     if(!threadCache.current.has(id))setLoadingThread(id);
+    setRefreshingThread(id);
     console.debug('[DM] load start', {id,reason,seq});
     const d=await api.get('/api/dm/'+id,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
@@ -4459,23 +4483,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(Array.isArray(d)){
       const merged=mergePendingReactionState(id,d);
       threadCache.current.set(id,merged);
+      chatCacheSet('pt:dm:'+id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
+      setRefreshingThread('');
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:d.length,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
       setLoadingThread('');
+      setRefreshingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
   },[onDmRead,mergePendingReactionState]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
-    const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
-    else setLoadingThread(toId);
+    let cached=threadCache.current.get(toId);
+    if(!cached){cached=chatCacheGet('pt:dm:'+toId); if(cached)threadCache.current.set(toId,cached);}
+    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');setRefreshingThread(toId);}
+    else {setLoadingThread(toId);setRefreshingThread(toId);}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
@@ -4485,7 +4513,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const merged=mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
+        chatCacheSet('pt:dm:'+requestedTo,merged);
         setLoadingThread('');
+        setRefreshingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
           return merged;
@@ -4523,6 +4553,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(Array.isArray(d)){
         const merged=mergePendingReactionState(id,d);
         threadCache.current.set(id,merged);
+        chatCacheSet('pt:dm:'+id,merged);
         if(!activeToRef.current && id===ids[0]){
           activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
         }else if(id===activeToRef.current){
@@ -4742,33 +4773,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
-
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
@@ -4801,8 +4805,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
-                ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+                ${(isThreadLoading || (refreshingThread===toId && visibleMsgs.length===0))?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
+                ${!(isThreadLoading || refreshingThread===toId)&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
