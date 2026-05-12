@@ -5203,7 +5203,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(others[0]&&others[0].id||'');
+  const [toId,setToId]=useState(initialUserId||'');
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
@@ -5225,6 +5225,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [startingMeet,setStartingMeet]=useState(false);
   const [incomingCall,setIncomingCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
+  const ringtoneRef=useRef(null);
+  const ringtoneCtxRef=useRef(null);
+  const callTimeoutRef=useRef(null);
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
   const [activeCallUsers,setActiveCallUsers]=useState(new Set());
@@ -5232,7 +5235,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
-  const threadCache=useRef(new Map());
+  const _dmCacheKey='pfDmThreadCache:v2';
+  const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
+  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
+  const threadCache=useRef(_loadDmCache());
   const pendingReactionUntil=useRef(new Map());
   const parseIncomingCall=(m)=>{
     if(!m||!m.content)return null;
@@ -5246,6 +5252,34 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'https://meet.google.com/new').trim();
     return {callId:id,from,meetUrl,peerId:m.sender,messageId:m.id};
   };
+  const stopRingtone=useCallback(()=>{
+    try{ if(ringtoneRef.current){ if(ringtoneRef.current._id)clearInterval(ringtoneRef.current._id); ringtoneRef.current.pause(); ringtoneRef.current.currentTime=0; } }catch{}
+    try{ if(ringtoneCtxRef.current){ ringtoneCtxRef.current.close(); } }catch{}
+    ringtoneRef.current=null; ringtoneCtxRef.current=null;
+    if(callTimeoutRef.current){ clearTimeout(callTimeoutRef.current); callTimeoutRef.current=null; }
+  },[]);
+  const startRingtone=useCallback(()=>{
+    stopRingtone();
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      if(Ctx){
+        const ctx=new Ctx(); const gain=ctx.createGain(); gain.gain.value=0.045; gain.connect(ctx.destination);
+        const tick=()=>{
+          if(!ringtoneCtxRef.current)return;
+          const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain);
+          osc.start(); osc.stop(ctx.currentTime+0.18);
+          setTimeout(()=>{try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
+        };
+        ringtoneCtxRef.current=ctx; tick(); ringtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1200)};
+        const oldStop=stopRingtone;
+        return;
+      }
+    }catch{}
+    try{
+      const audio=new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+      audio.loop=true; audio.play().catch(()=>{}); ringtoneRef.current=audio;
+    }catch{}
+  },[stopRingtone]);
 
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
@@ -5292,7 +5326,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(cached){
       setMsgThreadId(id);
       setMsgs(cached);
-      setLoadingThread(id);
+      setLoadingThread('');
     }else{
       setMsgThreadId('');
       setMsgs([]);
@@ -5310,21 +5344,31 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread(id);
-    console.debug('[DM] load start', {id,reason,seq});
-    const d=await api.get('/api/dm/'+id,{quiet:true});
+    const existing=threadCache.current.get(id)||[];
+    if(existing.length){setMsgThreadId(id);setMsgs(existing);setLoadingThread('');}
+    else setLoadingThread(id);
+    console.debug('[DM] load start', {id,reason,seq,cached:existing.length});
+    const lastMsg=existing.length?existing[existing.length-1]:null;
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
     }
     if(Array.isArray(d)){
-      const merged=mergePendingReactionState(id,d);
+      let merged;
+      if(sinceParam&&d.length===0) merged=mergePendingReactionState(id,existing);
+      else if(sinceParam&&existing.length){
+        const seen=new Set(existing.map(m=>m.id));
+        merged=mergePendingReactionState(id,[...existing,...d.filter(m=>!seen.has(m.id))]);
+      }else merged=mergePendingReactionState(id,d);
       threadCache.current.set(id,merged);
+      _saveDmCache(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
       onDmRead(id);
-      console.debug('[DM] load ok', {id,count:d.length,seq});
+      console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
@@ -5335,16 +5379,23 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);}
+    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
+    else setLoadingThread(toId);
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
-      const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
+      const cached=threadCache.current.get(requestedTo)||[];
+      const lastMsg=cached.length?cached[cached.length-1]:null;
+      const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+      const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
-        const merged=mergePendingReactionState(requestedTo,d);
+        if(sinceParam&&d.length===0)return;
+        const seen=new Set(cached.map(m=>m.id));
+        const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
+        _saveDmCache(requestedTo,merged);
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -5356,6 +5407,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
+      if(msg&&msg.type==='call_status'&&data){
+        const ids=new Set(data.users||[]);
+        if(data.status==='in_call') setActiveCallUsers(ids);
+        if(['rejected','ended','missed'].includes(data.status)){
+          setActiveCallUsers(new Set());
+          if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
+        }
+        if(data.status==='ringing'&&data.recipient===cu.id&&!dismissedCallIds.current.has(data.callId)){
+          const sender=(users||[]).find(u=>u.id===data.sender)||{};
+          setIncomingCall({callId:data.callId,from:sender.name||'Someone',meetUrl:data.meetUrl||'https://meet.google.com/new',peerId:data.sender});
+        }
+        return;
+      }
       if(msg&&msg.type==='dm_created'&&data){
         const m=data.message||data;
         const inc=parseIncomingCall(m);
@@ -5372,7 +5436,40 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
-  },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
+  },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone]);
+  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
+  // uses memory cache instead of showing the empty/start placeholder while the API responds.
+  const dmPrefetchedRef=useRef(false);
+  useEffect(()=>{
+    if(dmPrefetchedRef.current||!others.length)return;
+    dmPrefetchedRef.current=true;
+    const ids=others.map(u=>u.id).filter(Boolean);
+    let cancelled=false;
+    const prefetchOne=async(id)=>{
+      if(threadCache.current.has(id))return;
+      const d=await api.get('/api/dm/'+id,{quiet:true});
+      if(cancelled)return;
+      if(Array.isArray(d)){
+        const merged=mergePendingReactionState(id,d);
+        threadCache.current.set(id,merged);
+        _saveDmCache(id,merged);
+        if(!activeToRef.current && id===ids[0]){
+          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
+        }else if(id===activeToRef.current){
+          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
+        }
+      }
+    };
+    (async()=>{
+      const q=[...ids];
+      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
+        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
+      });
+      await Promise.all(workers);
+    })();
+    return()=>{cancelled=true;};
+  },[others.length,mergePendingReactionState]);
+
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
   useEffect(()=>{
     const inc=[...safe(msgs)].reverse().map(parseIncomingCall).find(Boolean);
@@ -5382,7 +5479,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!updated||!updated.id)return;
     const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
     const patchList=list=>list.map(x=>x.id===updated.id?{...x,...updated}:x);
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   }
   const send=async()=>{
@@ -5392,7 +5489,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(editingId){
       const editId=editingId;
       setTxt('');setEditingId('');setSending(true);
-      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===editId?{...x,content:c,edited:1}:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
       try{const r=await api.post('/api/dm/edit',{message_id:editId,content:c});if(r&&r.message)applyDmPatch(r.message,recipient);}
       catch(e){console.warn('[DM] edit failed',e);loadMsgs(recipient,'edit-rollback');}
       finally{setSending(false);}return;
@@ -5405,6 +5502,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
       threadCache.current.set(recipient,next);
+      _saveDmCache(recipient,next);
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
@@ -5415,6 +5513,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgs(prev=>{
           const next=prev.map(x=>x.id===tempId?m:x);
           threadCache.current.set(recipient,next);
+          _saveDmCache(recipient,next);
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
@@ -5424,6 +5523,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setMsgs(prev=>{
         const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
         threadCache.current.set(recipient,next);
+        _saveDmCache(recipient,next);
         return next;
       });
       setTxt(c);
@@ -5436,7 +5536,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!m||!m.id||String(m.id).startsWith('tmpdm'))return;
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:'This message was deleted',deleted:1}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
     try{const r=await api.post('/api/dm/delete',{message_id:m.id});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] delete failed',e);loadMsgs(peer,'delete-rollback');}
   };
   const pinMessage=async(m)=>{
@@ -5444,7 +5544,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=m.sender===cu.id?m.recipient:m.sender;
     setMenuFor('');
     const nextPin=!(m.pinned||m.pinned===1);
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);return next;});
+    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,pinned:nextPin?1:0}:x);threadCache.current.set(peer,next);_saveDmCache(peer,next);return next;});
     try{const r=await api.post('/api/dm/pin',{message_id:m.id,pinned:nextPin});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] pin failed',e);loadMsgs(peer,'pin-rollback');}
   };
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
@@ -5453,7 +5553,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!blob||!toId)return;
     const fd=new FormData();fd.append('file',new File([blob],'voice-note.webm',{type:'audio/webm'}));
     const uploaded=await api.upload('/api/files',fd);
-    if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
+    if(uploaded&&uploaded.id){const recipient=toId;const body='🎤 Voice note\n/api/files/'+uploaded.id;const tempId='tmpdm'+Date.now();const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),_pending:true};setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});const m=await api.post('/api/dm',{recipient,content:body});if(m&&m.id)setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
   };
   const startGoogleMeetCall=async()=>{
     if(!toId||startingMeet)return;
@@ -5461,7 +5561,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const recipient=toId;
     const tempId='tmpcall'+Date.now();
     const localCallId='local'+Date.now();
-    const meetUrl='https://meet.google.com/new';
+    const meetUrl='https://meet.google.com/lookup/'+localCallId;
     const body=`📞 Incoming video call\n${cu.name||'Someone'} is calling you.\nCALL_INVITE:${localCallId}\nCALL_FROM:${cu.name||'Someone'}\nCALL_STATUS:ringing\nMEET_LINK:${meetUrl}`;
     const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:'',_pending:false,_local:true};
     setStartingMeet(true);
@@ -5470,9 +5570,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(r&&r.message){
-        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);return next;});
+        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);_saveDmCache&&_saveDmCache(recipient,next);return next;});
       }
-      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'…','success');
+      setActiveCallUsers(new Set([cu.id,recipient].filter(Boolean)));
+      const waitUrl=(r&&((r.launchUrl)||r.meetUrl))||meetUrl;
+      const callWindow=window.open(waitUrl,'_blank','noopener,noreferrer');
+      if(!callWindow && typeof window.showToast==='function') window.showToast('Popup blocked. Use the Meet link in chat to join.','error');
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting in Meet','success');
     }catch(e){
       console.warn('[DM] instant call failed',e);
       setMsgs(prev=>{const next=prev.filter(x=>x.id!==tempId);threadCache.current.set(recipient,next);return next;});
@@ -5505,9 +5609,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const tempId='tmpdm'+Date.now();
         const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
         setReplyTo(null);setMsgThreadId(recipient);
-        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);return next;});
+        setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
-        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);return next;});}
+        if(recipient===activeToRef.current&&m&&m.id){setMsgs(prevMsgs=>{const next=prevMsgs.map(x=>x.id===tempId?m:x);threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});}
       }
     }catch(e){console.warn('[DM] attachment upload failed',e);}
     finally{setAttaching(false);}
@@ -5534,7 +5638,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(until&&until>Date.now())return {...m,...updated,reactions:m.reactions||updated.reactions||[],_reactionSyncing:false};
       return {...m,...updated,reactions:updated.reactions||[]};
     });
-    threadCache.current.set(peer,patchList(threadCache.current.get(peer)||[]));
+    {const patched=patchList(threadCache.current.get(peer)||[]);threadCache.current.set(peer,patched);_saveDmCache(peer,patched);}
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
     if(until)setTimeout(()=>pendingReactionUntil.current.delete(updated.id),1800);
   },[cu.id]);
@@ -5578,7 +5682,54 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
-  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
+
+  useEffect(()=>{
+    if(!incomingCall){ stopRingtone(); return; }
+    startRingtone();
+    callTimeoutRef.current=setTimeout(()=>{
+      const call=incomingCall;
+      if(!call||dismissedCallIds.current.has(call.callId))return;
+      dismissedCallIds.current.add(call.callId);
+      stopRingtone();
+      setIncomingCall(null);
+      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
+    },45000);
+    return()=>stopRingtone();
+  },[incomingCall,startRingtone,stopRingtone]);
+  const respondIncomingCall=async(action)=>{
+    const call=incomingCall;
+    if(!call)return;
+    dismissedCallIds.current.add(call.callId);
+    stopRingtone();
+    setIncomingCall(null);
+    try{
+      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
+      if(action==='accept'){
+        setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+        const joinUrl=(r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new';
+        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        if(!w) window.location.href=joinUrl;
+      }
+      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+    }catch(e){
+      console.warn('[DM] call response failed',e);
+      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    }
+  };
+  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'radial-gradient(circle at 50% 22%,rgba(34,197,94,.18),rgba(2,6,23,.94) 42%,rgba(0,0,0,.98))',backdropFilter:'blur(14px)'}}>
+    <div style=${{position:'absolute',top:22,left:26,fontSize:13,fontWeight:800,color:'#fff',letterSpacing:.5,opacity:.85}}>Project Tracker Call</div>
+    <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',height:'100%',textAlign:'center',padding:24}}>
+      <div style=${{width:132,height:132,borderRadius:'50%',marginBottom:28,display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#334155,#0f172a)',border:'3px solid rgba(255,255,255,.18)',boxShadow:'0 0 0 12px rgba(255,255,255,.04),0 30px 90px rgba(0,0,0,.65)',fontSize:54,animation:'callPulse 1.2s infinite'}}>📹</div>
+      <div style=${{fontSize:17,fontWeight:800,color:'#94a3b8',marginBottom:8,textTransform:'uppercase',letterSpacing:1.4}}>Incoming video call</div>
+      <div style=${{fontSize:38,fontWeight:950,color:'#fff',marginBottom:10,lineHeight:1.1}}>${incomingCall.from}</div>
+      <div style=${{fontSize:15,color:'#cbd5e1',marginBottom:42}}>wants to connect with you now</div>
+      <div style=${{display:'flex',gap:42,alignItems:'center',justifyContent:'center'}}>
+        <button title="Disconnect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#ef4444',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(239,68,68,.38)',transform:'rotate(135deg)'}} onClick=${()=>respondIncomingCall('reject')}>📞</button>
+        <button title="Connect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#22c55e',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(34,197,94,.38)'}} onClick=${()=>respondIncomingCall('accept')}>📞</button>
+      </div>
+      <div style=${{display:'flex',gap:55,marginTop:12,fontSize:13,fontWeight:800,color:'#e2e8f0'}}><span>Disconnect</span><span>Connect</span></div>
+    </div>
+  </div>`:null}<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
@@ -5610,7 +5761,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
-                ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
+                ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
@@ -5662,19 +5813,15 @@ function NotifsView({notifs,reload,setData,onNavigate}){
     task_assigned:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,c:'var(--ac)',nav:'tasks',label:'View Tasks'}, status_change:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>`,c:'var(--cy)',nav:'tasks',label:'View Tasks'}, comment:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,c:'var(--pu)',nav:'tasks',label:'View Tasks'}, deadline:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'var(--am)',nav:'tasks',label:'View Tasks'}, dm:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="12" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/></svg>`,c:'#06b6d4',nav:'dm',label:'Open Messages'}, project_added:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/></svg>`,c:'#10b981',nav:'projects',label:'View Projects'}, reminder:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'#f59e0b',nav:'tasks',label:'View Tasks'}, call:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.28a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.29 6.29l1.24-.82a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,c:'#22c55e',nav:'dashboard',label:'Join Instant Meet'}, };
   const unread=safe(notifs).filter(n=>!n.read).length;
   const handleClick=async(n)=>{
-    if(!n.read) api.put('/api/notifications/'+n.id+'/read',{}).catch(()=>{});
+    if(!n.read) await api.put('/api/notifications/'+n.id+'/read',{});
     const T=NT[n.type]||NT.comment;
-    if(n.type==='dm'){
-      const sid=n.sender_id||n.sender||n.entity_id||'';
-      if(sid&&window._pfSetDmTarget)window._pfSetDmTarget(sid);
-      if(onNavigate)onNavigate('dm');
-      setTimeout(()=>window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'notification_click',sender:sid}})),80);
-    }else if(T.nav&&onNavigate){onNavigate(T.nav);}
-    reload&&reload(undefined,true);
+    if(T.nav&&onNavigate){onNavigate(T.nav);}
+    reload();
   };
   const clearAll=async()=>{
-    await api.put('/api/notifications/read-all',{});
-    reload();
+    // Optimistic update — instantly mark all as read in UI, no visible lag
+    if(setData)setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));
+    api.put('/api/notifications/read-all',{}).then(()=>reload()).catch(()=>reload());
   };
   return html`<div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',boxSizing:'border-box'}}>
     <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>

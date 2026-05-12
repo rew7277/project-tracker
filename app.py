@@ -5615,8 +5615,10 @@ def create_google_meet_call():
     me = session["user_id"]
     now = ts()
     call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
-    # Google's browser-side instant launcher. This avoids Calendar OAuth in our app.
-    meet_url = "https://meet.google.com/new"
+    # Shared Google Meet nickname URL. /new creates a separate meeting per browser,
+    # but /lookup/<nickname> sends both caller and receiver to the same named room
+    # when Google Meet allows nickname-based instant meetings for the account/domain.
+    meet_url = f"https://meet.google.com/lookup/{call_id}"
 
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()

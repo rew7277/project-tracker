@@ -4155,33 +4155,6 @@ function MessagesView({projects,users,cu,tasks}){
     return rows;
   },[allProjects,chanSearch,newMsgProjects]);
 
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
-
   useEffect(()=>{
     if(!incomingCall){ stopRingtone(); return; }
     startRingtone();
@@ -4575,22 +4548,31 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread(id);
-    console.debug('[DM] load start', {id,reason,seq});
-    const d=await api.get('/api/dm/'+id,{quiet:true});
+    const existing=threadCache.current.get(id)||[];
+    if(existing.length){setMsgThreadId(id);setMsgs(existing);setLoadingThread('');}
+    else setLoadingThread(id);
+    console.debug('[DM] load start', {id,reason,seq,cached:existing.length});
+    const lastMsg=existing.length?existing[existing.length-1]:null;
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
     }
     if(Array.isArray(d)){
-      const merged=mergePendingReactionState(id,d);
+      let merged;
+      if(sinceParam&&d.length===0) merged=mergePendingReactionState(id,existing);
+      else if(sinceParam&&existing.length){
+        const seen=new Set(existing.map(m=>m.id));
+        merged=mergePendingReactionState(id,[...existing,...d.filter(m=>!seen.has(m.id))]);
+      }else merged=mergePendingReactionState(id,d);
       threadCache.current.set(id,merged);
       _saveDmCache(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
       onDmRead(id);
-      console.debug('[DM] load ok', {id,count:d.length,seq});
+      console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
@@ -4606,10 +4588,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
-      const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
+      const cached=threadCache.current.get(requestedTo)||[];
+      const lastMsg=cached.length?cached[cached.length-1]:null;
+      const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+      const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
-        const merged=mergePendingReactionState(requestedTo,d);
+        if(sinceParam&&d.length===0)return;
+        const seen=new Set(cached.map(m=>m.id));
+        const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
         _saveDmCache(requestedTo,merged);
@@ -4778,7 +4765,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const recipient=toId;
     const tempId='tmpcall'+Date.now();
     const localCallId='local'+Date.now();
-    const meetUrl='https://meet.google.com/new';
+    const meetUrl='https://meet.google.com/lookup/'+localCallId;
     const body=`📞 Incoming video call\n${cu.name||'Someone'} is calling you.\nCALL_INVITE:${localCallId}\nCALL_FROM:${cu.name||'Someone'}\nCALL_STATUS:ringing\nMEET_LINK:${meetUrl}`;
     const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:'',_pending:false,_local:true};
     setStartingMeet(true);
@@ -4787,9 +4774,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(r&&r.message){
-        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);return next;});
+        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);_saveDmCache&&_saveDmCache(recipient,next);return next;});
       }
-      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'…','success');
+      setActiveCallUsers(new Set([cu.id,recipient].filter(Boolean)));
+      const waitUrl=(r&&((r.launchUrl)||r.meetUrl))||meetUrl;
+      const callWindow=window.open(waitUrl,'_blank','noopener,noreferrer');
+      if(!callWindow && typeof window.showToast==='function') window.showToast('Popup blocked. Use the Meet link in chat to join.','error');
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting in Meet','success');
     }catch(e){
       console.warn('[DM] instant call failed',e);
       setMsgs(prev=>{const next=prev.filter(x=>x.id!==tempId);threadCache.current.set(recipient,next);return next;});
@@ -4895,34 +4886,54 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
 
-  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
+  useEffect(()=>{
+    if(!incomingCall){ stopRingtone(); return; }
+    startRingtone();
+    callTimeoutRef.current=setTimeout(()=>{
+      const call=incomingCall;
+      if(!call||dismissedCallIds.current.has(call.callId))return;
+      dismissedCallIds.current.add(call.callId);
+      stopRingtone();
+      setIncomingCall(null);
+      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
+    },45000);
+    return()=>stopRingtone();
+  },[incomingCall,startRingtone,stopRingtone]);
+  const respondIncomingCall=async(action)=>{
+    const call=incomingCall;
+    if(!call)return;
+    dismissedCallIds.current.add(call.callId);
+    stopRingtone();
+    setIncomingCall(null);
+    try{
+      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
+      if(action==='accept'){
+        setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+        const joinUrl=(r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new';
+        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        if(!w) window.location.href=joinUrl;
+      }
+      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+    }catch(e){
+      console.warn('[DM] call response failed',e);
+      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    }
+  };
+  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'radial-gradient(circle at 50% 22%,rgba(34,197,94,.18),rgba(2,6,23,.94) 42%,rgba(0,0,0,.98))',backdropFilter:'blur(14px)'}}>
+    <div style=${{position:'absolute',top:22,left:26,fontSize:13,fontWeight:800,color:'#fff',letterSpacing:.5,opacity:.85}}>Project Tracker Call</div>
+    <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',height:'100%',textAlign:'center',padding:24}}>
+      <div style=${{width:132,height:132,borderRadius:'50%',marginBottom:28,display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#334155,#0f172a)',border:'3px solid rgba(255,255,255,.18)',boxShadow:'0 0 0 12px rgba(255,255,255,.04),0 30px 90px rgba(0,0,0,.65)',fontSize:54,animation:'callPulse 1.2s infinite'}}>📹</div>
+      <div style=${{fontSize:17,fontWeight:800,color:'#94a3b8',marginBottom:8,textTransform:'uppercase',letterSpacing:1.4}}>Incoming video call</div>
+      <div style=${{fontSize:38,fontWeight:950,color:'#fff',marginBottom:10,lineHeight:1.1}}>${incomingCall.from}</div>
+      <div style=${{fontSize:15,color:'#cbd5e1',marginBottom:42}}>wants to connect with you now</div>
+      <div style=${{display:'flex',gap:42,alignItems:'center',justifyContent:'center'}}>
+        <button title="Disconnect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#ef4444',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(239,68,68,.38)',transform:'rotate(135deg)'}} onClick=${()=>respondIncomingCall('reject')}>📞</button>
+        <button title="Connect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#22c55e',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(34,197,94,.38)'}} onClick=${()=>respondIncomingCall('accept')}>📞</button>
+      </div>
+      <div style=${{display:'flex',gap:55,marginTop:12,fontSize:13,fontWeight:800,color:'#e2e8f0'}}><span>Disconnect</span><span>Connect</span></div>
+    </div>
+  </div>`:null}<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
