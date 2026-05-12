@@ -5597,7 +5597,12 @@ def _create_google_meet_event(access_token, title, attendee_emails=None):
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
-    """Create a real Google Meet using Google Calendar and send an actionable DM invite."""
+    """Start an instant DM call invite without Google Calendar OAuth.
+
+    This intentionally does NOT call Calendar or require Google sign-in inside
+    this app. It sends an in-app ringing invite immediately; when the receiver
+    accepts, their browser opens Google's own instant Meet launcher.
+    """
     d = request.json or {}
     target_id = (d.get("targetId") or d.get("recipient") or "").strip()
     call_type = (d.get("type") or "dm").strip().lower()
@@ -5609,9 +5614,9 @@ def create_google_meet_call():
     ws_id = wid()
     me = session["user_id"]
     now = ts()
-    access_token = session.get("google_access_token") or ""
-    if not access_token:
-        return jsonify({"ok": False, "error": "Please sign in with Google once so the app can create a real Google Meet from Calendar."}), 401
+    call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
+    # Google's browser-side instant launcher. This avoids Calendar OAuth in our app.
+    meet_url = "https://meet.google.com/new"
 
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
@@ -5620,93 +5625,86 @@ def create_google_meet_call():
         sender = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         sender_name = sender["name"] if sender and sender["name"] else "Someone"
         target_name = target["name"] if target and target["name"] else "teammate"
-        target_email = target["email"] if target and target["email"] else ""
 
-    try:
-        created = _create_google_meet_event(access_token, d.get("title") or f"Call with {target_name}", [target_email] if target_email else [])
-    except Exception as exc:
-        try: log.warning("[google_meet] calendar create failed: %s", exc)
-        except Exception: pass
-        return jsonify({"ok": False, "error": "Google Meet creation failed. Please re-login with Google Calendar permission and try again."}), 502
-
-    meet_url = created.get("meetUrl") or ""
-    code = created.get("meetingCode") or (meet_url.rstrip('/').split('/')[-1].split('?')[0] if meet_url else "")
-    if not meet_url:
-        return jsonify({"ok": False, "error": "Google did not return a Meet link. Please try again."}), 502
-
-    call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
-    content = (
-        "📹 Google Meet call\n"
-        f"{sender_name} invited you to a Google Meet.\n"
-        f"Join: {meet_url}\n"
-        f"Code: {code}\n"
-        f"CallId: {call_id}\n"
-        "Status: pending"
-    )
-    mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-    nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-    with get_db() as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS call_invites(
-            id TEXT PRIMARY KEY, workspace_id TEXT, sender TEXT, recipient TEXT,
-            provider TEXT, meet_url TEXT, meeting_code TEXT, status TEXT DEFAULT 'pending',
-            message_id TEXT, created TEXT, responded_at TEXT DEFAULT ''
-        )""")
-        db.execute("""INSERT INTO call_invites(id,workspace_id,sender,recipient,provider,meet_url,meeting_code,status,message_id,created)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""", (call_id, ws_id, me, target_id, "google_meet", meet_url, code, "pending", mid, now))
+        content = (
+            "📞 Incoming video call\n"
+            f"{sender_name} is calling you.\n"
+            f"CALL_INVITE:{call_id}\n"
+            f"CALL_FROM:{sender_name}\n"
+            f"CALL_STATUS:ringing\n"
+            f"MEET_LINK:{meet_url}"
+        )
+        mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
         db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                    (mid, ws_id, me, target_id, content, 0, now, "", now, "", 0, 0, 0))
-        try:
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                       (nid, ws_id, "call", f"{sender_name} invited you to a Google Meet", target_id, 0, now, me))
-        except Exception:
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid, ws_id, "call", f"{sender_name} invited you to a Google Meet", target_id, 0, now))
         row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
 
-    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-    _bust_dm_thread(ws_id, me, target_id)
-    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "content": content, "message": row})
-    _sse_publish(ws_id, "notification_updated", {"reason": "google_meet_invite", "sender": me, "recipient": target_id, "meetUrl": meet_url})
-    return jsonify({"ok": True, "mode": "google_meet_invite_sent", "provider": "google_meet", "meetUrl": meet_url, "meetingCode": code, "callId": call_id, "targetId": target_id, "targetName": target_name, "message": row})
+    def _after_call_start():
+        try:
+            with get_db() as db2:
+                nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+                try:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                                (nid, ws_id, "call", f"{sender_name} is calling you", target_id, 0, now, me))
+                except Exception:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                                (nid, ws_id, "call", f"{sender_name} is calling you", target_id, 0, now))
+        except Exception as e:
+            log.warning("[call] notification failed: %s", e)
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        _bust_dm_thread(ws_id, me, target_id)
+        _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "message": row})
+        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "recipient": target_id, "meetUrl": meet_url})
+        _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
+    threading.Thread(target=_after_call_start, daemon=True).start()
+
+    return jsonify({
+        "ok": True,
+        "mode": "instant_call_invite_sent",
+        "provider": "google_meet_instant",
+        "callId": call_id,
+        "meetUrl": meet_url,
+        "launchUrl": meet_url,
+        "targetId": target_id,
+        "targetName": target_name,
+        "message": row
+    })
 
 @app.route("/api/calls/respond", methods=["POST"])
 @login_required
-def respond_google_meet_call():
-    d=request.json or {}
-    call_id=(d.get("call_id") or d.get("callId") or "").strip()
-    action=(d.get("action") or "").strip().lower()
-    if action not in ("accepted","rejected"):
-        return jsonify({"ok":False,"error":"Invalid action"}),400
-    ws_id=wid(); me=session["user_id"]; now=ts()
+def respond_instant_call():
+    d = request.json or {}
+    call_id = (d.get("callId") or "").strip()
+    action = (d.get("action") or "").strip().lower()
+    peer_id = (d.get("peerId") or d.get("targetId") or "").strip()
+    meet_url = (d.get("meetUrl") or "https://meet.google.com/new").strip() or "https://meet.google.com/new"
+    if action not in ("accept", "reject", "end"):
+        return jsonify({"ok": False, "error": "Invalid call action"}), 400
+    ws_id = wid(); me = session["user_id"]; now = ts()
     with get_db() as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS call_invites(
-            id TEXT PRIMARY KEY, workspace_id TEXT, sender TEXT, recipient TEXT,
-            provider TEXT, meet_url TEXT, meeting_code TEXT, status TEXT DEFAULT 'pending',
-            message_id TEXT, created TEXT, responded_at TEXT DEFAULT ''
-        )""")
-        inv=db.execute("SELECT * FROM call_invites WHERE id=? AND workspace_id=?",(call_id,ws_id)).fetchone()
-        if not inv or inv["recipient"]!=me:
-            return jsonify({"ok":False,"error":"Invite not found"}),404
-        db.execute("UPDATE call_invites SET status=?, responded_at=? WHERE id=? AND workspace_id=?",(action,now,call_id,ws_id))
-        msg=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(inv["message_id"],ws_id)).fetchone()
-        if msg:
-            updated_content = re.sub(r"Status:\s*(pending|accepted|rejected)", "Status: "+action, msg["content"] or "", flags=re.I)
-            db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?",(updated_content,inv["message_id"],ws_id))
-        user=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
-        uname=user["name"] if user and user["name"] else "The invitee"
-        notice=f"{'✅' if action=='accepted' else '❌'} {uname} {action} your Google Meet invite."
-        mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-        db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                   (mid,ws_id,me,inv["sender"],notice,0,now,"",now,"",0,0,0))
-        row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone())
-        updated=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(inv["message_id"],)).fetchone()) if msg else None
-    _cache_bust(ws_id,"dm_unread","notifications","notifs","appdata")
-    _bust_dm_thread(ws_id, inv["sender"], inv["recipient"])
-    if updated: _sse_publish(ws_id,"dm_updated",{"message":updated})
-    _sse_publish(ws_id,"dm_created",{"id":mid,"sender":me,"recipient":inv["sender"],"content":notice,"message":row})
-    return jsonify({"ok":True,"status":action,"message":row,"updated":updated})
+        me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
+        me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
+        if not peer_id:
+            msg = db.execute("SELECT sender,recipient FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+            if msg:
+                peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+        if peer_id:
+            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else f"📴 {me_name} ended the call")
+            mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+            db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (mid, ws_id, me, peer_id, text, 0, now, "", now, "", 0, 0, 0))
+            row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
+        else:
+            row = None
+    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else "ended")
+    users = [x for x in [me, peer_id] if x]
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    if peer_id: _bust_dm_thread(ws_id, me, peer_id)
+    if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
+    _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url})
+    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row})
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required
@@ -5754,41 +5752,40 @@ def send_dm():
     me=session["user_id"]
     now=ts()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-    nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
     with get_db() as db:
-        # Validate recipient before inserting, so bad UI state cannot create a 500.
-        target=db.execute(
-            "SELECT id FROM users WHERE id=? AND workspace_id=? AND deleted_at=''",
-            (recipient, ws_id)
-        ).fetchone()
+        target=db.execute("SELECT id FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (recipient, ws_id)).fetchone()
         if not target:
             return jsonify({"error":"Recipient not found"}),404
-
         db.execute("""INSERT INTO direct_messages(
                        id,workspace_id,sender,recipient,content,read,ts,reply_to,
                        delivered_at,seen_at,edited,deleted,pinned
                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                    (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0))
-
         row=dict(db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone())
         sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
         sender_name=sender["name"] if sender and sender["name"] else "Someone"
         preview=content[:60]+("..." if len(content)>60 else "")
 
-        # Some deployed DBs have sender_id, older ones do not. Support both without failing send.
+    # Do slow fanout after the response path. The sender already has an
+    # optimistic bubble, and the receiver is notified by SSE from this thread.
+    def _after_dm_send():
         try:
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                       (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
-        except Exception:
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
-
-    # Bust caches before SSE so receivers do not fetch stale unread/notification/thread data.
-    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-    _bust_dm_thread(ws_id, me, recipient)
-    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
-    _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
+            with get_db() as db2:
+                nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+                try:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+                except Exception:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
+        except Exception as e:
+            log.warning("[DM] notification insert failed: %s", e)
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        _bust_dm_thread(ws_id, me, recipient)
+        _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+        _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
+    threading.Thread(target=_after_dm_send, daemon=True).start()
     return jsonify(row)
 
 

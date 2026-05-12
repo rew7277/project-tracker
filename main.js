@@ -4033,14 +4033,22 @@ function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
+  const callIdMatch=raw.match(/CALL_INVITE:([^\n]+)/);
+  if(callIdMatch || /📞\s*Incoming video call/i.test(raw)){
+    const callId=callIdMatch?callIdMatch[1].trim():'';
+    const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Teammate').trim();
+    const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim();
+    const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'https://meet.google.com/new').trim();
+    const ended=/accepted the call|rejected the call|ended the call/i.test(raw)||status==='ended'||status==='rejected';
+    if(ended) return safe.replace(/\n/g,'<br>');
+    return `<div style="min-width:260px;max-width:360px;border:1px solid rgba(239,68,68,.35);border-radius:18px;padding:14px;background:linear-gradient(135deg,rgba(239,68,68,.18),rgba(124,58,237,.10));box-shadow:0 14px 34px rgba(239,68,68,.16)"><div style="display:flex;align-items:center;gap:10px;font-weight:950;margin-bottom:6px"><span style="width:34px;height:34px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:white;box-shadow:0 0 0 6px rgba(239,68,68,.12)">📞</span><span>Incoming call</span></div><div style="font-size:12px;opacity:.88;line-height:1.45;margin-bottom:12px">${escapeHtml(from)} is calling you now.</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button data-call-action="accept" data-call-id="${escapeHtml(callId)}" data-meet-url="${escapeHtml(meetUrl)}" style="border:none;border-radius:999px;background:#22c55e;color:white;padding:9px 14px;font-weight:950;cursor:pointer">Accept</button><button data-call-action="reject" data-call-id="${escapeHtml(callId)}" data-meet-url="${escapeHtml(meetUrl)}" style="border:none;border-radius:999px;background:#ef4444;color:white;padding:9px 14px;font-weight:950;cursor:pointer">Reject</button></div></div>`;
+  }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
   if(meetMatch || /📹\s*Google Meet call/i.test(raw)){
     const url=meetMatch?meetMatch[0]:'';
     const code=(url.split('/').pop()||'').split('?')[0];
-    const status=(raw.match(/Status:\s*(accepted|rejected|pending)/i)||[])[1]||'pending';
     const link=url?`<a href="${url}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;margin-top:10px;padding:9px 13px;border-radius:999px;background:#2563eb;color:#fff;text-decoration:none;font-weight:900;box-shadow:0 8px 20px rgba(37,99,235,.28)">Join Google Meet</a>`:'';
-    const badge=status!=='pending'?`<div style="margin-top:9px;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.4px;color:${status==='accepted'?'#86efac':'#fecaca'}">${status}</div>`:'';
-    return `<div style="min-width:245px;max-width:340px;border:1px solid rgba(96,165,250,.28);border-radius:16px;padding:13px;background:linear-gradient(135deg,rgba(37,99,235,.16),rgba(124,58,237,.10))"><div style="display:flex;align-items:center;gap:10px;font-weight:900;margin-bottom:5px"><span style="width:32px;height:32px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#2563eb;color:white">📹</span><span>Google Meet call</span></div><div style="font-size:12px;opacity:.84;line-height:1.45">You are invited to join this call. Accept to join, or reject to notify the initiator.</div>${code?`<div style="font-size:11px;opacity:.72;margin-top:8px;font-family:monospace;word-break:break-all">${code}</div>`:''}${link}${badge}</div>`;
+    return `<div style="min-width:245px;max-width:340px;border:1px solid rgba(96,165,250,.28);border-radius:16px;padding:13px;background:linear-gradient(135deg,rgba(37,99,235,.16),rgba(124,58,237,.10))"><div style="display:flex;align-items:center;gap:10px;font-weight:900;margin-bottom:5px"><span style="width:32px;height:32px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#2563eb;color:white">📹</span><span>Google Meet call</span></div><div style="font-size:12px;opacity:.84;line-height:1.45">You are invited to join this call. Click below to open Google Meet.</div>${code?`<div style="font-size:11px;opacity:.72;margin-top:8px;font-family:monospace;word-break:break-all">${code}</div>`:''}${link}</div>`;
   }
   const fileMatch=raw.match(/\/api\/files\/[A-Za-z0-9_-]+/);
   const fileUrl=fileMatch&&fileMatch[0];
@@ -4058,9 +4066,6 @@ function renderChatContent(text){
     .replace(/\n/g,'<br>');
 }
 const CHAT_EMOJIS=['👍','👎','❤️','🧡','💛','💚','💙','💜','😂','🤣','😊','😍','🥰','😘','😎','😮','😱','😢','😭','😡','🙏','👏','🔥','🎉','💯','✅','☑️','👀','🚀','⭐','💪','🤝','🙌','😇','🤔','👌','✌️','🤩','😴','🤯','🙄','😬'];
-function getMeetCallId(text){return (String(text||'').match(/CallId:\s*(call[A-Za-z0-9]+)/i)||[])[1]||'';}
-function getMeetStatus(text){return ((String(text||'').match(/Status:\s*(accepted|rejected|pending)/i)||[])[1]||'pending').toLowerCase();}
-
 const REACTION_EMOJIS=['👍','❤️','😂','😮','😢','🔥','👏','🙏'];
 const emojiHover=(ev,on)=>{const el=ev.currentTarget;if(!el)return;const rect=el.getBoundingClientRect();const cx=rect.left+rect.width/2;const cy=rect.top+rect.height/2;const dx=((ev.clientX||cx)-cx)/Math.max(1,rect.width);const dy=((ev.clientY||cy)-cy)/Math.max(1,rect.height);el.style.transform=on?`translate(${dx*5}px, ${-8+dy*3}px) scale(1.48) rotate(${dx*7}deg)`:'translate(0,0) scale(1) rotate(0deg)';el.style.zIndex=on?'3':'1';el.style.filter=on?'drop-shadow(0 10px 14px rgba(0,0,0,.38)) saturate(1.35)':'saturate(1.05)';};
 const emojiMove=(ev)=>emojiHover(ev,true);
@@ -4137,10 +4142,6 @@ function MessagesView({projects,users,cu,tasks}){
   useEffect(()=>{pidRef.current=pid;},[pid]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
   const msgCacheRef=useRef(new Map());
-  const loadedChannelsRef=useRef(new Set());
-  const chanStoreKey='pf_channel_threads_'+(cu&&cu.id||'me');
-  const saveChannelCache=(cid,list)=>{try{const all=JSON.parse(localStorage.getItem(chanStoreKey)||'{}');all[cid]=(Array.isArray(list)?list:[]).slice(-200);localStorage.setItem(chanStoreKey,JSON.stringify(all));}catch(e){}};
-  try{const cachedAll=JSON.parse(localStorage.getItem(chanStoreKey)||'{}');Object.entries(cachedAll).forEach(([k,v])=>{if(Array.isArray(v)){msgCacheRef.current.set(k,v);loadedChannelsRef.current.add(k);}});}catch(e){}
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
@@ -4169,7 +4170,7 @@ function MessagesView({projects,users,cu,tasks}){
     const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
-      msgCacheRef.current.set(id,d);loadedChannelsRef.current.add(id);saveChannelCache(id,d);
+      msgCacheRef.current.set(id,d);
       setMsgs(d);
       setLoadingChannel('');
       // Mark channel as read — store the latest message ts
@@ -4183,15 +4184,6 @@ function MessagesView({projects,users,cu,tasks}){
       setLoadingChannel('');
     }
   },[]);
-
-  useEffect(()=>{
-    safe(allProjects).slice(0,40).forEach(p=>{
-      if(!p||!p.id||msgCacheRef.current.has(p.id))return;
-      api.get('/api/messages?project='+encodeURIComponent(p.id),{quiet:true}).then(d=>{
-        if(Array.isArray(d)){msgCacheRef.current.set(p.id,d);loadedChannelsRef.current.add(p.id);saveChannelCache(p.id,d);if(p.id===pidRef.current){setMsgs(d);setLoadingChannel('');}}
-      }).catch(()=>{});
-    });
-  },[allProjects.length]);
 
   useEffect(()=>{
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
@@ -4240,10 +4232,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
     const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
-    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);loadedChannelsRef.current.add(pid);saveChannelCache(pid,next);return next;});
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
     const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);loadedChannelsRef.current.add(pid);saveChannelCache(pid,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4464,11 +4456,11 @@ function MessagesView({projects,users,cu,tasks}){
               </div>`;
           });
         })()}
-        ${false&&loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${loadingChannel===pid?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>⚡</div>
           <p>Opening channel…</p>
         </div>`:null}
-        ${loadedChannelsRef.current.has(pid)&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
+        ${loadingChannel!==pid&&msgs.length===0?html`<div style=${{textAlign:'center',paddingTop:48,color:'var(--tx3)',fontSize:13}}>
           <div style=${{fontSize:28,marginBottom:8}}>💬</div>
           <p>No messages yet. Task activity will appear here automatically.</p>
         </div>`:null}
@@ -4516,7 +4508,7 @@ const playSound=(type='notif')=>{
     }
   }catch(e){}
 };
-function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set()}){
+function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set(),activeCallUsers=new Set()}){
   const isAdminOrManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   if(!dmEnabled&&!isAdminOrManager) return html`
     <div style=${{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',gap:12,color:'var(--tx3)'}}>
@@ -4552,10 +4544,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
-  const loadedThreadsRef=useRef(new Set());
-  const dmStoreKey='pf_dm_threads_'+(cu&&cu.id||'me');
-  const saveThreadCache=(peer,list)=>{try{const all=JSON.parse(localStorage.getItem(dmStoreKey)||'{}');all[peer]=(Array.isArray(list)?list:[]).slice(-200);localStorage.setItem(dmStoreKey,JSON.stringify(all));}catch(e){}};
-  try{const cachedAll=JSON.parse(localStorage.getItem(dmStoreKey)||'{}');Object.entries(cachedAll).forEach(([k,v])=>{if(Array.isArray(v)){threadCache.current.set(k,v);loadedThreadsRef.current.add(k);}});}catch(e){}
   const pendingReactionUntil=useRef(new Map());
   // Pre-warm every DM thread immediately. The backend has a short-lived DM cache,
   // so this is cheap after the first call and removes the first-click loading screen.
@@ -4566,7 +4554,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(threadCache.current.has(uid))return;
       api.get('/api/dm/'+encodeURIComponent(uid),{quiet:true}).then(d=>{
         if(Array.isArray(d)){
-          threadCache.current.set(uid,d);loadedThreadsRef.current.add(uid);saveThreadCache(uid,d);
+          threadCache.current.set(uid,d);
           if(uid===activeToRef.current){setMsgThreadId(uid);setMsgs(d);setLoadingThread('');}
         }
       }).catch(()=>{});
@@ -4659,7 +4647,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       } else {
         merged=mergePendingReactionState(id,d);
       }
-      threadCache.current.set(id,merged);loadedThreadsRef.current.add(id);saveThreadCache(id,merged);
+      threadCache.current.set(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
@@ -4693,7 +4681,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           ? mergePendingReactionState(requestedTo,[...existing,...d])
           : mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
-        threadCache.current.set(requestedTo,merged);loadedThreadsRef.current.add(requestedTo);saveThreadCache(requestedTo,merged);
+        threadCache.current.set(requestedTo,merged);
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -4718,8 +4706,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
   },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
+  useEffect(()=>{
+    const onCallAction=async(ev)=>{
+      const btn=ev.target&&ev.target.closest&&ev.target.closest('[data-call-action]');
+      if(!btn)return;
+      ev.preventDefault();ev.stopPropagation();
+      const action=btn.getAttribute('data-call-action');
+      const callId=btn.getAttribute('data-call-id')||'';
+      const meetUrl=btn.getAttribute('data-meet-url')||'https://meet.google.com/new';
+      const peer=toId;
+      try{
+        const r=await api.post('/api/calls/respond',{callId,action,peerId:peer,meetUrl},{quiet:true});
+        if(action==='accept') window.open((r&&r.meetUrl)||meetUrl,'_blank','noopener,noreferrer');
+        if(r&&r.message)applyDmPatch(r.message,peer);
+        if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
+      }catch(e){console.warn('[DM] call response failed',e);}
+    };
+    document.addEventListener('click',onCallAction,true);
+    return()=>document.removeEventListener('click',onCallAction,true);
+  },[toId,applyDmPatch]);
   const send=async()=>{
-    if(!txt.trim()||!toId||sending)return;
+    if(!txt.trim()||!toId)return;
     const recipient=toId;
     const c=txt.trim();
     if(editingId){
@@ -4731,9 +4738,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       finally{setSending(false);}return;
     }
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
+    const optimistic={id:tempId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false,_local:true};
     setTxt('');setReplyTo(null);
-    setSending(true);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -4761,7 +4767,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       });
       setTxt(c);
     }finally{
-      setSending(false);
       window.dispatchEvent(new CustomEvent('pt:refresh',{detail:{type:'dm_sent',recipient}}));
     }
   };
@@ -4798,33 +4803,29 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const startGoogleMeetCall=async()=>{
     if(!toId||startingMeet)return;
     const peer=toUser&&toUser.name?toUser.name:'teammate';
+    const recipient=toId;
+    const tempId='tmpcall'+Date.now();
+    const localCallId='local'+Date.now();
+    const meetUrl='https://meet.google.com/new';
+    const body=`📞 Incoming video call\n${cu.name||'Someone'} is calling you.\nCALL_INVITE:${localCallId}\nCALL_FROM:${cu.name||'Someone'}\nCALL_STATUS:ringing\nMEET_LINK:${meetUrl}`;
+    const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:'',_pending:false,_local:true};
     setStartingMeet(true);
+    setMsgThreadId(recipient);
+    setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);if(typeof _saveDmCache==='function')_saveDmCache(recipient,next);return next;});
     try{
-      const invite=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`},{quiet:true});
-      if(invite&&invite.ok===false){alert(invite.error||'Unable to create the Google Meet invite.');return;}
-      if(invite&&invite.message){
-        const m=invite.message;
-        setMsgs(prev=>{const next=[...prev.filter(x=>x.id!==m.id),m];threadCache.current.set(toId,next);loadedThreadsRef.current.add(toId);saveThreadCache(toId,next);return next;});
+      const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
+      if(r&&r.message){
+        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);if(typeof _saveDmCache==='function')_saveDmCache(recipient,next);return next;});
       }
-      if(invite&&invite.meetUrl) window.open(invite.meetUrl,'_blank','noopener,noreferrer');
-      if(typeof window.showToast==='function') window.showToast('Google Meet invite sent to '+peer+'.','success');
+      if(r&&r.launchUrl){
+        window.open(r.launchUrl,'_blank','noopener,noreferrer');
+      }
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'…','success');
     }catch(e){
-      console.warn('[DM] video call failed',e);
-      alert('Unable to create the Google Meet call. Sign in with Google Calendar access and try again.');
+      console.warn('[DM] instant call failed',e);
+      setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?{...x,_failed:true,content:'Call invite failed. Please try again.'}:x);threadCache.current.set(recipient,next);return next;});
+      if(typeof window.showToast==='function') window.showToast('Unable to start call. Please try again.','error');
     }finally{setStartingMeet(false);}
-  };
-  const respondMeetInvite=async(m,action)=>{
-    const callId=getMeetCallId(m&&m.content);
-    if(!callId)return;
-    setMsgs(prev=>{const next=prev.map(x=>x.id===m.id?{...x,content:String(x.content||'').replace(/Status:\s*(pending|accepted|rejected)/i,'Status: '+action)}:x);threadCache.current.set(toId,next);saveThreadCache(toId,next);return next;});
-    try{
-      const r=await api.post('/api/calls/respond',{call_id:callId,action},{quiet:true});
-      if(r&&r.message)loadMsgs(toId,'meet-response');
-      if(action==='accepted'){
-        const url=(String(m.content||'').match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i)||[])[0];
-        if(url)window.open(url,'_blank','noopener,noreferrer');
-      }
-    }catch(e){console.warn('[DM] meet response failed',e);loadMsgs(toId,'meet-response-rollback');}
   };
   const toggleRecording=async()=>{
     if(recording){try{mediaRecorderRef.current&&mediaRecorderRef.current.stop();}catch{}setRecording(false);return;}
@@ -4869,7 +4870,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const firstUnreadIdx=displayMsgs.findIndex(m=>m.sender===toId&&Number(m.read||0)===0);
   const findMsg=id=>visibleMsgs.find(x=>x.id===id);
   const isThreadLoading=!!toId&&loadingThread===toId&&visibleMsgs.length===0;
-  const selectedThreadLoaded=!!toId&&loadedThreadsRef.current.has(toId);
   const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
   const reactionEmojis=REACTION_EMOJIS;
   const applyReactionMessage=useCallback((updated)=>{
@@ -4934,7 +4934,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
-              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:onlineUsers.has(u.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none',transition:'background .3s,box-shadow .3s'}}></div>
+              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#ef4444':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
               <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
@@ -4948,24 +4948,24 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         ${toUser?html`
           <div style=${{position:'relative'}}>
             <${Av} u=${toUser} size=${36}/>
-            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:onlineUsers.has(toUser.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none',transition:'background .3s,box-shadow .3s'}}></div>
+            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:activeCallUsers.has(toUser.id)?'#ef4444':(onlineUsers.has(toUser.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(toUser.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.7)':(onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
           </div>
           <div>
             <div style=${{fontSize:14,fontWeight:700,color:'var(--tx)'}}>${toUser.name}</div>
-            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)'),fontWeight:500}}>${remoteTyping?'typing…':(onlineUsers.has(toUser.id)?'Active now':'Offline')}</div>
+            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)'),fontWeight:500}}>${remoteTyping?'typing…':(activeCallUsers.has(toUser.id)?'In a call':(onlineUsers.has(toUser.id)?'Active now':'Offline'))}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${isThreadLoading?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:28,marginBottom:10}}>⚡</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>Opening conversation…</div></div>`:null}
-                ${!isThreadLoading&&selectedThreadLoaded&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:700,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Say hi to '+toUser.name:'Select someone'}</div><div style=${{fontSize:12,color:'var(--tx3)'}}>No messages yet.</div></div>`:null}
+                ${!isThreadLoading&&visibleMsgs.length===0?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
-                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>${(!isMe&&getMeetCallId(m.content)&&getMeetStatus(m.content)==='pending')?html`<div style=${{display:'flex',gap:8,marginTop:8}}><button class="btn bp" style=${{padding:'7px 12px',fontSize:12}} onClick=${()=>respondMeetInvite(m,'accepted')}>Accept</button><button class="btn" style=${{padding:'7px 12px',fontSize:12,borderColor:'rgba(239,68,68,.35)',color:'#fecaca'}} onClick=${()=>respondMeetInvite(m,'rejected')}>Reject</button></div>`:null}
+                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
                 ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'linear-gradient(135deg, rgba(15,23,42,.94), rgba(30,41,59,.90))',backdropFilter:'blur(16px)',borderRadius:22,boxShadow:'0 20px 50px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:20,animation:'dmPickerPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
@@ -4980,14 +4980,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         ${previewImage?html`<div onClick=${()=>setPreviewImage('')} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center'}}><img src=${previewImage} style=${{maxWidth:'88vw',maxHeight:'88vh',borderRadius:16,boxShadow:'0 30px 80px rgba(0,0,0,.6)'}}/></div>`:null}
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadDmAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
+        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'9px 12px',fontSize:16}} onClick=${()=>setShowChatEmoji(v=>!v)} disabled=${!toId}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
@@ -4999,7 +4999,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(37,99,235,.18)':'linear-gradient(135deg,#2563eb,#7c3aed)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
-        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
+        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId}>➤</button>
       </div>
     </div>
   </div>`;
@@ -8907,6 +8907,7 @@ function App(){
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
+  const [activeCallUsers,setActiveCallUsers]=useState(new Set());
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
   // A single EventSource replaces the need for manual polling on task/project/
@@ -8936,6 +8937,12 @@ function App(){
             }
             if(msg.type==='presence'){
               api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
+            }
+            if(msg.type==='call_status'&&msg.data){
+              const users=Array.isArray(msg.data.users)?msg.data.users:[];
+              const active=msg.data.status==='ringing'||msg.data.status==='in_call';
+              setActiveCallUsers(prev=>{const n=new Set(prev);users.forEach(u=>active?n.add(u):n.delete(u));return n;});
+              window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
             }
           }catch(err){}
         };
@@ -9493,7 +9500,7 @@ function App(){
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
             <div style=${{display:baseView==='dm'?'flex':'none',flex:1,overflow:'hidden',flexDirection:'column',height:'100%'}}>
-              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>
+              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers} activeCallUsers=${activeCallUsers}/>
             </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${setView}/>`:null}
