@@ -767,7 +767,21 @@ def _cache_bust_ws(workspace_id):
                 _CACHE.pop(key, None)
 
 
-def _cache_inject_item(workspace_id, table, item_dict):
+def _bust_dm_thread(ws, uid1, uid2):
+    """Bust the DM conversation cache for both users when a message is sent/deleted/edited."""
+    keys = [f"dm_thread:{ws}:{uid1}:{uid2}", f"dm_thread:{ws}:{uid2}:{uid1}"]
+    with _CACHE_LOCK:
+        for k in keys:
+            _CACHE.pop(k, None)
+    if _redis_client is not None:
+        try:
+            for k in keys:
+                _redis_client.delete(f"ptcache:{k}")
+        except Exception:
+            pass
+
+
+
     """After a create, inject the new item into existing cache entries
     so the next poll (background refresh) returns instantly from cache
     rather than hitting the DB cold. Non-critical — failures are silent."""
@@ -4933,18 +4947,33 @@ def create_task():
     if not d.get("title"): return jsonify({"error":"Title required"}),400
     with get_db() as db:
         tid=next_task_id(db,wid())
-        db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
-                    d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
-                    ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
-                    d.get("team_id","")))
-        # Batch: fetch creator + assignee info + project members in ONE round-trip each
-        creator=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-        cname=creator["name"] if creator else "Someone"
+        # Use RETURNING * to get the row back without a separate SELECT (saves 1 round-trip)
+        try:
+            t_rows=db.execute(
+                "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
+                 d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
+                 ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
+                 d.get("team_id",""))
+            ).fetchall()
+            t = t_rows[0] if t_rows else None
+        except Exception:
+            db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
+                        d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
+                        ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
+                        d.get("team_id","")))
+            t=None
+        # Batch: fetch creator + assignee in ONE query instead of two sequential round-trips
+        lookup_ids = list(set(filter(None, [session["user_id"], d.get("assignee")])))
+        user_map = {row["id"]: row for row in db.execute(
+            f"SELECT id,name,email FROM users WHERE id IN ({','.join('?'*len(lookup_ids))})",
+            lookup_ids
+        ).fetchall()} if lookup_ids else {}
+        creator_row = user_map.get(session["user_id"])
+        cname = creator_row["name"] if creator_row else "Someone"
         base_ts=int(datetime.now().timestamp()*1000)
-        assignee_user=None
-        if d.get("assignee"):
-            assignee_user=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
+        assignee_user = user_map.get(d.get("assignee","")) if d.get("assignee") else None
         proj=None
         proj_members=[]
         if d.get("project"):
@@ -4980,7 +5009,9 @@ def create_task():
             if uid==session["user_id"] or uid==d.get("assignee"): continue
             _enqueue_push(push_notification_to_user, *(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
                       f"{cname} created '{d['title']}'",_task_url))
-        t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
+        # Use RETURNING * result if available; fall back to SELECT only if needed
+        if t is None:
+            t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
         if d.get("project") and proj:
             assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
             sysmid=f"m{base_ts+1}"
@@ -5416,6 +5447,15 @@ def get_dm(other_id):
     me=session["user_id"]
     ws_id=wid()
     since=request.args.get("since","").strip()
+
+    # Short-lived cache for full conversation loads (no ?since param).
+    # SSE events trigger client-side reloads which pass ?since= (incremental),
+    # so the cache is only hit for initial opens and page refreshes.
+    if not since:
+        dm_cache_key = f"dm_thread:{ws_id}:{me}:{other_id}"
+        cached_thread = _cache_get(dm_cache_key)
+        if cached_thread is not None:
+            return jsonify(cached_thread)
     with get_db() as db:
         if since:
             # Incremental: only messages newer than the client's last known ts.
@@ -5473,6 +5513,9 @@ def get_dm(other_id):
     # Only bust caches if we actually just marked messages as read
     if unread_count:
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    # Cache the full conversation so page refreshes and re-opens are instant
+    if not since:
+        _cache_set(f"dm_thread:{ws_id}:{me}:{other_id}", data)
     return jsonify(data)
 
 
@@ -5659,6 +5702,20 @@ def send_dm():
         sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
         sender_name=sender["name"] if sender else "Someone"
         nid=f"n{int(datetime.now().timestamp()*1000)}"
+        try:
+            rows = db.execute(
+                "INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0)
+            ).fetchall()
+            row = dict(rows[0]) if rows else {}
+        except Exception:
+            db.execute("INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (mid,wid(),session["user_id"],d["recipient"],d["content"],0,ts(),d.get("reply_to","") or "",ts(),"",0,0,0))
+            row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone() or {})
+        sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        sender_name=sender["name"] if sender else "Someone"
+        nid=f"n{int(datetime.now().timestamp()*1000)}"
         preview=d["content"][:60]+"..." if len(d["content"])>60 else d["content"]
         try:
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
@@ -5666,11 +5723,12 @@ def send_dm():
         except:
             db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
                        (nid,wid(),"dm",f"{sender_name}: {preview}",d["recipient"],0,ts()))
-        row=dict(db.execute("SELECT * FROM direct_messages WHERE id=?",(mid,)).fetchone())
     # Important: bust per-user dashboard/appdata caches before publishing realtime events.
     # Otherwise recipients receive the SSE immediately but then read stale /api/dm/unread
     # or /api/notifications data for up to the cache TTL, which feels like a 30-60s delay.
     _cache_bust(wid(), "dm_unread", "notifications", "notifs", "appdata")
+    # Bust DM thread cache for both parties so next open/refresh shows the new message
+    _bust_dm_thread(wid(), session["user_id"], d["recipient"])
     _sse_publish(wid(), "dm_created", {"id": mid, "sender": session["user_id"], "recipient": d["recipient"], "content": preview})
     _sse_publish(wid(), "notification_updated", {"reason": "dm", "sender": session["user_id"], "recipient": d["recipient"]})
     return jsonify(row)
@@ -6280,7 +6338,51 @@ def due_reminders():
             db.execute(f"UPDATE reminders SET fired=1 WHERE id IN ({','.join('?'*len(ids))})", ids)
         return jsonify([dict(r) for r in rows])
 
+# ── Unified poll endpoint ─────────────────────────────────────────────────────
+@app.route("/api/poll")
+@login_required
+def unified_poll():
+    """Single endpoint returning dm_unread + notifications in ONE request.
+
+    Replaces two separate polling calls (dm/unread every 15s + notifications
+    every 20s) with one call every 20s — halves the per-user DB connection
+    usage for the most frequent polling operations.
+
+    Cache strategy: serves from the appdata cache (populated by /api/app-data)
+    when fresh. Falls back to a single DB connection for both queries when
+    the cache is cold, keeping the benefit of one connection vs two.
+    """
+    ws, uid = wid(), session["user_id"]
+
+    # Try appdata cache for both — zero DB connections needed when warm
+    dm_unread, found_dm     = _appdata_cache_get(ws, uid, "dm_unread")
+    notifs,    found_notifs = _appdata_cache_get(ws, uid, "notifications")
+
+    if found_dm and found_notifs:
+        return jsonify({"dm_unread": dm_unread, "notifications": notifs})
+
+    # One DB connection for whichever parts are cache-cold
+    with get_db() as db:
+        if not found_dm:
+            rows = db.execute(
+                "SELECT sender, COUNT(*) AS cnt FROM direct_messages "
+                "WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",
+                (ws, uid)
+            ).fetchall()
+            dm_unread = [dict(r) for r in rows]
+        if not found_notifs:
+            rows = db.execute(
+                "SELECT * FROM notifications WHERE workspace_id=? AND user_id=? "
+                "ORDER BY ts DESC LIMIT 50",
+                (ws, uid)
+            ).fetchall()
+            notifs = [dict(r) for r in rows]
+
+    return jsonify({"dm_unread": dm_unread, "notifications": notifs})
+
+
 # ── Notifications ─────────────────────────────────────────────────────────────
+
 @app.route("/api/notifications")
 @login_required
 def get_notifs():

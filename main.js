@@ -4585,19 +4585,34 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     activeToRef.current=id;
     if(!threadCache.current.has(id))setLoadingThread(id);
     console.debug('[DM] load start', {id,reason,seq});
-    const d=await api.get('/api/dm/'+id,{quiet:true});
+    // Use ?since= when we have cached messages — only fetch new ones instead of full 200-msg reload
+    const existing=threadCache.current.get(id)||[];
+    const lastMsg=existing.length?existing[existing.length-1]:null;
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
     }
     if(Array.isArray(d)){
-      const merged=mergePendingReactionState(id,d);
+      let merged;
+      if(sinceParam&&d.length===0){
+        // No new messages — keep existing cache, just re-render
+        merged=mergePendingReactionState(id,existing);
+      } else if(sinceParam&&existing.length){
+        // Incremental: merge new messages into existing cache (deduplicate by id)
+        const existingIds=new Set(existing.map(m=>m.id));
+        const newMsgs=d.filter(m=>!existingIds.has(m.id));
+        merged=mergePendingReactionState(id,[...existing,...newMsgs]);
+      } else {
+        merged=mergePendingReactionState(id,d);
+      }
       threadCache.current.set(id,merged);
       setMsgThreadId(id);
       setMsgs(merged);
       setLoadingThread('');
       onDmRead(id);
-      console.debug('[DM] load ok', {id,count:d.length,seq});
+      console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
@@ -8854,7 +8869,10 @@ function App(){
               triggerPollRef.current&&triggerPollRef.current();
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
-              api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
+              // Use /api/poll (served from cache) to refresh both DM unread and notifications at once
+              api.get('/api/poll').then(r=>{
+                if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
+              }).catch(()=>{});
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
             }
             if(msg.type==='presence'){
@@ -9064,50 +9082,50 @@ function App(){
   },[dark]);
 
   const prevDmsRef=useRef([]);
-  useEffect(()=>{
-    if(!cu)return;
-    // Startup jitter: delay 3–8 s so dm/unread doesn't collide with bootstrap on mount
-    const startDelay=3000+Math.random()*5000;
-    const startTimer=setTimeout(()=>{
-      api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}});
-    },startDelay);
-    const id=setInterval(()=>{
-      api.get('/api/dm/unread').then(d=>{
-        if(!Array.isArray(d))return;
-        const prev=prevDmsRef.current;
-        d.forEach(x=>{
-          const old=prev.find(p=>p.sender===x.sender);
-          if(!old||(x.cnt||0)>(old.cnt||0)){
-            const sender=data.users.find(u=>u.id===x.sender);
-            const sname=sender?sender.name:'Someone';
-            window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
-            showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
-            playSound('notif');
-          }
-        });
-        prevDmsRef.current=d;
-        setDmUnread(d);
-      });
-    },15000); // fallback only — SSE is primary for environments where SSE is delayed/disconnected
-    return()=>{clearTimeout(startTimer);clearInterval(id);};
-  },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
-
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
   const NTITLES={
     task_assigned:'✅ Task assigned to you', status_change:'🔄 Task status changed', comment:'💬 New comment on task', deadline:'⏰ Deadline approaching', dm:'📨 New direct message', project_added:'📁 Added to a project', reminder:'⏰ Reminder', call:'📞 Huddle call', message:'#️⃣ New channel message', };
   const NNAV={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
+
+  // Unified poll: dm_unread + notifications in ONE request instead of two.
+  // Saves a full DB connection per polling cycle per user.
   useEffect(()=>{
     if(!cu)return;
 
     const pollOnce=()=>{
-      api.get('/api/notifications').then(d=>{
-        if(!Array.isArray(d))return;
+      api.get('/api/poll').then(result=>{
+        if(!result||result.error)return;
+
+        // ── DM unread ──────────────────────────────────────────────
+        const dms=result.dm_unread;
+        if(Array.isArray(dms)){
+          const prev=prevDmsRef.current;
+          dms.forEach(x=>{
+            const old=prev.find(p=>p.sender===x.sender);
+            if(!old||(x.cnt||0)>(old.cnt||0)){
+              const sender=data.users.find(u=>u.id===x.sender);
+              const sname=sender?sender.name:'Someone';
+              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
+              showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
+              playSound('notif');
+            }
+          });
+          prevDmsRef.current=dms;
+          setDmUnread(dms);
+        }
+
+        // ── Notifications ──────────────────────────────────────────
+        const notifs=result.notifications;
+        if(!Array.isArray(notifs))return;
         if(prevNotifIdsRef.current===null){
-          prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-          setData(prev=>({...prev,notifs:d}));
+          prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+          setData(prev=>({...prev,notifs}));
+          const unread=notifs.filter(n=>!n.read).length;
+          const dmTotal=(result.dm_unread||[]).reduce((a,x)=>a+(x.cnt||0),0);
+          updateBadge(unread+dmTotal);
           return;
         }
-        const brandNew=d.filter(n=>!prevNotifIdsRef.current.has(n.id));
+        const brandNew=notifs.filter(n=>!prevNotifIdsRef.current.has(n.id));
         brandNew.forEach(n=>{
           if(n.type==='call') return;
           const title=NTITLES[n.type]||'Project Tracker';
@@ -9122,56 +9140,33 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='task'){
               _setView('tasks');
-              setTimeout(()=>{
-                const taskEl=document.querySelector(`[data-task-id="${n.entity_id}"]`);
-                if(taskEl)taskEl.click();
-              },100);
+              setTimeout(()=>{const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
-            else if(n.entity_id && n.entity_type==='project'){
-              setActiveProject(n.entity_id);
-              _setView('projects');
-            }
+            else if(n.entity_id && n.entity_type==='project'){setActiveProject(n.entity_id);_setView('projects');}
             else if(n.entity_id && n.entity_type==='ticket'){
               _setView('tickets');
-              setTimeout(()=>{
-                const ticketEl=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);
-                if(ticketEl)ticketEl.click();
-              },100);
+              setTimeout(()=>{const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
-            else if(n.entity_type==='message' && n.entity_id){
-              setActiveProject(n.entity_id);
-              _setView('messages');
-            }
+            else if(n.entity_type==='message' && n.entity_id){setActiveProject(n.entity_id);_setView('messages');}
             else{_setView(nav);}
           },{tag:'notif-'+n.id});
           playSound('notif');
         });
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        const dmTotal=dmUnread.reduce((a,x)=>a+(x.cnt||0),0);
+        prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+        setData(prev=>({...prev,notifs}));
+        const unread=notifs.filter(n=>!n.read).length;
+        const dmTotal=(Array.isArray(dms)?dms:dmUnread).reduce((a,x)=>a+(x.cnt||0),0);
         updateBadge(unread+dmTotal);
       });
     };
 
-    // Startup jitter: delay 6–14 s so notifications don't collide with bootstrap or dm/unread
-    const notifStartDelay=6000+Math.random()*8000;
-    const notifStartTimer=setTimeout(()=>{
-      api.get('/api/notifications').then(d=>{
-        if(Array.isArray(d)){
-          prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-          setData(prev=>({...prev,notifs:d}));
-          const unread=d.filter(n=>!n.read).length;
-          updateBadge(unread+dmUnread.reduce((a,x)=>a+(x.cnt||0),0));
-        }
-      });
-    },notifStartDelay);
-
+    // Startup jitter: 5–13 s delay so poll doesn't collide with bootstrap on mount
+    const startDelay=5000+Math.random()*8000;
+    const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-
-    const id=setInterval(pollOnce, 20000); // fallback only — SSE is primary
-    return()=>{ clearTimeout(notifStartTimer); clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
-  },[cu,addToast]);
+    const id=setInterval(pollOnce,20000); // fallback only — SSE is primary
+    return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
+  },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 
   const onDmRead=useCallback(sid=>{
     setDmUnread(prev=>prev.filter(x=>x.sender!==sid));
