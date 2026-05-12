@@ -345,7 +345,7 @@ def update_project(pid):
             flat=[v for i,uid in enumerate(newly_added)
                   for v in (f"n{base_ts+i}",wid(),"project_added",
                             f"{aname} added you to project '{updated['name']}'",uid,0,ts())]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES {placeholders}",flat)
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
             for uid in newly_added:
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
@@ -451,7 +451,7 @@ def create_task():
     if not d.get("title"): return jsonify({"error":"Title required"}),400
     with get_db() as db:
         tid=next_task_id(db,wid())
-        db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
                     d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
                     ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
@@ -483,7 +483,7 @@ def create_task():
         if notif_rows:
             placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(notif_rows))
             flat=[v for row in notif_rows for v in row]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES {placeholders}",flat)
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
         # Send emails + push notifications in background threads (non-blocking)
         if assignee_user:
             if assignee_user["email"]:
@@ -504,7 +504,7 @@ def create_task():
             assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
             sysmid=f"m{base_ts+1}"
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
-            db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
         _cache_inject_item(wid(), "tasks", dict(t))
         # Bust full workspace cache so app-data background refresh picks up the new task.
@@ -657,7 +657,7 @@ def update_task(tid):
                                   f"{aname} updated the task stage", "/"),
                             daemon=True).start()
                 sysmid=f"m{base_ts2+2}"
-                db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                            (sysmid,wid(),"system",t["project"],
                             f"⚡ **{aname}** moved **{t['title']}** → {d['stage'].title()}",ts(),1))
         new_comments=d.get("comments",[])
@@ -667,7 +667,7 @@ def update_task(tid):
             commenter=db.execute("SELECT name FROM users WHERE id=?",(latest.get("uid",""),)).fetchone()
             cname=commenter["name"] if commenter else "Someone"
             sysmid=f"m{int(datetime.now().timestamp()*1000)+3}"
-            db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",t["project"],
                         f"💬 **{cname}** commented on **{t['title']}**: {latest.get('text','')}",ts(),1))
             if t["assignee"] and t["assignee"]!=session["user_id"]:

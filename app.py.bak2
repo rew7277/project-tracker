@@ -2593,7 +2593,7 @@ def _seed_demo(db, ws_id):
         ("T-012","Chart components",           "Interactive visualization components.",               "p3","u4","medium","code_review","2025-06-15", 85),
         ("T-013","Data pipeline setup",        "ETL pipeline for real-time data ingestion.",          "p3","u2","high",  "blocked",    "2025-06-01", 30),
     ]:
-        try: db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",(t[0],ws_id,t[1],t[2],t[3],t[4],t[5],t[6],ts(),t[7],t[8],"[]"))
+        try: db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",(t[0],ws_id,t[1],t[2],t[3],t[4],t[5],t[6],ts(),t[7],t[8],"[]"))
         except: pass
     for m in [
         ("m1","u2","p1","Just pushed the auth API to staging!"),
@@ -2601,7 +2601,7 @@ def _seed_demo(db, ws_id):
         ("m3","u4","p1","@alice Can you review the product catalog PR?"),
         ("m4","u1","p1","Sure! Checking it after standup."),
     ]:
-        try: db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts) VALUES (?,?,?,?,?,?)",(m[0],ws_id,m[1],m[2],m[3],ts()))
+        try: db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",(m[0],ws_id,m[1],m[2],m[3],ts()))
         except: pass
     for n in [
         ("n1","task_assigned","You have been assigned to Cart & checkout flow","u4",0),
@@ -4843,7 +4843,7 @@ def update_project(pid):
                   for v in (f"n{base_ts+i}",wid(),"project_added",
                             f"{aname} added you to project '{updated['name']}'",uid,0,ts(),pid,'project')]
             placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(newly_added))
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
             for uid in newly_added:
                 _enqueue_push(push_notification_to_user, *(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
                           f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"))
@@ -4950,7 +4950,7 @@ def create_task():
         # Use RETURNING * to get the row back without a separate SELECT (saves 1 round-trip)
         try:
             t_rows=db.execute(
-                "INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
                 (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
                  d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
                  ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
@@ -4958,7 +4958,7 @@ def create_task():
             ).fetchall()
             t = t_rows[0] if t_rows else None
         except Exception:
-            db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (tid,wid(),d["title"],d.get("description",""),d.get("project",""),
                         d.get("assignee",""),d.get("priority","medium"),d.get("stage","backlog"),
                         ts(),d.get("due",""),d.get("pct",0),json.dumps(d.get("comments",[])),
@@ -4994,7 +4994,7 @@ def create_task():
         if notif_rows:
             placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
             flat=[v for row in notif_rows for v in row]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
+            db.execute(f"INSERT INTO notifications VALUES {placeholders}",flat)
         # Send emails + push notifications in background threads (non-blocking)
         _task_url=f"/?action=task&id={tid}"
         if assignee_user:
@@ -5016,7 +5016,7 @@ def create_task():
             assignee_name=f" → assigned to {assignee_user['name']}" if assignee_user else ""
             sysmid=f"m{base_ts+1}"
             msg=f"📋 **{cname}** created task **{d['title']}**{assignee_name} [{d.get('priority','medium').title()}]"
-            db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",d["project"],msg,ts(),1))
         _cache_inject_item(wid(), "tasks", dict(t))
         # Targeted bust: only invalidate tasks + appdata caches.
@@ -5166,7 +5166,7 @@ def update_task(tid):
                         _enqueue_push(push_notification_to_user, *(db, uid, f"🔄 {t['title']} → {d['stage']}",
                                   f"{aname} updated the task stage", f"/?action=task&id={tid}"))
                 sysmid=f"m{base_ts2+2}"
-                db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                            (sysmid,wid(),"system",t["project"],
                             f"⚡ **{aname}** moved **{t['title']}** → {d['stage'].title()}",ts(),1))
         new_comments=d.get("comments",[])
@@ -5176,7 +5176,7 @@ def update_task(tid):
             commenter=db.execute("SELECT name FROM users WHERE id=?",(latest.get("uid",""),)).fetchone()
             cname=commenter["name"] if commenter else "Someone"
             sysmid=f"m{int(datetime.now().timestamp()*1000)+3}"
-            db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                        (sysmid,wid(),"system",t["project"],
                         f"💬 **{cname}** commented on **{t['title']}**: {latest.get('text','')}",ts(),1))
             if t["assignee"] and t["assignee"]!=session["user_id"]:
@@ -5392,7 +5392,7 @@ def send_message():
     d=request.json or {}
     mid=f"m{int(datetime.now().timestamp()*1000)}"
     with get_db() as db:
-        db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
                    (mid,wid(),session["user_id"],d.get("project",""),d.get("content",""),ts(),0))
         sender=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
         sender_name=sender["name"] if sender else "Someone"
@@ -6550,7 +6550,7 @@ IMPORTANT: Always be helpful and concise. When performing actions, explain what 
             with get_db() as db:
                 if atype=="create_task":
                     tid=next_task_id(db,wid())
-                    db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                                (tid,wid(),act.get("title","New Task"),act.get("description",""),
                                 act.get("project",""),act.get("assignee",""),
                                 act.get("priority","medium"),act.get("stage","backlog"),
@@ -6909,7 +6909,7 @@ def import_csv():
                     if u: assignee_id = u["id"]
                     else: assignee_id = ""
                 tid = next_task_id(db, wid())
-                db.execute("INSERT INTO tasks(id,workspace_id,title,description,project,assignee,priority,stage,created,due,pct,comments) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                            (tid, wid(), title, row.get("description",""), proj_id,
                             assignee_id, pri, stage, ts(), due, pct, "[]"))
                 created_tasks += 1

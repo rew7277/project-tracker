@@ -4000,7 +4000,6 @@ function MessagesView({projects,users,cu,tasks}){
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
     const cached=msgCacheRef.current.get(pid);
     if(cached){setMsgs(cached);setLoadingChannel('');}
-    else {setMsgs([]);setLoadingChannel(pid);}
     loadMsgs(pid,'switch');
   },[pid,loadMsgs]);
 
@@ -4114,33 +4113,6 @@ function MessagesView({projects,users,cu,tasks}){
     }
     return rows;
   },[allProjects,chanSearch,newMsgProjects]);
-
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
 
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
 
@@ -4358,7 +4330,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(initialUserId||'');
+  const [toId,setToId]=useState(others[0]&&others[0].id||'');
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
@@ -4431,7 +4403,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(cached){
       setMsgThreadId(id);
       setMsgs(cached);
-      setLoadingThread('');
+      setLoadingThread(id);
     }else{
       setMsgThreadId('');
       setMsgs([]);
@@ -4449,7 +4421,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id)return;
     const seq=++reqSeq.current;
     activeToRef.current=id;
-    if(!threadCache.current.has(id))setLoadingThread(id);
+    if(!threadCache.current.has(id))setLoadingThread('');
     console.debug('[DM] load start', {id,reason,seq});
     const d=await api.get('/api/dm/'+id,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
@@ -4474,8 +4446,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
-    else setLoadingThread(toId);
+    if(cached){setMsgThreadId(toId);setMsgs(cached);}
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
@@ -4508,38 +4479,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
   },[toId,loadMsgs,onDmRead,mergePendingReactionState]);
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
-
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
   const applyDmPatch=useCallback((updated,peerHint)=>{
     if(!updated||!updated.id)return;
@@ -4742,33 +4681,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(activeToRef.current)loadMsgs(activeToRef.current,'reaction-rollback');
     }
   },[applyReactionMessage,optimisticToggleReaction,loadMsgs]);
-  // Warm channel message cache immediately. First click on a channel should render
-  // from memory; the network refresh then silently reconciles in the background.
-  const channelPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(channelPrefetchedRef.current||!allProjects.length)return;
-    channelPrefetchedRef.current=true;
-    let cancelled=false;
-    const ids=allProjects.map(p=>p.id).filter(Boolean);
-    const fetchOne=async(id)=>{
-      if(msgCacheRef.current.has(id))return;
-      const d=await api.get('/api/messages?project='+encodeURIComponent(id),{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        msgCacheRef.current.set(id,d);
-        if(id===pidRef.current){setMsgs(d);setLoadingChannel('');}
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await fetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[allProjects.length]);
-
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
@@ -6460,38 +6372,6 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
-
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
