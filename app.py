@@ -723,15 +723,20 @@ def _cache_bust(workspace_id, *tables):
     """Invalidate specific table caches for a workspace on writes."""
     if _redis_client is not None:
         try:
-            pattern = f"ptcache:*{workspace_id}*"
-            keys = _redis_client.keys(pattern)
-            for k in keys:
-                raw = _redis_client.get(k)
-                if raw:
-                    for t in tables:
-                        if t in k:
-                            _redis_client.delete(k)
-                            break
+            keys_to_delete = []
+            for t in tables:
+                # Use targeted pattern per table — much faster than scanning all ws keys
+                pattern = f"ptcache:{t}:{workspace_id}*"
+                matched = _redis_client.keys(pattern)
+                keys_to_delete.extend(matched)
+                # Also bust appdata cache which embeds multiple tables
+                if t != "appdata":
+                    appdata_pattern = f"ptcache:appdata:{workspace_id}*"
+                    keys_to_delete.extend(_redis_client.keys(appdata_pattern))
+            # Deduplicate and delete in one round-trip
+            unique_keys = list(set(keys_to_delete))
+            if unique_keys:
+                _redis_client.delete(*unique_keys)
             return
         except Exception:
             pass
@@ -2454,6 +2459,8 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_time_logs_ws_project_task_date ON time_logs(workspace_id, project_id, task_id, date)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)",
             "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target)",
+            # Optimized index for DM conversation fetch (UNION query: each branch hits this index)
+            "CREATE INDEX IF NOT EXISTS idx_dm_conversation ON direct_messages(workspace_id, sender, recipient, ts DESC)",
             # Soft-delete support
             "ALTER TABLE users ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN deleted_at TEXT DEFAULT ''",
@@ -5421,31 +5428,51 @@ def get_dm(other_id):
                 since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
             except (ValueError, TypeError):
                 since_str = since  # caller passed an ISO string directly
+            # UNION instead of OR: Postgres can use the index on each branch separately
             rows=db.execute(
                 """SELECT * FROM direct_messages
-                   WHERE workspace_id=?
-                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
-                     AND ts > ?
+                   WHERE workspace_id=? AND sender=? AND recipient=? AND ts > ?
+                   UNION ALL
+                   SELECT * FROM direct_messages
+                   WHERE workspace_id=? AND sender=? AND recipient=? AND ts > ?
                    ORDER BY ts""",
-                (ws_id, me, other_id, other_id, me, since_str)
+                (ws_id, me, other_id, since_str, ws_id, other_id, me, since_str)
             ).fetchall()
         else:
             # Full load — cap at 200 most recent to bound response size.
+            # UNION instead of OR: each branch can use idx_dm_sender_ws independently
             rows=db.execute(
-                """SELECT * FROM direct_messages
-                   WHERE workspace_id=?
-                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
+                """SELECT * FROM (
+                     SELECT * FROM direct_messages
+                     WHERE workspace_id=? AND sender=? AND recipient=?
+                     ORDER BY ts DESC LIMIT 200
+                   ) a
+                   UNION ALL
+                   SELECT * FROM (
+                     SELECT * FROM direct_messages
+                     WHERE workspace_id=? AND sender=? AND recipient=?
+                     ORDER BY ts DESC LIMIT 200
+                   ) b
                    ORDER BY ts DESC LIMIT 200""",
-                (ws_id, me, other_id, other_id, me)
+                (ws_id, me, other_id, ws_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
-        db.execute(
-            "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) "
+        # Mark incoming messages as read — only if there are unread ones (avoids needless cache bust)
+        unread_count = db.execute(
+            "SELECT COUNT(*) FROM direct_messages "
             "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-            (ts(), ws_id, other_id, me)
-        )
+            (ws_id, other_id, me)
+        ).fetchone()[0]
+        if unread_count:
+            db.execute(
+                "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) "
+                "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+                (ts(), ws_id, other_id, me)
+            )
         data=_attach_dm_reactions(db, ws_id, rows)
-    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    # Only bust caches if we actually just marked messages as read
+    if unread_count:
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     return jsonify(data)
 
 
@@ -5935,7 +5962,8 @@ def create_ticket():
                           rname,tid,d.get("priority","medium"),wid()),
                     daemon=True).start()
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
-    _cache_bust_ws(wid())
+    # Targeted bust: only tickets + appdata. Avoids wiping user/project/task caches.
+    _cache_bust(wid(), "tickets", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     return jsonify(result)
 @login_required
@@ -5974,7 +6002,7 @@ def update_ticket(tid):
                         args=(_tkt_user["email"], _tkt_user["name"], t["title"],
                               d["status"], _tkt_changer_name, tid, wid()),
                         daemon=True).start()
-    _cache_bust_ws(wid())
+    _cache_bust(wid(), "tickets", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
     return jsonify(result)
@@ -5987,7 +6015,7 @@ def delete_ticket(tid):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tickets."}),403
         db.execute("DELETE FROM tickets WHERE id=? AND workspace_id=?",(tid,wid()))
         db.execute("DELETE FROM ticket_comments WHERE ticket_id=? AND workspace_id=?",(tid,wid()))
-    _cache_bust_ws(wid())
+    _cache_bust(wid(), "tickets", "appdata")
     return jsonify({"ok":True})
 
 @app.route("/api/tickets/<tid>/comments", methods=["GET"])

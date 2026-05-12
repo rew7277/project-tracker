@@ -1895,6 +1895,13 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
       onClose();
       return payload;
     }
+    if(isEdit&&!rmEnabled){
+      // Task EDIT: close immediately, save runs in background (optimistic)
+      onSave(payload).catch(()=>{});
+      setSaving(false);
+      if(!opts.keepOpen)onClose();
+      return payload;
+    }
     const result=await onSave(payload);
     setSaving(false);
     if(result&&result.error){setErr(result.error);return null;}
@@ -2222,7 +2229,9 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
         projects:prev.projects.map(p=>p.id===project.id?{...p,...saved}:p)
       }));
     }
-    await onReload();setSaving(false);setEdit(false);
+    // Close immediately — don't block on full reload (fires in background)
+    setSaving(false);setEdit(false);
+    onReload();
   };
   const delProject=async()=>{
     if(!window.confirm('Delete project and all its tasks? Cannot be undone.'))return;
@@ -4491,6 +4500,26 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reqSeq=useRef(0);
   const threadCache=useRef(new Map());
   const pendingReactionUntil=useRef(new Map());
+  // Pre-warm DM thread cache for the most recently active contacts so switching
+  // conversations shows messages instantly instead of the ⏳ spinner.
+  useEffect(()=>{
+    const topIds=[
+      // Prioritize contacts with unread messages first, then remaining users
+      ...safe(dmUnread).map(x=>x.sender),
+      ...safe(others).map(u=>u.id)
+    ].filter((v,i,a)=>a.indexOf(v)===i).slice(0,5); // dedupe, limit to 5
+    topIds.forEach((uid,i)=>{
+      if(threadCache.current.has(uid))return; // already cached
+      // Stagger prefetches so we don't hammer the server simultaneously
+      setTimeout(()=>{
+        if(threadCache.current.has(uid))return;
+        api.get('/api/dm/'+uid,{quiet:true}).then(d=>{
+          if(Array.isArray(d))threadCache.current.set(uid,d);
+        }).catch(()=>{});
+      }, i*400); // 0ms, 400ms, 800ms, 1200ms, 1600ms
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
@@ -4583,10 +4612,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     loadMsgs(toId,'selected');
     const id=setInterval(async()=>{
       const requestedTo=toId;
-      const d=await api.get('/api/dm/'+requestedTo,{quiet:true});
+      // Use ?since= for incremental fetch — only get NEW messages instead of re-fetching all 200
+      const cached=threadCache.current.get(requestedTo)||[];
+      const lastMsg=cached.length?cached[cached.length-1]:null;
+      const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+      const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true});
       if(requestedTo!==activeToRef.current)return;
       if(Array.isArray(d)){
-        const merged=mergePendingReactionState(requestedTo,d);
+        if(sinceParam&&d.length===0)return; // No new messages — nothing to do
+        const existing=threadCache.current.get(requestedTo)||[];
+        // Merge new incremental messages into existing cache
+        const merged=sinceParam
+          ? mergePendingReactionState(requestedTo,[...existing,...d])
+          : mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
         threadCache.current.set(requestedTo,merged);
         setLoadingThread('');
@@ -5493,10 +5531,31 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
 
   const saveTicket=async()=>{
     if(!nTitle.trim())return;
-    setSaving(true);
     const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    try{ if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);} else {await api.post('/api/tickets',payload);} }
-    finally{setSaving(false);setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');load();}
+    if(editTicket){
+      // EDIT: optimistic update
+      setSaving(true);
+      setTickets(prev=>prev.map(t=>t.id===editTicket.id?{...t,...payload}:t));
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{await api.put('/api/tickets/'+editTicket.id,payload);}
+      finally{setSaving(false);load();}
+    } else {
+      // CREATE: optimistic — show ticket immediately, close modal, save in background
+      const tempId='tmptkt_'+Date.now();
+      const tempTicket={...payload,id:tempId,reporter:cu.id,created:new Date().toISOString(),updated:new Date().toISOString(),tags:'[]',_pending:true};
+      setTickets(prev=>[tempTicket,...prev]);
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{
+        const result=await api.post('/api/tickets',payload);
+        if(result&&result.id){
+          setTickets(prev=>prev.map(t=>t.id===tempId?{...result}:t));
+        } else {
+          setTickets(prev=>prev.filter(t=>t.id!==tempId));
+        }
+      }catch(e){
+        setTickets(prev=>prev.filter(t=>t.id!==tempId));
+      }
+    }
   };
   const openEdit=(t)=>{setEditTicket(t);setNTitle(t.title||'');setNDesc(t.description||'');setNType(t.type||'bug');setNPriority(t.priority||'medium');setNAssignee(t.assignee||'');setNProject(t.project||'');setNStatus(t.status||'open');setShowNew(true);};
   const openDetail=async(t)=>{setDetailTicket(t);setCopilotOpen(true);try{const c=await api.get('/api/tickets/'+t.id+'/comments');setComments(Array.isArray(c)?c:[]);}catch(e){setComments([]);}};
@@ -5773,7 +5832,7 @@ function WorkspaceSettings({cu,onReload}){
     if(smtpPassword&&!smtpPassword.startsWith('•'))payload.smtp_password=smtpPassword;
     await api.put('/api/workspace',payload);
     setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2000);
-    await onReload();
+    onReload();
   };
 
   const sendTestEmail=async()=>{
