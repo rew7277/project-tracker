@@ -3862,6 +3862,13 @@ function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
+  const callIdMatch=raw.match(/CALL_INVITE:([^\n]+)/);
+  if(callIdMatch || /📞\s*Incoming video call/i.test(raw)){
+    const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
+    const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Teammate').trim();
+    const ended=/accepted the call|rejected the call|ended the call/i.test(raw)||['ended','rejected','accepted'].includes(status);
+    return `<div style="min-width:210px;max-width:300px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:white">📞</span><span>${ended?'Call update':'Video call'}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${ended?safe.replace(/\n/g,'<br>'):(escapeHtml(from)+' is calling. Use the popup to accept or reject.')}</div></div>`;
+  }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
   if(meetMatch || /📹\s*Google Meet call/i.test(raw)){
     const url=meetMatch?meetMatch[0]:'';
@@ -4173,7 +4180,32 @@ function MessagesView({projects,users,cu,tasks}){
     return()=>{cancelled=true;};
   },[allProjects.length]);
 
-  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}</style><div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
+  const respondIncomingCall=async(action)=>{
+    const call=incomingCall;
+    if(!call)return;
+    dismissedCallIds.current.add(call.callId);
+    setIncomingCall(null);
+    try{
+      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
+      if(action==='accept') window.open((r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new','_blank','noopener,noreferrer');
+      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
+    }catch(e){
+      console.warn('[DM] call response failed',e);
+      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    }
+  };
+  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.45)}70%{box-shadow:0 0 0 18px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}</style>
+  ${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.62)',backdropFilter:'blur(8px)'}}>
+    <div style=${{width:360,maxWidth:'92vw',border:'1px solid rgba(239,68,68,.42)',borderRadius:24,padding:22,background:'linear-gradient(145deg,rgba(15,23,42,.98),rgba(30,41,59,.96))',boxShadow:'0 30px 90px rgba(0,0,0,.65)',textAlign:'center'}}>
+      <div style=${{width:74,height:74,borderRadius:'50%',margin:'0 auto 14px',display:'flex',alignItems:'center',justifyContent:'center',background:'#ef4444',color:'#fff',fontSize:32,animation:'callPulse 1.25s infinite'}}>📞</div>
+      <div style=${{fontSize:18,fontWeight:950,color:'var(--tx)',marginBottom:6}}>Incoming video call</div>
+      <div style=${{fontSize:14,color:'var(--tx2)',lineHeight:1.5,marginBottom:18}}><b>${incomingCall.from}</b> is calling you.</div>
+      <div style=${{display:'flex',gap:10,justifyContent:'center'}}>
+        <button class="btn" style=${{border:'none',background:'#ef4444',color:'#fff',fontWeight:900,padding:'11px 18px',borderRadius:999}} onClick=${()=>respondIncomingCall('reject')}>Reject</button>
+        <button class="btn" style=${{border:'none',background:'#22c55e',color:'#fff',fontWeight:900,padding:'11px 20px',borderRadius:999}} onClick=${()=>respondIncomingCall('accept')}>Accept</button>
+      </div>
+    </div>
+  </div>`:null}<div class="fi" style=${{display:'flex',height:'100%',overflow:'hidden'}}>
 
         <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
             <div style=${{padding:'10px 10px 8px',borderBottom:'1px solid var(--bd)',flexShrink:0}}>
@@ -4405,6 +4437,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [remoteTyping,setRemoteTyping]=useState(false);
   const [recording,setRecording]=useState(false);
   const [startingMeet,setStartingMeet]=useState(false);
+  const [incomingCall,setIncomingCall]=useState(null);
+  const dismissedCallIds=useRef(new Set());
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
   const typingTimerRef=useRef(null);
@@ -4416,6 +4450,23 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
   const pendingReactionUntil=useRef(new Map());
+  const parseIncomingCall=(m)=>{
+    if(!m||!m.content)return null;
+    const raw=String(m.content||'');
+    const id=((raw.match(/CALL_INVITE:([^
+]+)/)||[])[1]||'').trim();
+    if(!id || dismissedCallIds.current.has(id))return null;
+    const status=((raw.match(/CALL_STATUS:([^
+]+)/)||[])[1]||'ringing').trim().toLowerCase();
+    if(status && status!=='ringing')return null;
+    if(m.recipient && m.recipient!==cu.id)return null;
+    const from=((raw.match(/CALL_FROM:([^
+]+)/)||[])[1]||((users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
+    const meetUrl=((raw.match(/MEET_LINK:([^
+]+)/)||[])[1]||'https://meet.google.com/new').trim();
+    return {callId:id,from,meetUrl,peerId:m.sender,messageId:m.id};
+  };
+
   const openMsgMenu=(ev,m)=>{
     ev.stopPropagation();
     setReactionPickerFor('');
@@ -4528,6 +4579,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
+      if(msg&&msg.type==='dm_created'&&data){
+        const m=data.message||data;
+        const inc=parseIncomingCall(m);
+        if(inc)setIncomingCall(inc);
+      }
       if(msg&&msg.type==='dm_typing'&&data){if(data.sender===toId){setRemoteTyping(!!data.typing);if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);}return;}
       if(msg&&['dm_updated','dm_deleted','dm_pinned','dm_seen'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
       if(msg&&msg.type==='dm_reaction'&&data){
@@ -4574,6 +4630,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
+  useEffect(()=>{
+    const inc=[...safe(msgs)].reverse().map(parseIncomingCall).find(Boolean);
+    if(inc)setIncomingCall(v=>v||inc);
+  },[msgs]);
   function applyDmPatch(updated,peerHint){
     if(!updated||!updated.id)return;
     const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
@@ -4657,26 +4717,25 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const startGoogleMeetCall=async()=>{
     if(!toId||startingMeet)return;
     const peer=toUser&&toUser.name?toUser.name:'teammate';
+    const recipient=toId;
+    const tempId='tmpcall'+Date.now();
+    const localCallId='local'+Date.now();
+    const meetUrl='https://meet.google.com/new';
+    const body=`📞 Incoming video call\n${cu.name||'Someone'} is calling you.\nCALL_INVITE:${localCallId}\nCALL_FROM:${cu.name||'Someone'}\nCALL_STATUS:ringing\nMEET_LINK:${meetUrl}`;
+    const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:'',_pending:false,_local:true};
     setStartingMeet(true);
+    setMsgThreadId(recipient);
+    setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);return next;});
     try{
-      // Step 1: launch Google's real Meet creator. The app must not invent Meet codes.
-      const launch=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,title:`Call with ${peer}`},{quiet:true});
-      if(launch&&launch.ok===false){alert(launch.error||'Unable to start the Google Meet call.');return;}
-      window.open((launch&&launch.launchUrl)||'https://meet.new','_blank','noopener,noreferrer');
-
-      // Step 2: caller pastes the valid URL generated by Google; then we pull the DM user by sending a Join card.
-      const pasted=window.prompt('Google Meet opened in a new tab. Copy the generated Meet URL and paste it here to invite '+peer+'. Example: https://meet.google.com/abc-defg-hij');
-      if(!pasted){
-        if(typeof window.showToast==='function') window.showToast('Meet opened. Paste the generated Meet link here or send it manually when ready.','info');
-        return;
+      const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
+      if(r&&r.message){
+        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);return next;});
       }
-      const invite=await api.post('/api/calls/google-meet',{type:'dm',targetId:toId,meetUrl:pasted,title:`Call with ${peer}`},{quiet:true});
-      if(invite&&invite.ok===false){alert(invite.error||'Invalid Google Meet link.');return;}
-      loadMsgs(toId,'google-meet-invite-sent');
-      if(typeof window.showToast==='function') window.showToast('Google Meet invite sent to '+peer+'.','success');
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'…','success');
     }catch(e){
-      console.warn('[DM] video call failed',e);
-      alert('Unable to start the Google Meet call. Please try again.');
+      console.warn('[DM] instant call failed',e);
+      setMsgs(prev=>{const next=prev.filter(x=>x.id!==tempId);threadCache.current.set(recipient,next);return next;});
+      if(typeof window.showToast==='function') window.showToast('Unable to start call. Please try again.','error');
     }finally{setStartingMeet(false);}
   };
   const toggleRecording=async()=>{
@@ -4813,7 +4872,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
-              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:onlineUsers.has(u.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none',transition:'background .3s,box-shadow .3s'}}></div>
+              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#ef4444':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
               <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
@@ -4827,11 +4886,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         ${toUser?html`
           <div style=${{position:'relative'}}>
             <${Av} u=${toUser} size=${36}/>
-            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:onlineUsers.has(toUser.id)?'#22c55e':'#475569',border:'2px solid var(--bg)',boxShadow:onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none',transition:'background .3s,box-shadow .3s'}}></div>
+            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:activeCallUsers.has(toUser.id)?'#ef4444':(onlineUsers.has(toUser.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(toUser.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.7)':(onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
           </div>
           <div>
             <div style=${{fontSize:14,fontWeight:700,color:'var(--tx)'}}>${toUser.name}</div>
-            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)'),fontWeight:500}}>${remoteTyping?'typing…':(onlineUsers.has(toUser.id)?'Active now':'Offline')}</div>
+            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)'),fontWeight:500}}>${remoteTyping?'typing…':(activeCallUsers.has(toUser.id)?'In a call':(onlineUsers.has(toUser.id)?'Active now':'Offline'))}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
