@@ -8849,10 +8849,7 @@ function App(){
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
             window.dispatchEvent(new CustomEvent('pt:realtime',{detail:msg}));
-            if(['task_updated','project_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-              // Bust cache and reload — the server has already bust its own cache
-              load(teamCtx,true)
-            }
+            // pt:realtime listener (below) handles debounced reload — no double-fire here
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
@@ -8951,7 +8948,7 @@ function App(){
       const bustParam=bust?'bust=1':'';
       const teamParam=tCtx?'team_id='+tCtx:'';
       const qs=[teamParam,bustParam].filter(Boolean).join('&');
-      const appDataUrl='/api/dashboard/bootstrap'+(qs?'?'+qs:'');
+      const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
         console.warn('[Load] dashboard bootstrap failed; keeping current screen to avoid toast/refresh loops', d && d.error);
@@ -9069,7 +9066,11 @@ function App(){
   const prevDmsRef=useRef([]);
   useEffect(()=>{
     if(!cu)return;
-    api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}});
+    // Startup jitter: delay 3–8 s so dm/unread doesn't collide with bootstrap on mount
+    const startDelay=3000+Math.random()*5000;
+    const startTimer=setTimeout(()=>{
+      api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}});
+    },startDelay);
     const id=setInterval(()=>{
       api.get('/api/dm/unread').then(d=>{
         if(!Array.isArray(d))return;
@@ -9088,7 +9089,7 @@ function App(){
         setDmUnread(d);
       });
     },15000); // fallback only — SSE is primary for environments where SSE is delayed/disconnected
-    return()=>clearInterval(id);
+    return()=>{clearTimeout(startTimer);clearInterval(id);};
   },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
 
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
@@ -9153,19 +9154,23 @@ function App(){
       });
     };
 
-    api.get('/api/notifications').then(d=>{
-      if(Array.isArray(d)){
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        updateBadge(unread+dmUnread.reduce((a,x)=>a+(x.cnt||0),0));
-      }
-    });
+    // Startup jitter: delay 6–14 s so notifications don't collide with bootstrap or dm/unread
+    const notifStartDelay=6000+Math.random()*8000;
+    const notifStartTimer=setTimeout(()=>{
+      api.get('/api/notifications').then(d=>{
+        if(Array.isArray(d)){
+          prevNotifIdsRef.current=new Set(d.map(n=>n.id));
+          setData(prev=>({...prev,notifs:d}));
+          const unread=d.filter(n=>!n.read).length;
+          updateBadge(unread+dmUnread.reduce((a,x)=>a+(x.cnt||0),0));
+        }
+      });
+    },notifStartDelay);
 
     triggerPollRef.current=pollOnce;
 
     const id=setInterval(pollOnce, 20000); // fallback only — SSE is primary
-    return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
+    return()=>{ clearTimeout(notifStartTimer); clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
   const onDmRead=useCallback(sid=>{
@@ -9223,16 +9228,20 @@ function App(){
 
   useEffect(()=>{
     if(!cu)return;
-    const onRefresh=()=>load(undefined,{bust:true});
+    // Server already clears its cache on write — no client-side bust needed for SSE reloads
+    const onRefresh=()=>load(undefined,false);
+    let _realtimeDebounceTimer=null;
     const onRealtime=(e)=>{
       const msg=e.detail||{};
       if(['project_updated','task_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-        onRefresh();
+        // Debounce: batch rapid SSE events (e.g. bulk task updates) into one reload
+        clearTimeout(_realtimeDebounceTimer);
+        _realtimeDebounceTimer=setTimeout(()=>onRefresh(),800);
       }
     };
     window.addEventListener('pt:refresh', onRefresh);
     window.addEventListener('pt:realtime', onRealtime);
-    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+    return()=>{clearTimeout(_realtimeDebounceTimer);window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
   },[cu,load]);
 
   useEffect(()=>{
@@ -9280,9 +9289,11 @@ function App(){
         setUpcomingReminders(rems.filter(r=>!r.fired&&new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));
       }
     };
-    checkDue();
+    // Startup jitter: delay 10–20 s so reminders/due doesn't fire at t=0 with bootstrap
+    const remStartDelay=10000+Math.random()*10000;
+    const remStartTimer=setTimeout(()=>checkDue(),remStartDelay);
     const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
-    return()=>clearInterval(id);
+    return()=>{clearTimeout(remStartTimer);clearInterval(id);};
   },[cu,addToast]);
 
   const isDevRole=cu&&cu.role!=='Admin'&&cu.role!=='Manager';
