@@ -4624,11 +4624,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         }
         return;
       }
-      if(msg&&msg.type==='dm_created'&&data){
-        const m=data.message||data;
-        const inc=parseIncomingCall(m);
-        if(inc)setIncomingCall(inc);
-      }
+      // Call popups are driven only by live call_status SSE events, not by DM history/messages.
       if(msg&&msg.type==='dm_typing'&&data){if(data.sender===toId){setRemoteTyping(!!data.typing);if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);}return;}
       if(msg&&['dm_updated','dm_deleted','dm_pinned','dm_seen'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
       if(msg&&msg.type==='dm_reaction'&&data){
@@ -4675,10 +4671,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
-  useEffect(()=>{
-    const inc=[...safe(msgs)].reverse().map(parseIncomingCall).find(Boolean);
-    if(inc)setIncomingCall(v=>v||inc);
-  },[msgs]);
+  // Do NOT auto-open the call screen from old DM history.
+  // Incoming call UI must appear only from the live SSE `call_status:ringing` event,
+  // otherwise opening a chat with an old CALL_INVITE message shows a fake/default call.
   function applyDmPatch(updated,peerHint){
     if(!updated||!updated.id)return;
     const peer=peerHint||(updated.sender===cu.id?updated.recipient:updated.sender);
@@ -8875,6 +8870,71 @@ function App(){
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
+  const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
+  const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(new Set());
+  const globalDismissedCallIds=useRef(new Set());
+  const globalCallTimeoutRef=useRef(null);
+  const globalRingtoneRef=useRef(null);
+  const globalRingtoneCtxRef=useRef(null);
+
+  const stopGlobalRingtone=useCallback(()=>{
+    try{ if(globalRingtoneRef.current){ if(globalRingtoneRef.current._id)clearInterval(globalRingtoneRef.current._id); globalRingtoneRef.current.pause&&globalRingtoneRef.current.pause(); globalRingtoneRef.current.currentTime=0; } }catch{}
+    try{ if(globalRingtoneCtxRef.current){ globalRingtoneCtxRef.current.close(); } }catch{}
+    globalRingtoneRef.current=null; globalRingtoneCtxRef.current=null;
+    if(globalCallTimeoutRef.current){ clearTimeout(globalCallTimeoutRef.current); globalCallTimeoutRef.current=null; }
+  },[]);
+  const startGlobalRingtone=useCallback(()=>{
+    stopGlobalRingtone();
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      if(Ctx){
+        const ctx=new Ctx(); const gain=ctx.createGain(); gain.gain.value=0.05; gain.connect(ctx.destination);
+        const tick=()=>{
+          if(!globalRingtoneCtxRef.current)return;
+          const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain); osc.start(); osc.stop(ctx.currentTime+0.20);
+          setTimeout(()=>{try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
+        };
+        globalRingtoneCtxRef.current=ctx; tick(); globalRingtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1250)};
+        return;
+      }
+    }catch{}
+  },[stopGlobalRingtone]);
+
+  const respondGlobalIncomingCall=useCallback(async(action)=>{
+    const call=globalIncomingCall;
+    if(!call)return;
+    globalDismissedCallIds.current.add(call.callId);
+    stopGlobalRingtone();
+    setGlobalIncomingCall(null);
+    try{
+      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
+      if(action==='accept'){
+        setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+        setDmTargetUser(call.peerId);
+        _setView('dm');
+        const joinUrl=(r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new';
+        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        if(!w) window.location.href=joinUrl;
+      }
+    }catch(e){
+      console.warn('[Call] response failed',e);
+      if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');
+    }
+  },[globalIncomingCall,cu,stopGlobalRingtone,_setView]);
+
+  useEffect(()=>{
+    if(!globalIncomingCall){stopGlobalRingtone();return;}
+    startGlobalRingtone();
+    globalCallTimeoutRef.current=setTimeout(()=>{
+      const call=globalIncomingCall;
+      if(!call||globalDismissedCallIds.current.has(call.callId))return;
+      globalDismissedCallIds.current.add(call.callId);
+      stopGlobalRingtone();
+      setGlobalIncomingCall(null);
+      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
+    },45000);
+    return()=>stopGlobalRingtone();
+  },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
   // A single EventSource replaces the need for manual polling on task/project/
@@ -8901,6 +8961,24 @@ function App(){
               api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
               // Notify the active DM panel to refresh messages/call state immediately.
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
+            }
+            if(msg.type==='call_status'&&msg.data){
+              const d=msg.data||{};
+              const ids=new Set(d.users||[]);
+              if(d.status==='in_call')setGlobalActiveCallUsers(ids);
+              if(['rejected','ended','missed'].includes(d.status)){
+                setGlobalActiveCallUsers(new Set());
+                if(globalIncomingCall&&globalIncomingCall.callId===d.callId){
+                  globalDismissedCallIds.current.add(d.callId);
+                  stopGlobalRingtone();
+                  setGlobalIncomingCall(null);
+                }
+              }
+              if(d.status==='ringing'&&d.recipient===cu.id&&!globalDismissedCallIds.current.has(d.callId)){
+                const sender=(data.users||[]).find(u=>u.id===d.sender)||{};
+                setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl||'https://meet.google.com/new',peerId:d.sender});
+                showBrowserNotif('📞 Incoming video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
+              }
             }
             if(msg.type==='presence'){
               api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
@@ -9476,6 +9554,19 @@ function App(){
       </div>
       </div>
     </div>
+    ${globalIncomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:100000,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.70)',backdropFilter:'blur(10px)'}} onClick=${e=>{if(e.target===e.currentTarget){}}}>
+      <div style=${{width:'min(520px,92vw)',borderRadius:32,padding:'34px 28px',textAlign:'center',background:'radial-gradient(circle at 50% 0%,rgba(34,197,94,.18),rgba(15,23,42,.98) 48%,rgba(2,6,23,.98))',border:'1px solid rgba(255,255,255,.14)',boxShadow:'0 35px 110px rgba(0,0,0,.65)',color:'#fff'}}>
+        <div style=${{fontSize:13,fontWeight:900,letterSpacing:1.5,textTransform:'uppercase',color:'#93c5fd',marginBottom:18}}>Incoming video call</div>
+        <div style=${{width:112,height:112,borderRadius:'50%',margin:'0 auto 22px',display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#334155,#020617)',border:'3px solid rgba(255,255,255,.16)',boxShadow:'0 0 0 10px rgba(255,255,255,.04)',fontSize:48}}>📹</div>
+        <div style=${{fontSize:32,fontWeight:950,lineHeight:1.1,marginBottom:8}}>${globalIncomingCall.from}</div>
+        <div style=${{fontSize:14,color:'#cbd5e1',marginBottom:34}}>is inviting you to a Google Meet call</div>
+        <div style=${{display:'flex',justifyContent:'center',gap:34}}>
+          <button title="Disconnect" onClick=${()=>respondGlobalIncomingCall('reject')} style=${{width:82,height:82,borderRadius:'50%',border:'none',background:'#ef4444',color:'#fff',fontSize:34,cursor:'pointer',boxShadow:'0 18px 50px rgba(239,68,68,.42)',transform:'rotate(135deg)'}}>📞</button>
+          <button title="Connect" onClick=${()=>respondGlobalIncomingCall('accept')} style=${{width:82,height:82,borderRadius:'50%',border:'none',background:'#22c55e',color:'#fff',fontSize:34,cursor:'pointer',boxShadow:'0 18px 50px rgba(34,197,94,.42)'}}>📞</button>
+        </div>
+        <div style=${{display:'flex',justifyContent:'center',gap:47,marginTop:12,fontSize:13,fontWeight:900,color:'#e2e8f0'}}><span>Disconnect</span><span>Connect</span></div>
+      </div>
+    </div>`:null}
     <${AIAssistant} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>
     <!-- Global Search Spotlight — Cmd+K -->
     ${showGlobalSearch?html`

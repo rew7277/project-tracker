@@ -5594,6 +5594,30 @@ def _create_google_meet_event(access_token, title, attendee_emails=None):
         code = meet_url.rstrip("/").split("/")[-1]
     return {"event": event, "meetUrl": meet_url, "meetingCode": code}
 
+
+def _create_google_meet_space(access_token):
+    """Create a real Google Meet space using the Google Meet REST API.
+
+    This must run server-side with a valid OAuth access token. Browsers cannot
+    create Google Meet rooms anonymously; Google requires an authorized token.
+    """
+    if not access_token:
+        raise ValueError("Missing Google OAuth access token")
+    body = _json_mod.dumps({}).encode("utf-8")
+    req = _urlrequest.Request("https://meet.googleapis.com/v2/spaces", data=body, method="POST", headers={
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    })
+    with _urlrequest.urlopen(req, timeout=15) as resp:
+        space = _json_mod.loads(resp.read())
+    meet_url = space.get("meetingUri") or space.get("meetingUrl") or ""
+    return {"space": space, "meetUrl": meet_url, "meetingCode": space.get("meetingCode") or ""}
+
+def _server_google_token():
+    # Configure this on the server/Railway. It should be a valid Google OAuth
+    # access token for a Workspace/service account flow or a user OAuth flow.
+    return (os.environ.get("GOOGLE_MEET_ACCESS_TOKEN") or os.environ.get("GOOGLE_ACCESS_TOKEN") or "").strip()
+
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
@@ -5615,10 +5639,20 @@ def create_google_meet_call():
     me = session["user_id"]
     now = ts()
     call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
-    # Shared Google Meet nickname URL. /new creates a separate meeting per browser,
-    # but /lookup/<nickname> sends both caller and receiver to the same named room
-    # when Google Meet allows nickname-based instant meetings for the account/domain.
-    meet_url = f"https://meet.google.com/lookup/{call_id}"
+    # Prefer a real server-created Google Meet room. This does not require the
+    # caller/receiver to sign in to this app, but Google still requires the
+    # server to use an authorized OAuth token. Without GOOGLE_MEET_ACCESS_TOKEN
+    # we fall back to a same-call nickname URL; admins should configure the token
+    # for production to avoid Google prompting for account/login while creating.
+    meet_url = ""
+    meet_provider = "google_meet_api"
+    try:
+        created = _create_google_meet_space(_server_google_token())
+        meet_url = created.get("meetUrl") or ""
+    except Exception as e:
+        log.warning("[call] Google Meet API create failed; using nickname fallback: %s", e)
+        meet_provider = "google_meet_nickname_fallback"
+        meet_url = f"https://meet.google.com/lookup/{call_id}"
 
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
@@ -5657,14 +5691,14 @@ def create_google_meet_call():
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
         _bust_dm_thread(ws_id, me, target_id)
         _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "message": row})
-        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "recipient": target_id, "meetUrl": meet_url})
+        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "senderName": sender_name, "recipient": target_id, "recipientName": target_name, "meetUrl": meet_url})
         _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
     threading.Thread(target=_after_call_start, daemon=True).start()
 
     return jsonify({
         "ok": True,
         "mode": "instant_call_invite_sent",
-        "provider": "google_meet_instant",
+        "provider": meet_provider,
         "callId": call_id,
         "meetUrl": meet_url,
         "launchUrl": meet_url,
