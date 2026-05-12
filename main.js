@@ -4152,6 +4152,8 @@ function MessagesView({projects,users,cu,tasks}){
   const [showInfo,setShowInfo]=useState(false);
   const [chanSearch,setChanSearch]=useState('');
   const [newestFirst,setNewestFirst]=useState(false);
+  const [incomingCall,setIncomingCall]=useState(null);
+  const dismissedCallIds=useRef(new Set());
 
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
@@ -4573,6 +4575,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const dismissedCallIds=useRef(new Set());
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
+  const [activeCallUsers,setActiveCallUsers]=useState(new Set());
   const typingTimerRef=useRef(null);
   const ref=useRef(null);
   const activeToRef=useRef(toId);
