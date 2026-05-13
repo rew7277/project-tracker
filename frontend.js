@@ -3912,7 +3912,7 @@ function renderChatContent(text){
     // Accept/Reject is ONLY for fresh ringing calls. Completed, missed, rejected, ended,
     // expired, and accepted/in-call history cards are rendered as plain status cards.
     if(!isEnded&&callId&&hasValidMeet&&isRinging&&(!receiverId||receiverId===currentUserId)){
-      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
     const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
     const body=isEnded?'Call ended':(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling.'));
@@ -4534,7 +4534,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
-  const _dmCacheKey='pfDmThreadCache:v2';
+  const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
   const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
@@ -4810,9 +4810,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setLoadingThread('');
           setMsgs(prev=>{
             const base=Array.isArray(prev)?prev:[];
-            if(base.some(x=>x.id===m.id))return base;
-            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
-            const next=mergePendingReactionState(toId,[...withoutTmp,m]);
+            const existingIdx=base.findIndex(x=>x.id===m.id || (x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
+            if(existingIdx>=0){
+              const next=normalizeDmList(base.map((x,i)=>i===existingIdx?{...x,...m,_pending:false,_failed:false}:x));
+              setThreadMessages(toId,next,false);
+              return next;
+            }
+            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(String(x.id||'').startsWith('srvtmp')&&x.content===m.content&&x.sender===m.sender));
+            const next=mergePendingReactionState(toId,[...withoutTmp,{...m,_pending:false}]);
             setThreadMessages(toId,next,false);
             if(m.sender!==cu.id)playSound('notif');
             return normalizeDmList(next);
@@ -4986,7 +4991,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       ptCallStoreSet(r.callId,'ringing');
       if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting for them to accept','success');
     }catch(e){
-      try{if(hostWin&&!hostWin.closed)hostWin.close();}catch{}
       console.warn('[DM] Google Meet call failed',e);
       const msg=(e&&e.message)||'Unable to create Google Meet. Configure server Google OAuth first.';
       if(typeof window.showToast==='function') window.showToast(msg,'error');
@@ -7127,7 +7131,7 @@ async function requestNotifPermission(){
     if(p==='granted'){
       if(window._pfSWReg){
         try{
-          const r=fetch('/api/push/vapid-key',{credentials:'include'});
+          const r=await fetch('/api/push/vapid-key',{credentials:'include'});
           const d=await r.json();
           if(d.publicKey){
             const padding='='.repeat((4-d.publicKey.length%4)%4);

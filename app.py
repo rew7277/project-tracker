@@ -6019,6 +6019,20 @@ def send_dm():
     sender_name=users_map.get(me) or "Someone"
     preview=content[:60]+("..." if len(content)>60 else "")
 
+    # Push an immediate ephemeral DM event before the DB round-trip finishes.
+    # This makes the receiver see the message instantly even when PostgreSQL is slow.
+    # The committed row is published again after INSERT and replaces this temp row by client_msg_id.
+    try:
+        instant_row={
+            "id": "srvtmp"+mid, "workspace_id": ws_id, "sender": me, "recipient": recipient,
+            "content": content, "read": 0, "ts": now, "reply_to": reply_to or "",
+            "delivered_at": now, "seen_at": "", "edited": 0, "deleted": 0, "pinned": 0,
+            "client_msg_id": client_msg_id, "_instant": True
+        }
+        _sse_publish(ws_id, "dm_created", {"id": instant_row["id"], "sender": me, "recipient": recipient, "content": preview, "message": instant_row})
+    except Exception as e:
+        log.warning("[DM] instant SSE pre-publish failed: %s", e)
+
     # ── Round-trip 2: idempotency check + insert (client_msg_id preferred) ────
     row=None
     with get_db(autocommit=True) as db:
@@ -6089,7 +6103,7 @@ def send_dm():
     try:
         _bust_dm_thread(ws_id, me, recipient)
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+        _sse_publish(ws_id, "dm_created", {"id": row.get("id", mid), "sender": me, "recipient": recipient, "content": preview, "message": row})
         _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
         _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": mid})
     except Exception as e:
@@ -7401,9 +7415,9 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v2: no request interception */
+    js = """/* Project Tracker service worker v3: no request interception */
 self.addEventListener('install', event => self.skipWaiting());
-self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 """
     return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 

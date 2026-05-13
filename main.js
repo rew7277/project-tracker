@@ -48,7 +48,7 @@ async function _pfSetupPush(reg){
 
   var vapidKey='';
   try{
-    var r=fetch('/api/push/vapid-key',{credentials:'include'});
+    var r=await fetch('/api/push/vapid-key',{credentials:'include'});
     var d=await r.json();
     vapidKey=d.publicKey||'';
   }catch(e){ return; }
@@ -4069,10 +4069,10 @@ function renderChatContent(text){
     // Accept/Reject is ONLY for fresh ringing calls. Completed, missed, rejected, ended,
     // expired, and accepted/in-call history cards are rendered as plain status cards.
     if(!isEnded&&callId&&hasValidMeet&&isRinging&&(!receiverId||receiverId===currentUserId)){
-      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
     const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
-    const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
+    const body=isEnded?'Call ended':(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling you.'));
     return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
@@ -4384,20 +4384,22 @@ function MessagesView({projects,users,cu,tasks}){
     const call=incomingCall;
     if(!call)return;
     dismissedCallIds.current.add(call.callId);
+    stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)){
-        if(acceptWin){acceptWin.location.href=(r&&r.meetUrl)||call.meetUrl;trackDmMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
-      }
-      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[DM] call response failed',e);
-      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackDmMeetWindow==='function')trackDmMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+      ptCallStoreSet(call.callId,'in_call');
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{
+        if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
+        if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+      })
+      .catch(e=>{console.warn('[DM] call response failed',e);if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');});
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
@@ -4664,7 +4666,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const ref=useRef(null);
   const activeToRef=useRef(toId);
   const reqSeq=useRef(0);
-  const _dmCacheKey='pfDmThreadCache:v2';
+  const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
   const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
@@ -4917,9 +4919,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setLoadingThread('');
           setMsgs(prev=>{
             const base=Array.isArray(prev)?prev:[];
-            if(base.some(x=>x.id===m.id))return base;
-            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
-            const next=mergePendingReactionState(toId,[...withoutTmp,m]);
+            const existingIdx=base.findIndex(x=>x.id===m.id || (x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
+            if(existingIdx>=0){
+              const next=normalizeDmList(base.map((x,i)=>i===existingIdx?{...x,...m,_pending:false,_failed:false}:x));
+              setThreadMessages(toId,next,false);
+              return next;
+            }
+            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(String(x.id||'').startsWith('srvtmp')&&x.content===m.content&&x.sender===m.sender));
+            const next=mergePendingReactionState(toId,[...withoutTmp,{...m,_pending:false}]);
             setThreadMessages(toId,next,false);
             if(m.sender!==cu.id)playSound('notif');
             return normalizeDmList(next);
@@ -4994,9 +5001,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dmRecentSendRef.current={key:sendKey,at:Date.now()};
     const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false,_instant:true};
     setTxt('');setReplyTo(null);
-    setSending(true);
+    setSending(false);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -5068,8 +5075,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
     setStartingMeet(true);
-    const hostWin=window.open('about:blank','_blank');
-    // Keep ProjectTracker open and do not render any intermediate ProjectTracker-created page in the Meet tab.
+    // No intermediate about:blank tab. Open only the final Google Meet URL.
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(!r||!r.ok||!r.meetUrl){
@@ -5092,7 +5098,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       ptCallStoreSet(r.callId,'ringing');
       if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting for them to accept','success');
     }catch(e){
-      try{if(hostWin&&!hostWin.closed)hostWin.close();}catch{}
       console.warn('[DM] Google Meet call failed',e);
       const msg=(e&&e.message)||'Unable to create Google Meet. Configure server Google OAuth first.';
       if(typeof window.showToast==='function') window.showToast(msg,'error');
@@ -5219,22 +5224,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'){
-        setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
-        ptCallStoreSet(call.callId,'in_call');
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        if(acceptWin){acceptWin.location.href=joinUrl;trackDmMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
-      }
-      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[DM] call response failed',e);
-      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackDmMeetWindow==='function')trackDmMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+      ptCallStoreSet(call.callId,'in_call');
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{
+        if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
+        if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+      })
+      .catch(e=>{console.warn('[DM] call response failed',e);if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');});
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
@@ -5319,7 +5322,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
@@ -7221,7 +7224,7 @@ async function requestNotifPermission(){
     if(p==='granted'){
       if(window._pfSWReg){
         try{
-          const r=fetch('/api/push/vapid-key',{credentials:'include'});
+          const r=await fetch('/api/push/vapid-key',{credentials:'include'});
           const d=await r.json();
           if(d.publicKey){
             const padding='='.repeat((4-d.publicKey.length%4)%4);
@@ -9329,16 +9332,16 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
-      const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
-      try{
-        const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-        if(action==='accept'){
-          ptCallStoreSet(call.callId,'in_call');
-          const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-          if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
-          else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
-        }
-      }catch(e){ try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{} if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
+      let meetWin=null;
+      if(action==='accept'&&call.meetUrl){
+        ptCallStoreSet(call.callId,'in_call');
+        meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+        if(meetWin)trackGlobalMeetWindow(meetWin,call);
+        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Accept again.','error');
+      }
+      api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+        .then(r=>{if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+        .catch(e=>{ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); });
     };
     document.addEventListener('click',h,true);
     return()=>document.removeEventListener('click',h,true);
@@ -9350,21 +9353,17 @@ function App(){
     globalDismissedCallIds.current.add(call.callId);
     stopGlobalRingtone();
     setGlobalIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'){
-        setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
-        ptCallStoreSet(call.callId,'in_call');
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
-      }
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[Call] response failed',e);
-      if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackGlobalMeetWindow==='function')trackGlobalMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+      ptCallStoreSet(call.callId,'in_call');
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+      .catch(e=>{console.warn('[Call] response failed',e);if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');});
   },[globalIncomingCall,cu,stopGlobalRingtone,_setView,trackGlobalMeetWindow]);
 
   useEffect(()=>{
