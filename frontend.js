@@ -4636,10 +4636,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return m;
     });
     const serverIds=new Set(merged.map(m=>m.id));
-    // Never let background polling/SSE temporarily erase optimistic local messages.
+    // Never let background polling/SSE temporarily erase local messages that haven't been
+    // confirmed by the server yet (pending/failed/temp) OR that were confirmed very recently
+    // (within 30 s) and may have been missed by an incremental fetch due to same-second
+    // timestamp precision or a race with the network round-trip.
+    const recentCutoff=Date.now()-30000;
     localList.forEach(m=>{
-      if(!serverIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm'))){
-        merged.push(m);
+      if(!serverIds.has(m.id)){
+        const isPendingOrTemp=m._pending||m._failed||String(m.id||'').startsWith('tmpdm');
+        const isRecentConfirmed=!m._pending&&!m._failed&&!String(m.id||'').startsWith('tmpdm')&&(Date.parse(m.ts||'')||0)>recentCutoff;
+        if(isPendingOrTemp||isRecentConfirmed){
+          merged.push(m);
+        }
       }
     });
     merged.sort((a,b)=>new Date(a.ts||0)-new Date(b.ts||0));
@@ -4677,7 +4685,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     else setLoadingThread(id);
     console.debug('[DM] load start', {id,reason,seq,cached:existing.length});
     const lastMsg=existing.length?existing[existing.length-1]:null;
-    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
+    // Subtract 1 s so messages at the exact same second as the last known message
+    // are not excluded by the strict ts > ? comparison on the server.
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+(new Date(lastMsg.ts).getTime()-1000):'';
     const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
@@ -4713,21 +4723,34 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       dmPollBusy=true;
       try{
         const requestedTo=toId;
-        const cached=threadCache.current.get(requestedTo)||[];
-        const lastMsg=cached.length?cached[cached.length-1]:null;
-        const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+        // Capture sinceParam from current cache before the network call.
+        const cachedAtStart=threadCache.current.get(requestedTo)||[];
+        const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
+        // Subtract 1s so same-second messages are not excluded by strict > on the server.
+        const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
         const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
         if(requestedTo!==activeToRef.current)return;
         if(Array.isArray(d)){
           if(sinceParam&&d.length===0)return;
-          const seen=new Set(cached.map(m=>m.id));
-          const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
+          // Re-read threadCache AFTER the await so we always merge onto the freshest local state.
+          // Using the stale pre-await snapshot was the root cause of confirmed messages vanishing:
+          // messages confirmed during the ~6s network round-trip were absent from the snapshot
+          // and not re-added by mergePendingReactionState (which only preserves _pending/_failed/tmpdm).
+          const freshCached=threadCache.current.get(requestedTo)||[];
+          const seen=new Set(freshCached.map(m=>m.id));
+          const merged=sinceParam?mergePendingReactionState(requestedTo,[...freshCached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
           setMsgThreadId(requestedTo);
           setThreadMessages(requestedTo,merged,false);
           setLoadingThread('');
           setMsgs(prev=>{
-            if(merged.length>prev.length){playSound('notif');}
-            return merged;
+            // Also preserve any _pending/_failed/tmpdm from current React state not yet in merged
+            // (e.g. optimistic messages added after threadCache was read above).
+            const prevArr=Array.isArray(prev)?prev:[];
+            const mergedIds=new Set(merged.map(m=>m.id));
+            const extraPending=prevArr.filter(m=>!mergedIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm')));
+            const final=extraPending.length?normalizeDmList([...merged,...extraPending]):merged;
+            if(final.length>prevArr.length){playSound('notif');}
+            return final;
           });
           onDmRead(requestedTo);
         }

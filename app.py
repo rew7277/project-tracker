@@ -6026,7 +6026,10 @@ def send_dm():
             except Exception:
                 existing=None
         if not existing:
-            recent_cutoff=(datetime.now()-timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S')
+            # Use IST-aware cutoff so string comparison against stored 'YYYY-MM-DDTHH:MM:SS+05:30'
+            # timestamps is correct.  datetime.now() returns UTC on Railway/Heroku, which would
+            # make the 10-second window ~5.5 hours wide and falsely suppress legitimate retries.
+            recent_cutoff=(now_ist()-timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S')+'+05:30'
             existing=db.execute("""SELECT * FROM direct_messages
                 WHERE workspace_id=? AND sender=? AND recipient=? AND content=? AND COALESCE(reply_to,'')=? AND ts>=?
                 ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, content, reply_to, recent_cutoff)).fetchone()
