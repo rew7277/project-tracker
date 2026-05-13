@@ -4876,7 +4876,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },2000);
+    },8000);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -5005,31 +5005,31 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
-    // Do not let one slow network request lock the composer. The recent-send guard
-    // already prevents accidental double-click duplicates.
-    setSending(false);
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:12000});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:20000});
+      if(m&&m.ok===false) throw new Error(m.error||'DM send failed');
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
         setMsgThreadId(recipient);
         setMsgs(prev=>{
-          const next=normalizeDmList(prev.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x));
+          const base=Array.isArray(prev)?prev:[];
+          const replaced=base.some(x=>x.id===tempId||x.client_msg_id===clientMsgId);
+          const list=replaced?base.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x):[...base,confirmed];
+          const next=normalizeDmList(list);
           threadCache.current.set(recipient,next);
           _saveDmCache(recipient,next);
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
-        // Hard reconcile shortly after ACK. This catches reverse-proxy/SSE delays
-        // and replaces any leftover optimistic bubble with the committed DB row.
-        setTimeout(()=>loadMsgs(recipient,'send-ack-reconcile'),250);
+        setTimeout(()=>loadMsgs(recipient,'send-ack-reconcile'),150);
       }else{
-        throw new Error((m&&m.error)||'DM send did not return a committed message');
+        throw new Error('DM send did not return a committed message');
       }
     }catch(e){
       console.warn('[DM] send failed', e);
+      window._pfToast&&window._pfToast('error','Message not sent',String(e&&e.message||e||'Network/server error').slice(0,140));
       setMsgs(prev=>{
-        const next=prev.map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
+        const next=(Array.isArray(prev)?prev:[]).map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
         threadCache.current.set(recipient,next);
         _saveDmCache(recipient,next);
         return next;
@@ -9405,7 +9405,7 @@ function App(){
       }catch(e){}
     };
     check();
-    const id=setInterval(check,3000);
+    const id=setInterval(check,5000);
     return()=>{stopped=true;clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 

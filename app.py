@@ -5491,7 +5491,7 @@ def get_dm(other_id):
         cached_thread = _cache_get(dm_cache_key)
         if cached_thread is not None:
             return jsonify(cached_thread)
-    with get_db() as db:
+    with get_db(autocommit=True) as db:
         if since:
             # Incremental: only messages newer than the client's last known ts.
             # ts column stores ISO-8601 strings — lexicographic comparison works
@@ -6011,8 +6011,8 @@ def send_dm():
     now=ts()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
-    with get_db() as db:
-        target=db.execute("SELECT id FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (recipient, ws_id)).fetchone()
+    with get_db(autocommit=True) as db:
+        target=db.execute("SELECT id FROM users WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''", (recipient, ws_id)).fetchone()
         if not target:
             return jsonify({"error":"Recipient not found"}),404
 
@@ -6081,7 +6081,9 @@ def send_dm():
         except Exception as e:
             log.warning("[DM] web push failed: %s", e)
     threading.Thread(target=_after_dm_push, daemon=True).start()
-    return jsonify(row)
+    resp=jsonify(row)
+    resp.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 def _get_dm_message_with_reactions(db, ws_id, mid):
