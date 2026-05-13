@@ -3859,19 +3859,8 @@ function renderMd(text){
 }
 
 function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function _ptCompletedCallIds(){try{return new Set(JSON.parse(localStorage.getItem('pt_completed_call_ids')||'[]'));}catch{return new Set();}}
-function _ptMarkCallComplete(callId){try{if(!callId)return;const ids=_ptCompletedCallIds();ids.add(String(callId));localStorage.setItem('pt_completed_call_ids',JSON.stringify([...ids].slice(-300)));}catch{}}
-function _ptOpenMeetAndTrackEnd(meetUrl,callId,peerId){
-  if(!meetUrl)return null;
-  let w=null;
-  try{w=window.open(meetUrl,'_blank');}catch{}
-  if(w&&callId){
-    const endOnce=()=>{if(endOnce.done)return;endOnce.done=true;_ptMarkCallComplete(callId);api.post('/api/calls/respond',{callId,action:'end',peerId,meetUrl},{quiet:true}).catch(()=>{});};
-    const poll=setInterval(()=>{try{if(w.closed){clearInterval(poll);endOnce();}}catch{}},2500);
-    setTimeout(()=>clearInterval(poll),4*60*60*1000);
-  }
-  return w;
-}
+function ptCallStoreGet(callId){try{return (JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{})[callId]||'';}catch{return '';}}
+function ptCallStoreSet(callId,status){try{if(!callId)return;const all=JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{};all[callId]=status;localStorage.setItem('ptCallState:v1',JSON.stringify(all));}catch{}}
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
@@ -3880,13 +3869,25 @@ function renderChatContent(text){
     const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
     const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Teammate').trim();
     const callId=(callIdMatch&&callIdMatch[1]?callIdMatch[1]:'').trim();
+    const stored=callId?ptCallStoreGet(callId):'';
+    const effectiveStatus=stored||status;
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
-    const completedIds=_ptCompletedCallIds();
-    const ended=/accepted the call|rejected the call|ended the call|missed call/i.test(raw)||['ended','rejected','accepted','in_call','missed'].includes(status)||completedIds.has(callId);
-    const isLiveIncoming=status==='ringing'&&!ended&&callId&&meetUrl;
-    const actions=isLiveIncoming?`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`:'';
-    const body=isLiveIncoming?(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'):safe.replace(/\n/g,'<br>');
-    return `<div style="min-width:230px;max-width:320px;border:1px solid ${isLiveIncoming?'rgba(239,68,68,.35)':'rgba(148,163,184,.22)'};border-radius:16px;padding:11px 13px;background:${isLiveIncoming?'linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))':'rgba(148,163,184,.08)'}"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isLiveIncoming?'#ef4444':'#64748b'};color:white">📞</span><span>${isLiveIncoming?'Video call':'Call record'}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
+    const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
+    const isExpired=(effectiveStatus==='ringing')&&(!expiresAt||Date.now()>expiresAt);
+    const finalStatus=isExpired?'missed':effectiveStatus;
+    const isOngoing=finalStatus==='in_call';
+    const isRinging=finalStatus==='ringing';
+    const isEnded=/accepted the call|rejected the call|ended the call|missed call/i.test(raw)||['ended','rejected','accepted','missed'].includes(finalStatus);
+    const hasValidMeet=/^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(meetUrl);
+    let actions='';
+    if(!isEnded&&callId&&hasValidMeet&&(isRinging||isOngoing)){
+      actions=isOngoing
+        ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="join" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Join call</button></div>`
+        : `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+    }
+    const title=isEnded?'Call ended':(isOngoing?'Ongoing call':'Video call');
+    const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is active. Use Join call if you need to re-open Meet.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
+    return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
   if(meetMatch || /📹\s*Google Meet call/i.test(raw)){
@@ -4189,6 +4190,23 @@ function MessagesView({projects,users,cu,tasks}){
     return()=>stopRingtone();
   },[incomingCall,startRingtone,stopRingtone]);
 
+  const trackDmMeetWindow=(win,call)=>{
+    if(!win||!call)return;
+    dmMeetWindowRef.current=win;
+    dmMeetCallRef.current=call;
+    if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
+    dmMeetCloseTimerRef.current=setInterval(()=>{
+      const w=dmMeetWindowRef.current,c=dmMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){
+        clearInterval(dmMeetCloseTimerRef.current);dmMeetCloseTimerRef.current=null;
+        dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
+        setActiveCallUsers(new Set());
+        ptCallStoreSet(c.callId,'ended');
+        api.post('/api/calls/respond',{callId:c.callId,action:'end',peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
+      }
+    },1500);
+  };
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
     if(!call)return;
@@ -4206,10 +4224,10 @@ function MessagesView({projects,users,cu,tasks}){
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
-    const w=_ptOpenMeetAndTrackEnd(outgoingMeetCall.meetUrl,outgoingMeetCall.callId,outgoingMeetCall.peerId);
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
     if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
   };
-  const closeOutgoingMeet=()=>setOutgoingMeetCall(null);
+  const closeOutgoingMeet=()=>{if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);};
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.45)}70%{box-shadow:0 0 0 18px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}</style>
   ${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.62)',backdropFilter:'blur(8px)'}}>
     <div style=${{width:360,maxWidth:'92vw',border:'1px solid rgba(239,68,68,.42)',borderRadius:24,padding:22,background:'linear-gradient(145deg,rgba(15,23,42,.98),rgba(30,41,59,.96))',boxShadow:'0 30px 90px rgba(0,0,0,.65)',textAlign:'center'}}>
@@ -4462,6 +4480,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
   const [activeCallUsers,setActiveCallUsers]=useState(new Set());
+  const dmMeetWindowRef=useRef(null);
+  const dmMeetCallRef=useRef(null);
+  const dmMeetCloseTimerRef=useRef(null);
   const typingTimerRef=useRef(null);
   const ref=useRef(null);
   const activeToRef=useRef(toId);
@@ -4477,7 +4498,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const id=((raw.match(/CALL_INVITE:([^\n]+)/)||[])[1]||'').trim();
     if(!id || dismissedCallIds.current.has(id))return null;
     const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
+    const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
     if(status && status!=='ringing')return null;
+    if(!expiresAt || Date.now()>expiresAt)return null;
     if(m.recipient && m.recipient!==cu.id)return null;
     const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'https://meet.google.com/new').trim();
@@ -4640,15 +4663,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const data=msg&&msg.data;
       if(msg&&msg.type==='call_status'&&data){
         const ids=new Set(data.users||[]);
-        if(data.status==='in_call'){ _ptMarkCallComplete(data.callId); setActiveCallUsers(ids); }
+        if(data.callId&&data.status)ptCallStoreSet(data.callId,data.status);
+        if(data.status==='in_call') setActiveCallUsers(ids);
         if(['rejected','ended','missed'].includes(data.status)){
-          _ptMarkCallComplete(data.callId);
           setActiveCallUsers(new Set());
           if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
         }
         if(data.status==='ringing'&&data.recipient===cu.id&&!dismissedCallIds.current.has(data.callId)){
+          const expiresAt=Number(data.expiresAt||0)||0;
           const createdAt=data.createdAt?Date.parse(data.createdAt):Date.now();
-          const isFresh=Number.isFinite(createdAt)?(Date.now()-createdAt<120000):true;
+          const isFresh=expiresAt ? Date.now()<expiresAt : (Number.isFinite(createdAt)?(Date.now()-createdAt<20000):true);
           const validMeet=typeof data.meetUrl==='string' && /^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(data.meetUrl);
           if(isFresh&&validMeet){
             const sender=(users||[]).find(u=>u.id===data.sender)||{};
@@ -4791,9 +4815,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!toId||startingMeet)return;
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
-    let hostTab=null;
-    try{hostTab=window.open('about:blank','_blank');if(hostTab){hostTab.document.write('<title>Opening Google Meet...</title><body style="font-family:system-ui;display:grid;place-items:center;height:100vh;background:#0f172a;color:white"><div>Creating Google Meet room...</div></body>');}}catch{}
     setStartingMeet(true);
+    const hostWin=window.open('about:blank','_blank','noopener,noreferrer');
+    if(hostWin){try{hostWin.document.write('<!doctype html><title>Opening Meet…</title><body style="font-family:sans-serif;background:#111827;color:white;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Creating Google Meet…</body>');}catch{}}
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(!r||!r.ok||!r.meetUrl){
@@ -4809,13 +4833,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return next;
         });
       }
-      // Caller joins immediately in a separate tab; ProjectTracker remains open.
-      if(hostTab){try{hostTab.location.href=r.meetUrl;}catch{}}
-      else{const w=_ptOpenMeetAndTrackEnd(r.meetUrl,r.callId,recipient);if(!w&&typeof window.showToast==='function')window.showToast('Popup blocked. Please allow popups and click call again.','error');}
-      setOutgoingMeetCall({callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl,autoJoined:true});
-      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… Meet opened in a new tab','success');
+      // Caller initiated the meeting from a direct click, so open Meet immediately in a new tab.
+      const call={callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl};
+      if(hostWin){hostWin.location.href=r.meetUrl;trackDmMeetWindow(hostWin,call);} else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker and click the call button again.','error');
+      if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);
+      ptCallStoreSet(r.callId,'ringing');
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting for them to accept','success');
     }catch(e){
-      try{if(hostTab&&!hostTab.closed)hostTab.close();}catch{}
+      try{if(hostWin&&!hostWin.closed)hostWin.close();}catch{}
       console.warn('[DM] Google Meet call failed',e);
       const msg=(e&&e.message)||'Unable to create Google Meet. Configure server Google OAuth first.';
       if(typeof window.showToast==='function') window.showToast(msg,'error');
@@ -4945,8 +4970,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
         setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+        ptCallStoreSet(call.callId,'in_call');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=_ptOpenMeetAndTrackEnd(joinUrl,call.callId,call.peerId);
+        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        if(w)trackDmMeetWindow(w,call);
         if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
@@ -4957,11 +4984,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
-    const w=_ptOpenMeetAndTrackEnd(outgoingMeetCall.meetUrl,outgoingMeetCall.callId,outgoingMeetCall.peerId);
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
     if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
   };
-  const closeOutgoingMeet=()=>setOutgoingMeetCall(null);
-  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${outgoingMeetCall&&!outgoingMeetCall.autoJoined?html`<div style=${{position:'fixed',inset:0,zIndex:99998,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.52)',backdropFilter:'blur(10px)'}}>
+  const closeOutgoingMeet=()=>{if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);};
+  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${outgoingMeetCall?html`<div style=${{position:'fixed',inset:0,zIndex:99998,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.52)',backdropFilter:'blur(10px)'}}>
     <div style=${{width:'min(520px,calc(100vw - 32px))',border:'1px solid rgba(148,163,184,.22)',borderRadius:28,background:'linear-gradient(180deg,rgba(15,23,42,.98),rgba(2,6,23,.98))',boxShadow:'0 30px 90px rgba(0,0,0,.55)',padding:28,textAlign:'center',color:'#fff'}}>
       <div style=${{width:72,height:72,borderRadius:24,margin:'0 auto 16px',display:'grid',placeItems:'center',background:'rgba(34,197,94,.16)',fontSize:34}}>🎥</div>
       <div style=${{fontSize:13,fontWeight:900,letterSpacing:'.14em',textTransform:'uppercase',color:'#93c5fd',marginBottom:8}}>Call started</div>
@@ -8933,6 +8960,9 @@ function App(){
   const globalCallTimeoutRef=useRef(null);
   const globalRingtoneRef=useRef(null);
   const globalRingtoneCtxRef=useRef(null);
+  const globalMeetWindowRef=useRef(null);
+  const globalMeetCallRef=useRef(null);
+  const globalMeetCloseTimerRef=useRef(null);
 
   const stopGlobalRingtone=useCallback(()=>{
     try{ if(globalRingtoneRef.current){ if(globalRingtoneRef.current._id)clearInterval(globalRingtoneRef.current._id); globalRingtoneRef.current.pause&&globalRingtoneRef.current.pause(); globalRingtoneRef.current.currentTime=0; } }catch{}
@@ -8958,6 +8988,23 @@ function App(){
   },[stopGlobalRingtone]);
 
 
+  const trackGlobalMeetWindow=useCallback((win,call)=>{
+    if(!win||!call)return;
+    globalMeetWindowRef.current=win;
+    globalMeetCallRef.current=call;
+    if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
+    globalMeetCloseTimerRef.current=setInterval(()=>{
+      const w=globalMeetWindowRef.current,c=globalMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){
+        clearInterval(globalMeetCloseTimerRef.current);globalMeetCloseTimerRef.current=null;
+        globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
+        setGlobalActiveCallUsers(new Set());
+        ptCallStoreSet(c.callId,'ended');
+        api.post('/api/calls/respond',{callId:c.callId,action:'end',peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
+      }
+    },1500);
+  },[]);
   const showGlobalCallPopup=useCallback((call)=>{
     if(!call||!call.callId||globalDismissedCallIds.current.has(call.callId))return;
     const meet=String(call.meetUrl||'').trim();
@@ -8976,21 +9023,29 @@ function App(){
         showGlobalCallPopup(call);
         return;
       }
+      if(action==='join'){
+        const w=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+        if(w)trackGlobalMeetWindow(w,call);
+        if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join again.','error');
+        return;
+      }
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
       try{
         const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
         if(action==='accept'){
+          ptCallStoreSet(call.callId,'in_call');
           const joinUrl=(r&&r.meetUrl)||call.meetUrl;
           const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+          if(w)trackGlobalMeetWindow(w,call);
           if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
         }
       }catch(e){ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
     };
     document.addEventListener('click',h,true);
     return()=>document.removeEventListener('click',h,true);
-  },[showGlobalCallPopup,stopGlobalRingtone]);
+  },[showGlobalCallPopup,stopGlobalRingtone,trackGlobalMeetWindow]);
 
   const respondGlobalIncomingCall=useCallback(async(action)=>{
     const call=globalIncomingCall;
@@ -9002,17 +9057,19 @@ function App(){
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
         setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
+        ptCallStoreSet(call.callId,'in_call');
         setDmTargetUser(call.peerId);
         _setView('dm');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=_ptOpenMeetAndTrackEnd(joinUrl,call.callId,call.peerId);
+        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        if(w)trackGlobalMeetWindow(w,call);
         if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
     }catch(e){
       console.warn('[Call] response failed',e);
       if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');
     }
-  },[globalIncomingCall,cu,stopGlobalRingtone,_setView]);
+  },[globalIncomingCall,cu,stopGlobalRingtone,_setView,trackGlobalMeetWindow]);
 
   useEffect(()=>{
     if(!globalIncomingCall){stopGlobalRingtone();return;}
@@ -9063,7 +9120,7 @@ function App(){
                 const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
                 const isMine=String(m.recipient||'')===String(cu.id);
                 if(callId&&status==='ringing'&&isMine&&!globalDismissedCallIds.current.has(callId)){
-                  const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((window._pfUsers||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
+                  const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
                   showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});
                   showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});},{tag:'call-'+callId,requireInteraction:true});
                 }
@@ -9072,9 +9129,9 @@ function App(){
             if(msg.type==='call_status'&&msg.data){
               const d=msg.data||{};
               const ids=new Set(d.users||[]);
-              if(d.status==='in_call'){_ptMarkCallComplete(d.callId);setGlobalActiveCallUsers(ids);}
+              if(d.callId&&d.status)ptCallStoreSet(d.callId,d.status);
+              if(d.status==='in_call')setGlobalActiveCallUsers(ids);
               if(['rejected','ended','missed'].includes(d.status)){
-                _ptMarkCallComplete(d.callId);
                 setGlobalActiveCallUsers(new Set());
                 if(globalIncomingCall&&globalIncomingCall.callId===d.callId){
                   globalDismissedCallIds.current.add(d.callId);
@@ -9196,7 +9253,6 @@ function App(){
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
       const _pm=parseMembers;
-      window._pfUsers=Array.isArray(users)?users:[];
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);

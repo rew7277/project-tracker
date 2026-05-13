@@ -5671,6 +5671,7 @@ def create_google_meet_call():
     ws_id = wid()
     me = session["user_id"]
     now = ts()
+    expires_ms = int(datetime.now().timestamp()*1000) + 20000
     call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
     # Create a real Google Meet room first. Do NOT generate fake Meet URLs like
     # /lookup/<callId>; Google rejects those with "Check your meeting code".
@@ -5711,6 +5712,7 @@ def create_google_meet_call():
             f"CALL_INVITE:{call_id}\n"
             f"CALL_FROM:{sender_name}\n"
             f"CALL_STATUS:ringing\n"
+            f"CALL_EXPIRES_AT:{expires_ms}\n"
             f"MEET_LINK:{meet_url}"
         )
         mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
@@ -5734,8 +5736,35 @@ def create_google_meet_call():
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
         _bust_dm_thread(ws_id, me, target_id)
         _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "message": row})
-        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "senderName": sender_name, "recipient": target_id, "recipientName": target_name, "meetUrl": meet_url, "createdAt": now})
+        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "senderName": sender_name, "recipient": target_id, "recipientName": target_name, "meetUrl": meet_url, "createdAt": now, "expiresAt": expires_ms})
         _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
+        # Auto-expire unanswered call invites after 20 seconds. This prevents old DM call cards
+        # from staying actionable and clears the ringing state on both sides.
+        def _expire_unanswered_call():
+            try:
+                time.sleep(20)
+                with get_db() as db3:
+                    invite = db3.execute("SELECT id,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+                    if not invite:
+                        return
+                    content0 = invite["content"] or ""
+                    current = ((re.search(r"CALL_STATUS:([^\n]+)", content0) or [None, "ringing"])[1] or "ringing").strip().lower()
+                    if current != "ringing":
+                        return
+                    new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", content0, count=1)
+                    db3.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
+                    miss_id = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+                    db3.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (miss_id, ws_id, me, target_id, f"📴 Missed call from {sender_name}", 0, ts(), "", ts(), "", 0, 0, 0))
+                    miss_row = dict(db3.execute("SELECT * FROM direct_messages WHERE id=?", (miss_id,)).fetchone())
+                _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+                _bust_dm_thread(ws_id, me, target_id)
+                _sse_publish(ws_id, "dm_created", {"id": miss_row.get("id"), "sender": me, "recipient": target_id, "message": miss_row})
+                _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [me, target_id], "sender": me, "recipient": target_id, "meetUrl": meet_url, "createdAt": ts()})
+            except Exception as e:
+                log.warning("[call] auto-expire failed: %s", e)
+        threading.Thread(target=_expire_unanswered_call, daemon=True).start()
     threading.Thread(target=_after_call_start, daemon=True).start()
 
     return jsonify({
@@ -5761,29 +5790,27 @@ def respond_instant_call():
     if action not in ("accept", "reject", "end", "missed"):
         return jsonify({"ok": False, "error": "Invalid call action"}), 400
     ws_id = wid(); me = session["user_id"]; now = ts()
-    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
-    updated_invites = []
     with get_db() as db:
         me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
-        invite_rows = db.execute("SELECT * FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 5", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchall()
-        if not peer_id and invite_rows:
-            msg = invite_rows[0]
-            peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
-        # Rewrite the original invite message status so old/completed calls render as call history,
-        # not as active Accept/Reject cards after refresh or thread reload.
-        for inv in invite_rows:
-            content = inv["content"] or ""
-            if "CALL_STATUS:" in content:
-                import re as _re
-                next_content = _re.sub(r"CALL_STATUS:[^\n]+", f"CALL_STATUS:{status}", content)
-            else:
-                next_content = content + f"\nCALL_STATUS:{status}"
-            if next_content != content:
-                db.execute("UPDATE direct_messages SET content=?, edited=1 WHERE id=? AND workspace_id=?", (next_content, inv["id"], ws_id))
-                updated = db.execute("SELECT * FROM direct_messages WHERE id=?", (inv["id"],)).fetchone()
-                if updated:
-                    updated_invites.append(dict(updated))
+        if not peer_id:
+            msg = db.execute("SELECT sender,recipient FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+            if msg:
+                peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+        # Update the original invite row so old/completed calls stop rendering live Accept/Reject buttons
+        # when a user opens chat history later.
+        status_text = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
+        try:
+            invite = db.execute("SELECT id,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+            if invite:
+                old_content = invite["content"] or ""
+                if "CALL_STATUS:" in old_content:
+                    new_content = re.sub(r"CALL_STATUS:[^\n]+", f"CALL_STATUS:{status_text}", old_content, count=1)
+                else:
+                    new_content = old_content + f"\nCALL_STATUS:{status_text}"
+                db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
+        except Exception as e:
+            log.warning("[call] failed to update invite status: %s", e)
         if peer_id:
             text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else (f"📴 Missed call from {me_name}" if action == "missed" else f"📴 {me_name} ended the call"))
             mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
@@ -5793,14 +5820,13 @@ def respond_instant_call():
             row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
         else:
             row = None
+    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
     users = [x for x in [me, peer_id] if x]
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     if peer_id: _bust_dm_thread(ws_id, me, peer_id)
-    for inv in updated_invites:
-        _sse_publish(ws_id, "dm_updated", {"id": inv.get("id"), "sender": inv.get("sender"), "recipient": inv.get("recipient"), "message": inv})
     if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
     _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url, "createdAt": now})
-    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row, "updatedInvites": updated_invites})
+    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row})
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required
