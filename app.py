@@ -652,6 +652,8 @@ _CACHE_TTL   = 30        # 30s fresh window — SSE events notify clients on mut
                          # cache-cold request to block 5s on DB, saturating the connection pool.
 _CACHE_STALE = 60        # serve stale data up to 60s while refreshing (was 120s)
 _CACHE_LOCK  = _cthread.Lock()
+_CALLS_INCOMING_CACHE = {}
+_CALLS_INCOMING_CACHE_LOCK = _cthread.Lock()
 
 # ── Redis cache layer (optional, shared across workers) ──────────────────────
 # Set REDIS_URL env var (e.g. from Railway Redis service) to enable.
@@ -4566,108 +4568,83 @@ def get_projects_last_messages():
         return jsonify({r["project"]: r["last_ts"] for r in rows})
 
 def _fetch_app_data_from_db(ws, team_id, uid):
-    """Execute all app-data queries IN PARALLEL using the connection pool.
+    """Fetch dashboard data with ONE database connection.
 
-    Each query runs on its own pooled connection in a dedicated thread, so
-    total wall-clock time = max(individual query times) instead of their sum.
+    Important production fix:
+    The earlier version ran 9 queries in parallel. That looked faster for one
+    request, but under real traffic it borrowed up to 9 DB connections per page
+    load. A few users opening /dm or /dashboard together can exhaust Railway
+    Postgres/gunicorn workers, causing slow 20–30s responses and client-side
+    aborts that show up as 499s.
 
-    Previous approach: 9 sequential queries on one connection.
-    India → Railway US-West RTT ≈ 180ms → 9 × 180ms = 1.6s in network alone,
-    plus server-side execution time. Total observed: ~5s.
-
-    New approach: 9 concurrent queries, each on its own pool connection.
-    All fire simultaneously → total ≈ slowest single query (~400-600ms).
-    Expected improvement: 5s → ~0.5-1s for the cold-cache path.
-
-    Pool sizing note: this borrows up to 9 connections simultaneously per
-    app-data call. With PG_POOL_SIZE=30 and typical concurrent user counts
-    this is fine; raise PG_POOL_SIZE if you see pool exhaustion under load.
+    This version keeps the endpoint predictable: one request = one DB
+    connection. Cache/SSE still keep normal repeat loads fast, but cold-starts no
+    longer stampede the database pool.
     """
     now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
 
     if team_id:
-        tasks_sql    = (
+        tasks_sql = (
             "SELECT id,workspace_id,title,description,project,assignee,priority,stage,"
             "created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at "
             "FROM tasks WHERE workspace_id=? AND team_id=? AND deleted_at='' "
             "ORDER BY created DESC LIMIT 300"
         )
         tasks_params = (ws, team_id)
-        proj_sql     = "SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 200"
-        proj_params  = (ws, team_id)
+        proj_sql = "SELECT * FROM projects WHERE workspace_id=? AND team_id=? ORDER BY created DESC LIMIT 200"
+        proj_params = (ws, team_id)
     else:
-        tasks_sql    = (
+        tasks_sql = (
             "SELECT id,workspace_id,title,description,project,assignee,priority,stage,"
             "created,due,pct,team_id,story_points,task_type,labels,sprint,deleted_at "
             "FROM tasks WHERE workspace_id=? AND deleted_at='' "
             "ORDER BY created DESC LIMIT 300"
         )
         tasks_params = (ws,)
-        proj_sql     = "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 200"
-        proj_params  = (ws,)
+        proj_sql = "SELECT * FROM projects WHERE workspace_id=? ORDER BY created DESC LIMIT 200"
+        proj_params = (ws,)
 
-    # Each entry: cache_result_key → (sql, params)
-    # _raw_pg is thread-safe: it borrows its own connection from the pool per call.
-    queries = {
-        "users":     (
+    with get_db(autocommit=True) as db:
+        users = [dict(r) for r in db.execute(
             "SELECT id,name,email,role,avatar,color,workspace_id,last_active,"
             "two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",
             (ws,)
-        ),
-        "projects":  (proj_sql,  proj_params),
-        "tasks":     (tasks_sql, tasks_params),
-        "notifs":    (
+        ).fetchall()]
+        projects = [dict(r) for r in db.execute(proj_sql, proj_params).fetchall()]
+        tasks = [dict(r) for r in db.execute(tasks_sql, tasks_params).fetchall()]
+        notifs = [dict(r) for r in db.execute(
             "SELECT * FROM notifications WHERE workspace_id=? AND user_id=? "
             "ORDER BY ts DESC LIMIT 50",
             (ws, uid)
-        ),
-        "dm_unread": (
+        ).fetchall()]
+        dm_unread = [dict(r) for r in db.execute(
             "SELECT sender, COUNT(*) as cnt FROM direct_messages "
             "WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender",
             (ws, uid)
-        ),
-        "workspace": ("SELECT * FROM workspaces WHERE id=?", (ws,)),
-        "teams":     ("SELECT * FROM teams WHERE workspace_id=?", (ws,)),
-        # Reduced from 200 → 100: 100 tickets is still plenty for any dashboard
-        # view and cuts the heaviest single payload in half.
-        "tickets":   (
+        ).fetchall()]
+        ws_row = db.execute("SELECT * FROM workspaces WHERE id=?", (ws,)).fetchone()
+        teams = [dict(r) for r in db.execute("SELECT * FROM teams WHERE workspace_id=?", (ws,)).fetchall()]
+        tickets = [dict(r) for r in db.execute(
             "SELECT * FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 100",
             (ws,)
-        ),
-        "reminders": (
+        ).fetchall()]
+        reminders = [dict(r) for r in db.execute(
             "SELECT * FROM reminders WHERE workspace_id=? AND user_id=? "
             "AND remind_at>=? ORDER BY remind_at",
             (ws, uid, now_str)
-        ),
-    }
+        ).fetchall()]
 
-    results: dict = {}
-    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-        future_to_key = {
-            pool.submit(_raw_pg, sql, params, True): key
-            for key, (sql, params) in queries.items()
-        }
-        for fut in _as_completed(future_to_key):
-            key = future_to_key[fut]
-            try:
-                results[key] = fut.result() or []
-            except Exception as _e:
-                log.error("[app-data] parallel query '%s' failed: %s", key, _e)
-                results[key] = []
-
-    ws_rows = results.get("workspace", [])
     return {
-        "users":         results.get("users",     []),
-        "projects":      results.get("projects",  []),
-        "tasks":         results.get("tasks",     []),
-        "notifications": results.get("notifs",    []),
-        "dm_unread":     results.get("dm_unread", []),
-        "workspace":     ws_rows[0] if ws_rows else {},
-        "teams":         results.get("teams",     []),
-        "tickets":       results.get("tickets",   []),
-        "reminders":     results.get("reminders", []),
+        "users": users,
+        "projects": projects,
+        "tasks": tasks,
+        "notifications": notifs,
+        "dm_unread": dm_unread,
+        "workspace": dict(ws_row) if ws_row else {},
+        "teams": teams,
+        "tickets": tickets,
+        "reminders": reminders,
     }
-
 
 def _etag_response(result):
     """Return a jsonify response with ETag header; emit 304 if client has fresh copy."""
@@ -5796,11 +5773,14 @@ def get_incoming_calls():
     - expired invites are marked missed and become inactive
     """
     ws_id = wid(); me = session["user_id"]
-    # Short-circuit: serve from cache (2s TTL) to avoid full table scan on every poll.
+    # Short-circuit: serve from a strict 2s local cache. Do NOT use the shared
+    # _cache_get() here because its TTL is intentionally longer for dashboard
+    # data; call invites must not be hidden for 30s.
     _cache_key = f"calls_incoming:{ws_id}:{me}"
-    _cached = _cache_get(_cache_key)
-    if _cached is not None:
-        return jsonify(_cached)
+    with _CALLS_INCOMING_CACHE_LOCK:
+        _entry = _CALLS_INCOMING_CACHE.get(_cache_key)
+        if _entry and (_time.time() - _entry["ts"]) < 2:
+            return jsonify(_entry["val"])
     now_ms = int(datetime.now().timestamp()*1000)
     calls = []
     expired = []
@@ -5855,7 +5835,8 @@ def get_incoming_calls():
             db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, msg_id, ws_id))
             _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [caller_id, receiver_id], "sender": caller_id, "recipient": receiver_id, "meetUrl": meet_url, "createdAt": ts()})
     result = {"ok": True, "calls": calls}
-    _cache_set(_cache_key, result)
+    with _CALLS_INCOMING_CACHE_LOCK:
+        _CALLS_INCOMING_CACHE[_cache_key] = {"ts": _time.time(), "val": result}
     return jsonify(result)
 
 @app.route("/api/calls/status", methods=["GET"])

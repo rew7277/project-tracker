@@ -84,7 +84,7 @@ const _apiNotifyError = (url, message, status) => {
 };
 const _apiRequest = async (u, opts = {}) => {
   const method = (opts.method || 'GET').toUpperCase();
-  const timeoutMs = opts.timeoutMs || (method === 'GET' ? 10000 : 15000);
+  const timeoutMs = opts.timeoutMs || (method === 'GET' ? 30000 : 30000);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -9263,7 +9263,7 @@ function App(){
     let stopped=false;
     const check=async()=>{
       try{
-        const res=await api.get('/api/calls/incoming',{quiet:true});
+        const res=await api.get('/api/calls/incoming',{quiet:true,timeoutMs:30000});
         const calls=(res&&Array.isArray(res.calls))?res.calls:[];
         if(stopped||!calls.length)return;
         const c=calls.find(x=>x&&x.callId&&!globalDismissedCallIds.current.has(x.callId));
@@ -9275,7 +9275,7 @@ function App(){
       }catch(e){}
     };
     check();
-    const id=setInterval(check,5000);
+    const id=setInterval(check,15000);
     return()=>{stopped=true;clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
@@ -9307,7 +9307,7 @@ function App(){
               }
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'||msg.type==='call_status'){
-              api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
+              api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread))setDmUnread(d.dm_unread);if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
               if(msg.type==='dm_created'){
                 try{
                   const m=(msg.data&&msg.data.message)||{};
@@ -9577,13 +9577,13 @@ function App(){
   const notifiedDmIdsRef=useRef(new Set());
   useEffect(()=>{
     if(!cu)return;
-    api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}}).catch(()=>{});
+    api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread)){prevDmsRef.current=d.dm_unread;setDmUnread(d.dm_unread);}if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
     let latestBusy=false;
     const pullLatest=async()=>{
       if(latestBusy)return;
       latestBusy=true;
       try{
-        const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:6000});
+        const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:30000});
         if(Array.isArray(latest)){
           latest.slice().reverse().forEach(m=>{
             if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
@@ -9603,13 +9603,14 @@ function App(){
             }
           });
         }
-        const d=await api.get('/api/dm/unread',{quiet:true,timeoutMs:6000});
+        const poll=await api.get('/api/poll',{quiet:true,timeoutMs:30000});
+        const d=poll&&Array.isArray(poll.dm_unread)?poll.dm_unread:[];
         if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}
       }catch(e){}
       finally{latestBusy=false;}
     };
     pullLatest();
-    const id=setInterval(pullLatest,10000); // fallback only; SSE handles instant delivery
+    const id=setInterval(pullLatest,30000); // fallback only; SSE handles instant delivery
     return()=>clearInterval(id);
   },[cu,data.users]);
 
@@ -9621,7 +9622,8 @@ function App(){
     if(!cu)return;
 
     const pollOnce=()=>{
-      api.get('/api/notifications').then(d=>{
+      api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(poll=>{
+        const d=(poll&&Array.isArray(poll.notifications))?poll.notifications:[];
         if(!Array.isArray(d))return;
         if(prevNotifIdsRef.current===null){
           prevNotifIdsRef.current=new Set(d.map(n=>n.id));
@@ -9676,7 +9678,8 @@ function App(){
       });
     };
 
-    api.get('/api/notifications').then(d=>{
+    api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(poll=>{
+        const d=(poll&&Array.isArray(poll.notifications))?poll.notifications:[];
       if(Array.isArray(d)){
         prevNotifIdsRef.current=new Set(d.map(n=>n.id));
         setData(prev=>({...prev,notifs:d}));
