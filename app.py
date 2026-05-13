@@ -5689,7 +5689,7 @@ def create_google_meet_call():
         target_name = target["name"] if target and target["name"] else "teammate"
 
         content = (
-            "📞 Incoming video call\n"
+            "📞 Video call\n"
             f"{sender_name} is calling you.\n"
             f"CALL_INVITE:{call_id}\n"
             f"CALL_FROM:{sender_name}\n"

@@ -48,7 +48,7 @@ async function _pfSetupPush(reg){
 
   var vapidKey='';
   try{
-    var r=await fetch('/api/push/vapid-key',{credentials:'include'});
+    var r=fetch('/api/push/vapid-key',{credentials:'include'});
     var d=await r.json();
     vapidKey=d.publicKey||'';
   }catch(e){ return; }
@@ -107,7 +107,7 @@ window._pfPushUnsubscribe = async function(){
   if(window._pfPushSub){
     try{
       await window._pfPushSub.unsubscribe();
-      await fetch('/api/push/unsubscribe',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:window._pfPushSub.endpoint})});
+      fetch('/api/push/unsubscribe',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:window._pfPushSub.endpoint})});
       window._pfPushSub = null;
     }catch(e){}
   }
@@ -228,7 +228,7 @@ const _apiRequest = async (u, opts = {}) => {
     if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
     const cleanOpts = { ...opts };
     delete cleanOpts.timeoutMs;
-    const r = await fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
+    const r = fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
     if (r.status === 304 && cached) return cached.data;
     const data = await _apiRead(r);
     if (!r.ok) {
@@ -1261,7 +1261,7 @@ function PersonalTwoFAToggle({cu,setCu}){
     const r=await api.post('/api/auth/totp/setup',{});
     if(r.error){setMsg(r.error);return;}
     setTotpData(r);setShowSetup(true);setVerifyToken('');
-    setTimeout(()=>{if(inpRef.current)inpRef.current.focus();},400);
+    queueMicrotask(() => {if(inpRef.current)inpRef.current.focus();},400);
   };
 
   const confirmSetup=async()=>{
@@ -4071,7 +4071,7 @@ function renderChatContent(text){
     if(!isEnded&&callId&&hasValidMeet&&isRinging&&(!receiverId||receiverId===currentUserId)){
       actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
-    const title=isEnded?'Call ended':(isOngoing?'Call in progress':'Video call');
+    const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
     const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
     return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
@@ -4685,7 +4685,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       }
       // Remove short-window duplicates created by double-clicks/retries. Keep call cards untouched.
       const content=String(m.content||'');
-      const isCall=content.includes('CALL_INVITE:')||content.includes('Missed call')||content.includes('Call ended');
+      const isCall=content.includes('CALL_INVITE:')||content.includes('Missed call')||content.includes('📞 Call ended');
       const t=Date.parse(m.ts||'')||0;
       const contentKey=[m.sender,m.recipient,content,m.reply_to||''].join('|');
       const prev=contentSeen.get(contentKey);
@@ -4740,7 +4740,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           if(!ringtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain);
           osc.start(); osc.stop(ctx.currentTime+0.18);
-          setTimeout(()=>{try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
+          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
         };
         ringtoneCtxRef.current=ctx; tick(); ringtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1200)};
         const oldStop=stopRingtone;
@@ -5202,7 +5202,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!incomingCall){ stopRingtone(); return; }
     startRingtone();
-    callTimeoutRef.current=setTimeout(()=>{
+    callTimeoutRef.current=queueMicrotask(() => {
       const call=incomingCall;
       if(!call||dismissedCallIds.current.has(call.callId))return;
       dismissedCallIds.current.add(call.callId);
@@ -5430,7 +5430,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     if(r.error){setTotpMsg(r.error);return;}
     setTotpMsg('✓ Google Authenticator configured!');
     setShowTotpSetup(false);setTotpData(null);
-    setTimeout(()=>{setTotpMsg('');reload&&reload();},1500);
+    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1500);
   };
 
   const resetTotp=async()=>{
@@ -5440,7 +5440,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     setTwoFaLoading(false);
     if(r.error){alert(r.error);return;}
     setTotpMsg('✓ 2FA reset');
-    setTimeout(()=>{setTotpMsg('');reload&&reload();},1200);
+    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1200);
   };
 
   const toggleEmailOtp=async()=>{
@@ -6484,7 +6484,7 @@ function AiDocsView({cu,projects,tasks,users}){
     setInput('');
   };
 
-  const scrollToBottom=()=>{ setTimeout(()=>{ if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
+  const scrollToBottom=()=>{ queueMicrotask(() => { if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
 
   const fmtRecent=(iso)=>{
     try{
@@ -6646,7 +6646,7 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
     }
 
     try{
-      const r=await fetch('https://api.anthropic.com/v1/messages',{
+      const r=fetch('https://api.anthropic.com/v1/messages',{
         method:'POST',
         headers:{'Content-Type':'application/json','x-api-key':ws.ai_api_key,'anthropic-version':'2023-06-01'},
         body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,system:systemPrompt,messages:history})
@@ -7221,7 +7221,7 @@ async function requestNotifPermission(){
     if(p==='granted'){
       if(window._pfSWReg){
         try{
-          const r=await fetch('/api/push/vapid-key',{credentials:'include'});
+          const r=fetch('/api/push/vapid-key',{credentials:'include'});
           const d=await r.json();
           if(d.publicKey){
             const padding='='.repeat((4-d.publicKey.length%4)%4);
@@ -9256,7 +9256,7 @@ function App(){
         const tick=()=>{
           if(!globalRingtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain); osc.start(); osc.stop(ctx.currentTime+0.20);
-          setTimeout(()=>{try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
+          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
         };
         globalRingtoneCtxRef.current=ctx; tick(); globalRingtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1250)};
         return;
@@ -9371,7 +9371,7 @@ function App(){
     if(!globalIncomingCall){stopGlobalRingtone();return;}
     startGlobalRingtone();
     const remaining=globalIncomingCall.expiresAt ? Math.max(0, Number(globalIncomingCall.expiresAt)-Date.now()) : 20000;
-    globalCallTimeoutRef.current=setTimeout(()=>{
+    globalCallTimeoutRef.current=queueMicrotask(() => {
       const call=globalIncomingCall;
       if(!call||globalDismissedCallIds.current.has(call.callId))return;
       globalDismissedCallIds.current.add(call.callId);
@@ -9401,7 +9401,7 @@ function App(){
         const expiresAt=Number(c.expiresAt||0)||0;
         if(expiresAt&&Date.now()>expiresAt)return;
         showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});
-        showBrowserNotif('📞 Incoming video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});},{tag:'call-'+c.callId,requireInteraction:true});
+        showBrowserNotif('📞 Video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});},{tag:'call-'+c.callId,requireInteraction:true});
       }catch(e){}
     };
     check();
@@ -9454,7 +9454,7 @@ function App(){
                 if(callId&&status==='ringing'&&isFresh&&isMine&&!globalDismissedCallIds.current.has(callId)){
                   const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Someone').trim();
                   showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender,expiresAt});
-                  showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender,expiresAt});},{tag:'call-'+callId,requireInteraction:true});
+                  showBrowserNotif('📞 Video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender,expiresAt});},{tag:'call-'+callId,requireInteraction:true});
                 }
               }catch(e){}
             }
@@ -9479,7 +9479,7 @@ function App(){
                 if(isFresh&&validMeet){
                   const sender=(data.users||[]).find(u=>u.id===d.sender)||{};
                   setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl,peerId:d.sender,expiresAt});
-                  showBrowserNotif('📞 Incoming video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
+                  showBrowserNotif('📞 Video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
                 }
               }
             }
@@ -9628,7 +9628,7 @@ function App(){
   useEffect(()=>{
     const q=(globalSearch||'').trim();
     if(!q||q.length<2){setSearchSubtasks([]);return;}
-    const t=setTimeout(()=>{
+    const t=queueMicrotask(() => {
       api.get('/api/subtasks/search?q='+encodeURIComponent(q))
         .then(d=>{if(Array.isArray(d))setSearchSubtasks(d);})
         .catch(()=>{});
@@ -9755,12 +9755,12 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='task'){
               _setView('tasks');
-              setTimeout(()=>{const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
+              queueMicrotask(() => {const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
             else if(n.entity_id && n.entity_type==='project'){setActiveProject(n.entity_id);_setView('projects');}
             else if(n.entity_id && n.entity_type==='ticket'){
               _setView('tickets');
-              setTimeout(()=>{const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
+              queueMicrotask(() => {const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
             else if(n.entity_type==='message' && n.entity_id){setActiveProject(n.entity_id);_setView('messages');}
             else{_setView(nav);}
@@ -9807,7 +9807,7 @@ function App(){
     // session cookie. The index route sees user_id still in session → 302 to
     // dashboard → user sees a ghost dashboard flash before 401s kick in.
     try{
-      await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)});
+      fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)});
     }catch(e){
       // Timeout or network error — server may have already cleared the session.
       // Proceed with client-side cleanup anyway.
