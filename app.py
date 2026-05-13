@@ -5735,14 +5735,10 @@ def create_google_meet_call():
                         return
                     new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", content0, count=1)
                     db3.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
-                    miss_id = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-                    db3.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (miss_id, ws_id, me, target_id, f"📴 Missed call from {sender_name}", 0, ts(), "", ts(), "", 0, 0, 0))
-                    miss_row = dict(db3.execute("SELECT * FROM direct_messages WHERE id=?", (miss_id,)).fetchone())
                 _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
                 _bust_dm_thread(ws_id, me, target_id)
-                _sse_publish(ws_id, "dm_created", {"id": miss_row.get("id"), "sender": me, "recipient": target_id, "message": miss_row})
+                # Do not create an extra "Missed call from ..." DM. The original call-card row
+                # is updated to CALL_STATUS:missed and the UI renders that single card as ended.
                 _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [me, target_id], "sender": me, "recipient": target_id, "meetUrl": meet_url, "createdAt": ts()})
             except Exception as e:
                 log.warning("[call] auto-expire failed: %s", e)
@@ -5930,7 +5926,7 @@ def respond_instant_call():
                 peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
         # Update the original invite row so old/completed calls stop rendering live Accept/Reject buttons
         # when a user opens chat history later.
-        status_text = "accepted" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
+        status_text = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
         try:
             invite = db.execute("SELECT id,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
             if invite:

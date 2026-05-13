@@ -1503,7 +1503,7 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
             <button style=${{width:34,height:34,borderRadius:'50%',border:'none',background:showNP?'var(--sf2)':'var(--sf)',boxShadow:showNP?'none':'var(--sh)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',position:'relative',color:'var(--tx2)',transition:'all .15s'}}
               onClick=${()=>setShowNP(v=>!v)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-              ${unread>0?html`<div style=${{position:'absolute',top:-3,right:-3,width:15,height:15,borderRadius:'50%',background:'#ef4444',border:'2px solid var(--sf)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:700,color:'#fff'}}>${unread>9?'9+':unread}</div>`:null}
+              ${unread>0?html`<div style=${{position:'absolute',top:-3,right:-3,width:15,height:15,borderRadius:'50%',background:'#475569',border:'2px solid var(--sf)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:700,color:'#fff'}}>${unread>9?'9+':unread}</div>`:null}
             </button>
             ${showNP?html`
               <div style=${{position:'fixed',top:58,right:14,width:350,maxHeight:460,background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,boxShadow:'0 12px 48px rgba(0,0,0,0.22)',zIndex:9500,overflow:'hidden',display:'flex',flexDirection:'column'}}>
@@ -4278,11 +4278,11 @@ function MessagesView({projects,users,cu,tasks}){
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.45)}70%{box-shadow:0 0 0 18px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}</style>
   ${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.62)',backdropFilter:'blur(8px)'}}>
     <div style=${{width:360,maxWidth:'92vw',border:'1px solid rgba(239,68,68,.42)',borderRadius:24,padding:22,background:'linear-gradient(145deg,rgba(15,23,42,.98),rgba(30,41,59,.96))',boxShadow:'0 30px 90px rgba(0,0,0,.65)',textAlign:'center'}}>
-      <div style=${{width:74,height:74,borderRadius:'50%',margin:'0 auto 14px',display:'flex',alignItems:'center',justifyContent:'center',background:'#ef4444',color:'#fff',fontSize:32,animation:'callPulse 1.25s infinite'}}>📞</div>
+      <div style=${{width:74,height:74,borderRadius:'50%',margin:'0 auto 14px',display:'flex',alignItems:'center',justifyContent:'center',background:'#475569',color:'#fff',fontSize:32,animation:'callPulse 1.25s infinite'}}>📞</div>
       <div style=${{fontSize:18,fontWeight:950,color:'var(--tx)',marginBottom:6}}>Incoming video call</div>
       <div style=${{fontSize:14,color:'var(--tx2)',lineHeight:1.5,marginBottom:18}}><b>${incomingCall.from}</b> is calling you.</div>
       <div style=${{display:'flex',gap:10,justifyContent:'center'}}>
-        <button class="btn" style=${{border:'none',background:'#ef4444',color:'#fff',fontWeight:900,padding:'11px 18px',borderRadius:999}} onClick=${()=>respondIncomingCall('reject')}>Reject</button>
+        <button class="btn" style=${{border:'none',background:'#475569',color:'#fff',fontWeight:900,padding:'11px 18px',borderRadius:999}} onClick=${()=>respondIncomingCall('reject')}>Reject</button>
         <button class="btn" style=${{border:'none',background:'#22c55e',color:'#fff',fontWeight:900,padding:'11px 20px',borderRadius:999}} onClick=${()=>respondIncomingCall('accept')}>Accept</button>
       </div>
     </div>
@@ -5104,7 +5104,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       dismissedCallIds.current.add(call.callId);
       stopRingtone();
       setIncomingCall(null);
-      ptCallStoreSet(call.callId,'missed');
+      // Local timeout only hides the popup; server updates the original call card.
+      // Do not write a local missed state that can leak into DM history.
     },20000);
     return()=>stopRingtone();
   },[incomingCall,startRingtone,stopRingtone]);
@@ -5118,8 +5119,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
-        setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
-        ptCallStoreSet(call.callId,'in_call');
+        // Wait for server call_status=in_call before showing In a call.
+        // Wait for server call_status=in_call before storing active call state.
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         if(acceptWin){acceptWin.location.href=joinUrl;trackDmMeetWindow(acceptWin,call);}
         else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
@@ -5156,7 +5157,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:38,fontWeight:950,color:'#fff',marginBottom:10,lineHeight:1.1}}>${incomingCall.from}</div>
       <div style=${{fontSize:15,color:'#cbd5e1',marginBottom:42}}>wants to connect with you now</div>
       <div style=${{display:'flex',gap:42,alignItems:'center',justifyContent:'center'}}>
-        <button title="Disconnect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#ef4444',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(239,68,68,.38)',transform:'rotate(135deg)'}} onClick=${()=>respondIncomingCall('reject')}>📞</button>
+        <button title="Disconnect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#475569',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(71,85,105,.38)',transform:'rotate(135deg)'}} onClick=${()=>respondIncomingCall('reject')}>📞</button>
         <button title="Connect" style=${{width:86,height:86,borderRadius:'50%',border:'none',background:'#22c55e',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,cursor:'pointer',boxShadow:'0 18px 45px rgba(34,197,94,.38)'}} onClick=${()=>respondIncomingCall('accept')}>📞</button>
       </div>
       <div style=${{display:'flex',gap:55,marginTop:12,fontSize:13,fontWeight:800,color:'#e2e8f0'}}><span>Disconnect</span><span>Connect</span></div>
@@ -5169,7 +5170,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
-              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#ef4444':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
+              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
               <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
@@ -5183,7 +5184,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         ${toUser?html`
           <div style=${{position:'relative'}}>
             <${Av} u=${toUser} size=${36}/>
-            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:activeCallUsers.has(toUser.id)?'#ef4444':(onlineUsers.has(toUser.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(toUser.id)?'0 0 0 1px #ef4444,0 0 8px rgba(239,68,68,.7)':(onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
+            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:activeCallUsers.has(toUser.id)?'#8b5cf6':(onlineUsers.has(toUser.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(toUser.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.7)':(onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
           </div>
           <div>
             <div style=${{fontSize:14,fontWeight:700,color:'var(--tx)'}}>${toUser.name}</div>
@@ -9174,7 +9175,8 @@ function App(){
     const expiresAt=Number(call.expiresAt||0)||0;
     if(expiresAt && Date.now()>=expiresAt){
       globalDismissedCallIds.current.add(call.callId);
-      ptCallStoreSet(call.callId,'missed');
+      // Local timeout only hides the popup; server updates the original call card.
+      // Do not write a local missed state that can leak into DM history.
       return;
     }
     setGlobalIncomingCall({callId:call.callId,from:call.from||'Someone',meetUrl:meet,peerId:call.peerId||call.sender||'',expiresAt});
@@ -9204,7 +9206,7 @@ function App(){
       try{
         const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
         if(action==='accept'){
-          ptCallStoreSet(call.callId,'in_call');
+          // Wait for server call_status=in_call before storing active call state.
           const joinUrl=(r&&r.meetUrl)||call.meetUrl;
           if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
           else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
@@ -9225,7 +9227,7 @@ function App(){
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
-          ptCallStoreSet(call.callId,'in_call');
+          // Wait for server call_status=in_call before storing active call state.
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
         else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
@@ -9247,7 +9249,8 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
-      ptCallStoreSet(call.callId,'missed');
+      // Local timeout only hides the popup; server updates the original call card.
+      // Do not write a local missed state that can leak into DM history.
     },remaining);
     return()=>{ if(globalCallTimeoutRef.current)clearTimeout(globalCallTimeoutRef.current); stopGlobalRingtone(); };
   },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
@@ -9967,7 +9970,7 @@ function App(){
         <div style=${{fontSize:32,fontWeight:950,lineHeight:1.1,marginBottom:8}}>${globalIncomingCall.from}</div>
         <div style=${{fontSize:14,color:'#cbd5e1',marginBottom:34}}>is inviting you to a Google Meet call</div>
         <div style=${{display:'flex',justifyContent:'center',gap:34}}>
-          <button title="Disconnect" onClick=${()=>respondGlobalIncomingCall('reject')} style=${{width:82,height:82,borderRadius:'50%',border:'none',background:'#ef4444',color:'#fff',fontSize:34,cursor:'pointer',boxShadow:'0 18px 50px rgba(239,68,68,.42)',transform:'rotate(135deg)'}}>📞</button>
+          <button title="Disconnect" onClick=${()=>respondGlobalIncomingCall('reject')} style=${{width:82,height:82,borderRadius:'50%',border:'none',background:'#475569',color:'#fff',fontSize:34,cursor:'pointer',boxShadow:'0 18px 50px rgba(239,68,68,.42)',transform:'rotate(135deg)'}}>📞</button>
           <button title="Connect" onClick=${()=>respondGlobalIncomingCall('accept')} style=${{width:82,height:82,borderRadius:'50%',border:'none',background:'#22c55e',color:'#fff',fontSize:34,cursor:'pointer',boxShadow:'0 18px 50px rgba(34,197,94,.42)'}}>📞</button>
         </div>
         <div style=${{display:'flex',justifyContent:'center',gap:47,marginTop:12,fontSize:13,fontWeight:900,color:'#e2e8f0'}}><span>Disconnect</span><span>Connect</span></div>
