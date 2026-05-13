@@ -6011,12 +6011,35 @@ def send_dm():
     ws_id=wid()
     me=session["user_id"]
     now=ts()
+    client_msg_id=(d.get("client_msg_id") or "").strip()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
     with get_db() as db:
         target=db.execute("SELECT id FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (recipient, ws_id)).fetchone()
         if not target:
             return jsonify({"error":"Recipient not found"}),404
+
+        # Idempotency guard: fast double-clicks, Enter+button submits, mobile retries,
+        # or client reconnection retries must not create 3-4 copies of the same DM.
+        # We cannot rely on schema changes here, so use client_msg_id when present and
+        # also collapse identical sender/recipient/content/reply_to messages in a short window.
+        recent_cutoff=(datetime.now()-timedelta(seconds=8)).strftime('%Y-%m-%dT%H:%M:%S')
+        existing=None
+        if client_msg_id:
+            existing=db.execute("""SELECT * FROM direct_messages
+                WHERE workspace_id=? AND sender=? AND recipient=? AND content LIKE ?
+                ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, f"%CLIENT_MSG_ID:{client_msg_id}%")).fetchone()
+        if not existing:
+            existing=db.execute("""SELECT * FROM direct_messages
+                WHERE workspace_id=? AND sender=? AND recipient=? AND content=? AND COALESCE(reply_to,'')=? AND ts>=?
+                ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, content, reply_to, recent_cutoff)).fetchone()
+        if existing:
+            row=dict(existing)
+            sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
+            sender_name=sender["name"] if sender and sender["name"] else "Someone"
+            preview=content[:60]+("..." if len(content)>60 else "")
+            return jsonify(row)
+
         db.execute("""INSERT INTO direct_messages(
                        id,workspace_id,sender,recipient,content,read,ts,reply_to,
                        delivered_at,seen_at,edited,deleted,pinned
@@ -6033,7 +6056,10 @@ def send_dm():
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     _bust_dm_thread(ws_id, me, recipient)
     _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
-    _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid})
+    _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
+    # Real browser push as a fallback when SSE is on another worker or the browser tab is throttled.
+    # This uses the actual message id/tag, so clicking cannot open a fake/empty alert.
+    _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
 
     # Do slower notification fanout after the response path.
     def _after_dm_send():

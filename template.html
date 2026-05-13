@@ -5305,6 +5305,44 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
   const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
+  const dmSeenIdsRef=useRef(new Set());
+  const dmRecentSendRef=useRef({key:'',at:0});
+  const normalizeDmList=useCallback((list)=>{
+    const arr=Array.isArray(list)?list:[];
+    const byId=new Map();
+    const contentSeen=new Map();
+    const out=[];
+    for(const raw of arr){
+      if(!raw)continue;
+      const m={...raw};
+      const id=String(m.id||'');
+      if(id&&byId.has(id)){
+        Object.assign(byId.get(id),m,{_pending:byId.get(id)._pending&&m._pending});
+        continue;
+      }
+      // Remove short-window duplicates created by double-clicks/retries. Keep call cards untouched.
+      const content=String(m.content||'');
+      const isCall=content.includes('CALL_INVITE:')||content.includes('Missed call')||content.includes('Call ended');
+      const t=Date.parse(m.ts||'')||0;
+      const contentKey=[m.sender,m.recipient,content,m.reply_to||''].join('|');
+      const prev=contentSeen.get(contentKey);
+      if(!isCall&&prev&&Math.abs(t-(Date.parse(prev.ts||'')||0))<8000){
+        continue;
+      }
+      contentSeen.set(contentKey,m);
+      if(id)byId.set(id,m);
+      out.push(m);
+    }
+    out.sort((a,b)=>(Date.parse(a.ts||'')||0)-(Date.parse(b.ts||'')||0));
+    return out;
+  },[]);
+  const setThreadMessages=useCallback((peer,list,alsoSetVisible=true)=>{
+    const normalized=normalizeDmList(list);
+    threadCache.current.set(peer,normalized);
+    _saveDmCache(peer,normalized);
+    if(alsoSetVisible&&peer===activeToRef.current){ setMsgThreadId(peer); setMsgs(normalized); }
+    return normalized;
+  },[normalizeDmList]);
   const pendingReactionUntil=useRef(new Map());
   const parseIncomingCall=(m)=>{
     if(!m||!m.content)return null;
@@ -5433,10 +5471,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const seen=new Set(existing.map(m=>m.id));
         merged=mergePendingReactionState(id,[...existing,...d.filter(m=>!seen.has(m.id))]);
       }else merged=mergePendingReactionState(id,d);
-      threadCache.current.set(id,merged);
-      _saveDmCache(id,merged);
-      setMsgThreadId(id);
-      setMsgs(merged);
+      setThreadMessages(id,merged,true);
       setLoadingThread('');
       onDmRead(id);
       console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
@@ -5446,7 +5481,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread('');
       console.warn('[DM] load failed', {id,response:d});
     }
-  },[onDmRead,mergePendingReactionState]);
+  },[onDmRead,mergePendingReactionState,setThreadMessages]);
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
@@ -5465,8 +5500,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const seen=new Set(cached.map(m=>m.id));
         const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
         setMsgThreadId(requestedTo);
-        threadCache.current.set(requestedTo,merged);
-        _saveDmCache(requestedTo,merged);
+        setThreadMessages(requestedTo,merged,false);
         setLoadingThread('');
         setMsgs(prev=>{
           if(merged.length>prev.length){playSound('notif');}
@@ -5518,10 +5552,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             if(base.some(x=>x.id===m.id))return base;
             const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender));
             const next=mergePendingReactionState(toId,[...withoutTmp,m]);
-            threadCache.current.set(toId,next);
-            _saveDmCache(toId,next);
+            setThreadMessages(toId,next,false);
             if(m.sender!==cu.id)playSound('notif');
-            return next;
+            return normalizeDmList(next);
           });
           onDmRead(toId);
           return;
@@ -5531,7 +5564,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
-  },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone]);
+  },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone,setThreadMessages,normalizeDmList]);
   // Prefetch DM threads as soon as the DM screen opens, so clicking a member
   // uses memory cache instead of showing the empty/start placeholder while the API responds.
   const dmPrefetchedRef=useRef(false);
@@ -5588,8 +5621,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       catch(e){console.warn('[DM] edit failed',e);loadMsgs(recipient,'edit-rollback');}
       finally{setSending(false);}return;
     }
+    const sendKey=recipient+'|'+c+'|'+(replyTo&&replyTo.id||'');
+    if(dmRecentSendRef.current.key===sendKey && Date.now()-dmRecentSendRef.current.at<2500)return;
+    dmRecentSendRef.current={key:sendKey,at:Date.now()};
+    const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
     setTxt('');setReplyTo(null);
     setSending(true);
     setMsgThreadId(recipient);
@@ -5601,7 +5638,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId});
       if(recipient===activeToRef.current&&m&&m.id){
         setMsgThreadId(recipient);
         setMsgs(prev=>{
@@ -5720,7 +5757,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const handleDmDrop=(ev)=>{ev.preventDefault();const file=ev.dataTransfer&&ev.dataTransfer.files&&ev.dataTransfer.files[0];sendDmAttachmentFile(file);};
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
   const toUser=safe(users).find(u=>u.id===toId);
-  const visibleMsgs=(msgThreadId===toId)?msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id)):[];
+  const visibleMsgs=(msgThreadId===toId)?normalizeDmList(msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id))):[];
   const displayMsgs=msgSearch.trim()?visibleMsgs.filter(m=>String(m.content||'').toLowerCase().includes(msgSearch.toLowerCase())):visibleMsgs;
   const pinnedMsgs=visibleMsgs.filter(m=>m.pinned||m.pinned===1);
   const firstUnreadIdx=displayMsgs.findIndex(m=>m.sender===toId&&Number(m.read||0)===0);
@@ -10281,7 +10318,10 @@ function App(){
         if(Array.isArray(latest)){
           latest.slice().reverse().forEach(m=>{
             if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
+            window.__ptSeenDmIds=window.__ptSeenDmIds||new Set();
+            if(window.__ptSeenDmIds.has(m.id)){ notifiedDmIdsRef.current.add(m.id); return; }
             notifiedDmIdsRef.current.add(m.id);
+            window.__ptSeenDmIds.add(m.id);
             // Inject the real message immediately into the DM panel. This avoids
             // fake alerts that open before the message is visible.
             window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
@@ -10299,7 +10339,7 @@ function App(){
       }catch(e){}
     };
     pullLatest();
-    const id=setInterval(pullLatest,2000); // hard fallback when SSE is delayed/disconnected
+    const id=setInterval(pullLatest,1000); // hard fallback when SSE is delayed/disconnected
     return()=>clearInterval(id);
   },[cu,data.users]);
 
