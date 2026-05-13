@@ -4203,18 +4203,30 @@ function MessagesView({projects,users,cu,tasks}){
     dmMeetWindowRef.current=win;
     dmMeetCallRef.current=call;
     if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
-    dmMeetCloseTimerRef.current=setInterval(()=>{
-      const w=dmMeetWindowRef.current,c=dmMeetCallRef.current;
-      if(!w||!c)return;
-      if(w.closed){
-        clearInterval(dmMeetCloseTimerRef.current);dmMeetCloseTimerRef.current=null;
-        dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
-        setActiveCallUsers(new Set());
+    const finishCall=()=>{
+      const c=dmMeetCallRef.current;
+      if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
+      dmMeetCloseTimerRef.current=null;
+      dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
+      setActiveCallUsers(new Set());
+      if(c){
         ptCallStoreSet(c.callId,'ended');
         window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
+    };
+    dmMeetCloseTimerRef.current=setInterval(async()=>{
+      const w=dmMeetWindowRef.current,c=dmMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){ finishCall(); return; }
+      try{
+        const st=await api.get('/api/calls/status?callId='+encodeURIComponent(c.callId),{quiet:true});
+        if(st&&['ended','missed','rejected'].includes(String(st.status||'').toLowerCase())) finishCall();
+      }catch(e){}
     },1500);
+    const onFocus=()=>{try{const w=dmMeetWindowRef.current;if(w&&w.closed)finishCall();}catch(e){}};
+    window.addEventListener('focus',onFocus);
+    setTimeout(()=>window.removeEventListener('focus',onFocus),6*60*60*1000);
   };
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
@@ -9033,18 +9045,30 @@ function App(){
     globalMeetWindowRef.current=win;
     globalMeetCallRef.current=call;
     if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
-    globalMeetCloseTimerRef.current=setInterval(()=>{
-      const w=globalMeetWindowRef.current,c=globalMeetCallRef.current;
-      if(!w||!c)return;
-      if(w.closed){
-        clearInterval(globalMeetCloseTimerRef.current);globalMeetCloseTimerRef.current=null;
-        globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
-        setGlobalActiveCallUsers(new Set());
+    const finishCall=()=>{
+      const c=globalMeetCallRef.current;
+      if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
+      globalMeetCloseTimerRef.current=null;
+      globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
+      setGlobalActiveCallUsers(new Set());
+      if(c){
         ptCallStoreSet(c.callId,'ended');
         window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
+    };
+    globalMeetCloseTimerRef.current=setInterval(async()=>{
+      const w=globalMeetWindowRef.current,c=globalMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){ finishCall(); return; }
+      try{
+        const st=await api.get('/api/calls/status?callId='+encodeURIComponent(c.callId),{quiet:true});
+        if(st&&['ended','missed','rejected'].includes(String(st.status||'').toLowerCase())) finishCall();
+      }catch(e){}
     },1500);
+    const onFocus=()=>{try{const w=globalMeetWindowRef.current;if(w&&w.closed)finishCall();}catch(e){}};
+    window.addEventListener('focus',onFocus);
+    setTimeout(()=>window.removeEventListener('focus',onFocus),6*60*60*1000);
   },[]);
   const showGlobalCallPopup=useCallback((call)=>{
     if(!call||!call.callId||globalDismissedCallIds.current.has(call.callId))return;
@@ -9181,8 +9205,24 @@ function App(){
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
+            if(msg.type==='web_notification'&&msg.data){
+              const n=msg.data||{};
+              if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm') _setView&&_setView('dm');}, {tag:n.tag||('pt-'+Date.now())});
+              }
+            }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'||msg.type==='call_status'){
               api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
+              if(msg.type==='dm_created'){
+                try{
+                  const m=(msg.data&&msg.data.message)||{};
+                  if(String(m.recipient||'')===String(cu.id)&&String(m.sender||'')!==String(cu.id)){
+                    const sender=(data.users||[]).find(u=>String(u.id)===String(m.sender))||{};
+                    const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90);
+                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); _setView&&_setView('dm');}, {tag:'dm-'+(m.id||Date.now())});
+                  }
+                }catch(e){}
+              }
               // Notify the active DM panel to refresh messages/call state immediately.
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
               // Fallback for calls: if the dedicated call_status event is missed but the DM invite arrives,

@@ -5846,6 +5846,28 @@ def get_incoming_calls():
             _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [caller_id, receiver_id], "sender": caller_id, "recipient": receiver_id, "meetUrl": meet_url, "createdAt": ts()})
     return jsonify({"ok": True, "calls": calls})
 
+@app.route("/api/calls/status", methods=["GET"])
+@login_required
+def get_call_status():
+    call_id = (request.args.get("callId") or "").strip()
+    ws_id = wid(); me = session["user_id"]
+    if not call_id:
+        return jsonify({"ok": False, "error": "Missing callId"}), 400
+    with get_db() as db:
+        invite = db.execute("SELECT sender,recipient,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+        if not invite or me not in (invite["sender"], invite["recipient"]):
+            return jsonify({"ok": False, "error": "Call not found"}), 404
+        raw = invite["content"] or ""
+        status = ((re.search(r"CALL_STATUS:([^\n]+)", raw) or [None, "ended"])[1] or "ended").strip().lower()
+        expires_at = int(((re.search(r"CALL_EXPIRES_AT:([^\n]+)", raw) or [None, "0"])[1] or "0").strip() or 0)
+        now_ms = int(datetime.now().timestamp()*1000)
+        if status == "ringing" and expires_at and now_ms > expires_at:
+            status = "missed"
+            new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", raw, count=1)
+            db.execute("UPDATE direct_messages SET content=? WHERE workspace_id=? AND content LIKE ?", (new_content, ws_id, f"%CALL_INVITE:{call_id}%"))
+            _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [invite["sender"], invite["recipient"]], "sender": invite["sender"], "recipient": invite["recipient"], "createdAt": ts()})
+        return jsonify({"ok": True, "callId": call_id, "status": status, "users": [invite["sender"], invite["recipient"]]})
+
 @app.route("/api/calls/end", methods=["POST"])
 @login_required
 def end_instant_call_alias():
@@ -6011,6 +6033,7 @@ def send_dm():
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     _bust_dm_thread(ws_id, me, recipient)
     _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+    _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid})
 
     # Do slower notification fanout after the response path.
     def _after_dm_send():
@@ -9068,6 +9091,8 @@ def sse_stream():
             return True  # fail-open: keep stream alive if DB is momentarily unavailable
 
     def generate():
+        yield ": " + (" " * 2048) + "\n\n"
+        yield "retry: 1000\n"
         yield "data: {\"type\":\"connected\"}\n\n"
         heartbeat_count = 0
         try:
@@ -9100,6 +9125,7 @@ def sse_stream():
             "Cache-Control":    "no-cache",
             "X-Accel-Buffering":"no",
             "Connection":       "keep-alive",
+            "Content-Encoding": "identity",
         }
     )
     return resp

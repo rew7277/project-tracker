@@ -4999,18 +4999,30 @@ function MessagesView({projects,users,cu,tasks}){
     dmMeetWindowRef.current=win;
     dmMeetCallRef.current=call;
     if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
-    dmMeetCloseTimerRef.current=setInterval(()=>{
-      const w=dmMeetWindowRef.current,c=dmMeetCallRef.current;
-      if(!w||!c)return;
-      if(w.closed){
-        clearInterval(dmMeetCloseTimerRef.current);dmMeetCloseTimerRef.current=null;
-        dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
-        setActiveCallUsers(new Set());
+    const finishCall=()=>{
+      const c=dmMeetCallRef.current;
+      if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
+      dmMeetCloseTimerRef.current=null;
+      dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
+      setActiveCallUsers(new Set());
+      if(c){
         ptCallStoreSet(c.callId,'ended');
         window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
+    };
+    dmMeetCloseTimerRef.current=setInterval(async()=>{
+      const w=dmMeetWindowRef.current,c=dmMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){ finishCall(); return; }
+      try{
+        const st=await api.get('/api/calls/status?callId='+encodeURIComponent(c.callId),{quiet:true});
+        if(st&&['ended','missed','rejected'].includes(String(st.status||'').toLowerCase())) finishCall();
+      }catch(e){}
     },1500);
+    const onFocus=()=>{try{const w=dmMeetWindowRef.current;if(w&&w.closed)finishCall();}catch(e){}};
+    window.addEventListener('focus',onFocus);
+    setTimeout(()=>window.removeEventListener('focus',onFocus),6*60*60*1000);
   };
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
@@ -9843,18 +9855,30 @@ function App(){
     globalMeetWindowRef.current=win;
     globalMeetCallRef.current=call;
     if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
-    globalMeetCloseTimerRef.current=setInterval(()=>{
-      const w=globalMeetWindowRef.current,c=globalMeetCallRef.current;
-      if(!w||!c)return;
-      if(w.closed){
-        clearInterval(globalMeetCloseTimerRef.current);globalMeetCloseTimerRef.current=null;
-        globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
-        setGlobalActiveCallUsers(new Set());
+    const finishCall=()=>{
+      const c=globalMeetCallRef.current;
+      if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
+      globalMeetCloseTimerRef.current=null;
+      globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
+      setGlobalActiveCallUsers(new Set());
+      if(c){
         ptCallStoreSet(c.callId,'ended');
         window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
+    };
+    globalMeetCloseTimerRef.current=setInterval(async()=>{
+      const w=globalMeetWindowRef.current,c=globalMeetCallRef.current;
+      if(!w||!c)return;
+      if(w.closed){ finishCall(); return; }
+      try{
+        const st=await api.get('/api/calls/status?callId='+encodeURIComponent(c.callId),{quiet:true});
+        if(st&&['ended','missed','rejected'].includes(String(st.status||'').toLowerCase())) finishCall();
+      }catch(e){}
     },1500);
+    const onFocus=()=>{try{const w=globalMeetWindowRef.current;if(w&&w.closed)finishCall();}catch(e){}};
+    window.addEventListener('focus',onFocus);
+    setTimeout(()=>window.removeEventListener('focus',onFocus),6*60*60*1000);
   },[]);
   const showGlobalCallPopup=useCallback((call)=>{
     if(!call||!call.callId||globalDismissedCallIds.current.has(call.callId))return;
@@ -9989,6 +10013,12 @@ function App(){
             }
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
+            }
+            if(msg.type==='web_notification'&&msg.data){
+              const n=msg.data||{};
+              if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm') _setView&&_setView('dm');}, {tag:n.tag||('pt-'+Date.now())});
+              }
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
               api.get('/api/dm/unread').then(d=>{if(Array.isArray(d))setDmUnread(d);}).catch(()=>{});
