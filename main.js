@@ -4830,7 +4830,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(requestedTo);
       }
-    },30000);
+    },2000);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -9373,7 +9373,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm') _setView&&_setView('dm');}, {tag:n.tag||('pt-'+Date.now())});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now())});
               }
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
@@ -9632,6 +9632,7 @@ function App(){
   },[dark]);
 
   const prevDmsRef=useRef([]);
+  const notifiedDmIdsRef=useRef(new Set());
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
   const NTITLES={
     task_assigned:'✅ Task assigned to you', status_change:'🔄 Task status changed', comment:'💬 New comment on task', deadline:'⏰ Deadline approaching', dm:'📨 New direct message', project_added:'📁 Added to a project', reminder:'⏰ Reminder', call:'📞 Huddle call', message:'#️⃣ New channel message', };
@@ -9649,20 +9650,26 @@ function App(){
         // ── DM unread ──────────────────────────────────────────────
         const dms=result.dm_unread;
         if(Array.isArray(dms)){
-          const prev=prevDmsRef.current;
-          dms.forEach(x=>{
-            const old=prev.find(p=>p.sender===x.sender);
-            if(!old||(x.cnt||0)>(old.cnt||0)){
-              const sender=data.users.find(u=>u.id===x.sender);
-              const sname=sender?sender.name:'Someone';
-              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
-              showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
-              playSound('notif');
-            }
-          });
           prevDmsRef.current=dms;
           setDmUnread(dms);
         }
+        // Poll the actual latest unread DM messages, not just counters. This
+        // prevents delayed/fake alerts that open before the message is visible.
+        api.get('/api/dm/latest-unread',{quiet:true}).then(latest=>{
+          if(!Array.isArray(latest))return;
+          latest.slice().reverse().forEach(m=>{
+            if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
+            notifiedDmIdsRef.current.add(m.id);
+            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
+            const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
+            const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
+            if(!String(m.content||'').includes('CALL_INVITE:')){
+              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
+              showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);_setView('dm');window.focus();},{tag:'dm-'+m.id});
+              playSound('notif');
+            }
+          });
+        }).catch(()=>{});
 
         // ── Notifications ──────────────────────────────────────────
         const notifs=result.notifications;
@@ -9711,10 +9718,10 @@ function App(){
     };
 
     // Startup jitter: 5–13 s delay so poll doesn't collide with bootstrap on mount
-    const startDelay=5000+Math.random()*8000;
+    const startDelay=600;
     const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-    const id=setInterval(pollOnce,20000); // fallback only — SSE is primary
+    const id=setInterval(pollOnce,2000); // fast fallback when SSE/proxy is delayed
     return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
   },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 

@@ -4686,7 +4686,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(requestedTo);
       }
-    },30000);
+    },2000);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -9208,7 +9208,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm') _setView&&_setView('dm');}, {tag:n.tag||('pt-'+Date.now())});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now())});
               }
             }
             if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'||msg.type==='call_status'){
@@ -9219,7 +9219,7 @@ function App(){
                   if(String(m.recipient||'')===String(cu.id)&&String(m.sender||'')!==String(cu.id)){
                     const sender=(data.users||[]).find(u=>String(u.id)===String(m.sender))||{};
                     const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90);
-                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); _setView&&_setView('dm');}, {tag:'dm-'+(m.id||Date.now())});
+                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); try{setDmTargetUser&&setDmTargetUser(m.sender);}catch(_){} _setView&&_setView('dm');}, {tag:'dm-'+(m.id||Date.now())});
                   }
                 }catch(e){}
               }
@@ -9473,29 +9473,37 @@ function App(){
   },[dark]);
 
   const prevDmsRef=useRef([]);
+  const notifiedDmIdsRef=useRef(new Set());
   useEffect(()=>{
     if(!cu)return;
-    api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}});
-    const id=setInterval(()=>{
-      api.get('/api/dm/unread').then(d=>{
-        if(!Array.isArray(d))return;
-        const prev=prevDmsRef.current;
-        d.forEach(x=>{
-          const old=prev.find(p=>p.sender===x.sender);
-          if(!old||(x.cnt||0)>(old.cnt||0)){
-            const sender=data.users.find(u=>u.id===x.sender);
-            const sname=sender?sender.name:'Someone';
-            window._pfToast&&window._pfToast('dm','💬 New message from '+sname,'Tap to open Direct Messages');
-            showBrowserNotif('💬 '+sname,'New message',()=>{setDmTargetUser(x.sender);_setView('dm');window.focus();},{tag:'dm-'+x.sender});
-            playSound('notif');
-          }
-        });
-        prevDmsRef.current=d;
-        setDmUnread(d);
-      });
-    },15000); // fallback only — SSE is primary for environments where SSE is delayed/disconnected
+    api.get('/api/dm/unread').then(d=>{if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}}).catch(()=>{});
+    const pullLatest=async()=>{
+      try{
+        const latest=await api.get('/api/dm/latest-unread',{quiet:true});
+        if(Array.isArray(latest)){
+          latest.slice().reverse().forEach(m=>{
+            if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
+            notifiedDmIdsRef.current.add(m.id);
+            // Inject the real message immediately into the DM panel. This avoids
+            // fake alerts that open before the message is visible.
+            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
+            const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
+            const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
+            if(!String(m.content||'').includes('CALL_INVITE:')){
+              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
+              showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);_setView('dm');window.focus();},{tag:'dm-'+m.id});
+              playSound('notif');
+            }
+          });
+        }
+        const d=await api.get('/api/dm/unread',{quiet:true});
+        if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}
+      }catch(e){}
+    };
+    pullLatest();
+    const id=setInterval(pullLatest,2000); // hard fallback when SSE is delayed/disconnected
     return()=>clearInterval(id);
-  },[cu]); // intentionally omit data.users to avoid reset — sender name is best-effort
+  },[cu,data.users]);
 
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
   const NTITLES={

@@ -6058,6 +6058,38 @@ def _get_dm_message_with_reactions(db, ws_id, mid):
     rows=db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchall()
     return _attach_dm_reactions(db, ws_id, rows)[0] if rows else None
 
+
+@app.route("/api/dm/latest-unread")
+@login_required
+def latest_unread_dm():
+    """Return latest unread DM messages for the current user.
+
+    This is a fast fallback for environments where SSE can be delayed by
+    proxies/multiple workers. The frontend polls it every ~2s and injects
+    the actual message into the active DM thread, so users never see fake
+    notifications that open to an empty conversation.
+    """
+    ws_id = wid()
+    me = session["user_id"]
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT dm.*, u.name AS sender_name
+            FROM direct_messages dm
+            LEFT JOIN users u ON u.id = dm.sender AND u.workspace_id = dm.workspace_id
+            WHERE dm.workspace_id=?
+              AND dm.recipient=?
+              AND dm.read=0
+              AND COALESCE(dm.deleted,0)=0
+            ORDER BY dm.ts DESC
+            LIMIT 20
+        """, (ws_id, me)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["sender_name"] = d.get("sender_name") or "Someone"
+            out.append(d)
+    return jsonify(out)
+
 @app.route("/api/dm/edit",methods=["POST"])
 @login_required
 def edit_dm():
