@@ -93,7 +93,7 @@ const _apiRequest = async (u, opts = {}) => {
     if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
     const cleanOpts = { ...opts };
     delete cleanOpts.timeoutMs;
-    const r = fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
+    const r = await fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
     if (r.status === 304 && cached) return cached.data;
     const data = await _apiRead(r);
     if (!r.ok) {
@@ -3915,7 +3915,7 @@ function renderChatContent(text){
       actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
     const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
-    const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
+    const body=isEnded?'Call ended':(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling.'));
     return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
@@ -4851,7 +4851,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     (async()=>{
       const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
+      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
         while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
       });
       await Promise.all(workers);
@@ -4871,7 +4871,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   }
   const send=async()=>{
-    if(!txt.trim()||!toId||sending)return;
+    if(!txt.trim()||!toId)return;
     const recipient=toId;
     const c=txt.trim();
     if(editingId){
@@ -4887,9 +4887,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dmRecentSendRef.current={key:sendKey,at:Date.now()};
     const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false};
     setTxt('');setReplyTo(null);
-    setSending(true);
+    setSending(false);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -4961,8 +4961,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
     setStartingMeet(true);
-    const hostWin=openMeetLoadingWindow();
-    // Keep ProjectTracker open and do not render any intermediate ProjectTracker-created page in the Meet tab.
+    let hostWin=null;
+    // Do not open an intermediate blank/loading tab. Open Meet directly only after URL is ready.
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(!r||!r.ok||!r.meetUrl){
@@ -4980,7 +4980,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       }
       // Caller initiated the meeting from a direct click, so open Meet immediately in a new tab.
       const call={callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl};
-      if(hostWin){hostWin.location.href=r.meetUrl;trackDmMeetWindow(hostWin,call);} else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker and click the call button again.','error');
+      hostWin=window.open(r.meetUrl,'_blank','noopener,noreferrer');
+      if(hostWin){trackDmMeetWindow(hostWin,call);} else if(typeof window.showToast==='function') window.showToast('Meeting invite sent. Allow popups or use the Join button in chat.','success');
       if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);
       ptCallStoreSet(r.callId,'ringing');
       if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting for them to accept','success');
@@ -5016,7 +5017,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const body=(file.type||'').startsWith('image/')?'🖼️ '+uploaded.name+'\n/api/files/'+uploaded.id:'📎 '+uploaded.name+'\n/api/files/'+uploaded.id;
         const recipient=toId;
         const tempId='tmpdm'+Date.now();
-        const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
+        const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false};
         setReplyTo(null);setMsgThreadId(recipient);
         setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
@@ -5212,7 +5213,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':m._pending?'Sending…':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
@@ -5231,7 +5232,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(34,197,94,.18)':'linear-gradient(135deg,#16a34a,#22c55e)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
-        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
+        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId}>➤</button>
       </div>
     </div>
   </div>`;
@@ -6875,7 +6876,7 @@ function AIAssistant({cu,projects,tasks,users}){
     };
     (async()=>{
       const q=[...ids];
-      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
+      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
         while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
       });
       await Promise.all(workers);

@@ -228,7 +228,7 @@ const _apiRequest = async (u, opts = {}) => {
     if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
     const cleanOpts = { ...opts };
     delete cleanOpts.timeoutMs;
-    const r = fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
+    const r = await fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
     if (r.status === 304 && cached) return cached.data;
     const data = await _apiRead(r);
     if (!r.ok) {
