@@ -5942,8 +5942,8 @@ def respond_instant_call():
                 db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
         except Exception as e:
             log.warning("[call] failed to update invite status: %s", e)
-        if peer_id:
-            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else (f"📴 Missed call from {me_name}" if action == "missed" else f"📴 {me_name} ended the call"))
+        if peer_id and action != "missed":
+            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else f"📴 {me_name} ended the call")
             mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
             db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -6021,10 +6021,10 @@ def send_dm():
 
     # Push an immediate ephemeral DM event before the DB round-trip finishes.
     # This makes the receiver see the message instantly even when PostgreSQL is slow.
-    # The committed row is published again after INSERT and replaces this temp row by client_msg_id.
+    # The committed row is published again after INSERT and merges by the same id/client_msg_id without UI blinking.
     try:
         instant_row={
-            "id": "srvtmp"+mid, "workspace_id": ws_id, "sender": me, "recipient": recipient,
+            "id": mid, "workspace_id": ws_id, "sender": me, "recipient": recipient,
             "content": content, "read": 0, "ts": now, "reply_to": reply_to or "",
             "delivered_at": now, "seen_at": "", "edited": 0, "deleted": 0, "pinned": 0,
             "client_msg_id": client_msg_id, "_instant": True

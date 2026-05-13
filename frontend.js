@@ -3912,11 +3912,11 @@ function renderChatContent(text){
     // Accept/Reject is ONLY for fresh ringing calls. Completed, missed, rejected, ended,
     // expired, and accepted/in-call history cards are rendered as plain status cards.
     if(!isEnded&&callId&&hasValidMeet&&isRinging&&(!receiverId||receiverId===currentUserId)){
-      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#475569;color:white;cursor:pointer">Dismiss</button></div>`;
     }
     const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
     const body=isEnded?'Call ended':(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling.'));
-    return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
+    return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(59,130,246,.28);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(37,99,235,.16),rgba(14,165,233,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#2563eb'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
   if(meetMatch || /📹\s*Google Meet call/i.test(raw)){
@@ -4919,7 +4919,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
-        setTimeout(()=>loadMsgs(recipient,'send-ack-reconcile'),150);
       }else{
         throw new Error('DM send did not return a committed message');
       }
@@ -4935,7 +4934,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setTxt(c);
     }finally{
       setSending(false);
-      window.dispatchEvent(new CustomEvent('pt:refresh',{detail:{type:'dm_sent',recipient}}));
     }
   };
   const deleteMessage=async(m)=>{
@@ -5107,7 +5105,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       stopRingtone();
       setIncomingCall(null);
       ptCallStoreSet(call.callId,'missed');
-      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
     },20000);
     return()=>stopRingtone();
   },[incomingCall,startRingtone,stopRingtone]);
@@ -9178,7 +9175,6 @@ function App(){
     if(expiresAt && Date.now()>=expiresAt){
       globalDismissedCallIds.current.add(call.callId);
       ptCallStoreSet(call.callId,'missed');
-      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId||call.sender||'',meetUrl:meet},{quiet:true}).catch(()=>{});
       return;
     }
     setGlobalIncomingCall({callId:call.callId,from:call.from||'Someone',meetUrl:meet,peerId:call.peerId||call.sender||'',expiresAt});
@@ -9229,8 +9225,7 @@ function App(){
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
-        setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
-        ptCallStoreSet(call.callId,'in_call');
+          ptCallStoreSet(call.callId,'in_call');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
         else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
@@ -9253,7 +9248,6 @@ function App(){
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
       ptCallStoreSet(call.callId,'missed');
-      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
     },remaining);
     return()=>{ if(globalCallTimeoutRef.current)clearTimeout(globalCallTimeoutRef.current); stopGlobalRingtone(); };
   },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
