@@ -4038,7 +4038,10 @@ function renderChatContent(text){
     const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
     const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Teammate').trim();
     const ended=/accepted the call|rejected the call|ended the call/i.test(raw)||['ended','rejected','accepted'].includes(status);
-    return `<div style="min-width:210px;max-width:300px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:white">📞</span><span>${ended?'Call update':'Video call'}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${ended?safe.replace(/\n/g,'<br>'):(escapeHtml(from)+' is calling. Use the popup to accept or reject.')}</div></div>`;
+    const callId=(callIdMatch&&callIdMatch[1]?callIdMatch[1]:'').trim();
+    const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
+    const actions=(!ended&&callId)?`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`:'';
+    return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:white">📞</span><span>${ended?'Call update':'Video call'}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${ended?safe.replace(/\n/g,'<br>'):(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.')}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
   if(meetMatch || /📹\s*Google Meet call/i.test(raw)){
@@ -4931,7 +4934,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return next;
         });
       }
-      setActiveCallUsers(new Set([cu.id,recipient].filter(Boolean)));
+      // Do not mark both users In Call at invite time. Only mark In Call after receiver accepts.
       setOutgoingMeetCall({callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl});
       if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… click Join as host when ready','success');
     }catch(e){
@@ -9099,6 +9102,41 @@ function App(){
     }catch{}
   },[stopGlobalRingtone]);
 
+
+  const showGlobalCallPopup=useCallback((call)=>{
+    if(!call||!call.callId||globalDismissedCallIds.current.has(call.callId))return;
+    const meet=String(call.meetUrl||'').trim();
+    if(!/^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(meet))return;
+    setGlobalIncomingCall({callId:call.callId,from:call.from||'Someone',meetUrl:meet,peerId:call.peerId||call.sender||''});
+  },[]);
+
+  useEffect(()=>{
+    const h=async(ev)=>{
+      const btn=ev.target&&ev.target.closest&&ev.target.closest('[data-pt-call-action]');
+      if(!btn)return;
+      ev.preventDefault(); ev.stopPropagation();
+      const call={callId:btn.getAttribute('data-pt-call-id')||'',meetUrl:btn.getAttribute('data-pt-call-meet')||'',from:btn.getAttribute('data-pt-call-from')||'Someone',peerId:btn.getAttribute('data-pt-call-peer')||''};
+      const action=btn.getAttribute('data-pt-call-action')||'popup';
+      if(action==='popup'){
+        showGlobalCallPopup(call);
+        return;
+      }
+      globalDismissedCallIds.current.add(call.callId);
+      stopGlobalRingtone();
+      setGlobalIncomingCall(null);
+      try{
+        const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
+        if(action==='accept'){
+          const joinUrl=(r&&r.meetUrl)||call.meetUrl;
+          const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+          if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
+        }
+      }catch(e){ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
+    };
+    document.addEventListener('click',h,true);
+    return()=>document.removeEventListener('click',h,true);
+  },[showGlobalCallPopup,stopGlobalRingtone]);
+
   const respondGlobalIncomingCall=useCallback(async(action)=>{
     const call=globalIncomingCall;
     if(!call)return;
@@ -9160,6 +9198,21 @@ function App(){
                 if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
               }).catch(()=>{});
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
+              // Fallback for calls: if the dedicated call_status event is missed but the DM invite arrives,
+              // still show the full-screen call popup. This fixes chat-card-only ringing.
+              try{
+                const m=(msg.data&&msg.data.message)||msg.message||msg.data||{};
+                const raw=String(m.content||'');
+                const callId=((raw.match(/CALL_INVITE:([^\n]+)/)||[])[1]||'').trim();
+                const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
+                const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
+                const isMine=String(m.recipient||'')===String(cu.id);
+                if(callId&&status==='ringing'&&isMine&&!globalDismissedCallIds.current.has(callId)){
+                  const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
+                  showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});
+                  showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});},{tag:'call-'+callId,requireInteraction:true});
+                }
+              }catch(e){}
             }
             if(msg.type==='call_status'&&msg.data){
               const d=msg.data||{};
