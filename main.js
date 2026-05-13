@@ -4153,6 +4153,7 @@ function MessagesView({projects,users,cu,tasks}){
   const [chanSearch,setChanSearch]=useState('');
   const [newestFirst,setNewestFirst]=useState(false);
   const [incomingCall,setIncomingCall]=useState(null);
+  const [outgoingMeetCall,setOutgoingMeetCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
 
   const loadMsgs=useCallback(async(id,mode='switch')=>{
@@ -4328,6 +4329,12 @@ function MessagesView({projects,users,cu,tasks}){
       if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
     }
   };
+  const joinOutgoingMeet=()=>{
+    if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
+    if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
+  };
+  const closeOutgoingMeet=()=>setOutgoingMeetCall(null);
   return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.45)}70%{box-shadow:0 0 0 18px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}</style>
   ${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.62)',backdropFilter:'blur(8px)'}}>
     <div style=${{width:360,maxWidth:'92vw',border:'1px solid rgba(239,68,68,.42)',borderRadius:24,padding:22,background:'linear-gradient(145deg,rgba(15,23,42,.98),rgba(30,41,59,.96))',boxShadow:'0 30px 90px rgba(0,0,0,.65)',textAlign:'center'}}>
@@ -4572,6 +4579,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [recording,setRecording]=useState(false);
   const [startingMeet,setStartingMeet]=useState(false);
   const [incomingCall,setIncomingCall]=useState(null);
+  const [outgoingMeetCall,setOutgoingMeetCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
   const ringtoneRef=useRef(null);
   const ringtoneCtxRef=useRef(null);
@@ -4924,9 +4932,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
       }
       setActiveCallUsers(new Set([cu.id,recipient].filter(Boolean)));
-      const callWindow=window.open(r.meetUrl,'_blank','noopener,noreferrer');
-      if(!callWindow && typeof window.showToast==='function') window.showToast('Popup blocked. Allow popups to wait in the Meet room.','error');
-      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting in Google Meet','success');
+      setOutgoingMeetCall({callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl});
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… click Join as host when ready','success');
     }catch(e){
       console.warn('[DM] Google Meet call failed',e);
       const msg=(e&&e.message)||'Unable to create Google Meet. Configure server Google OAuth first.';
@@ -5059,7 +5066,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         const w=window.open(joinUrl,'_blank','noopener,noreferrer');
-        if(!w) window.location.href=joinUrl;
+        if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
     }catch(e){
@@ -5067,7 +5074,24 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
     }
   };
-  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'radial-gradient(circle at 50% 22%,rgba(34,197,94,.18),rgba(2,6,23,.94) 42%,rgba(0,0,0,.98))',backdropFilter:'blur(14px)'}}>
+  const joinOutgoingMeet=()=>{
+    if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
+    if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
+  };
+  const closeOutgoingMeet=()=>setOutgoingMeetCall(null);
+  return html`<style>@keyframes dmMenuPop{from{opacity:0;transform:translateY(-6px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmPickerPop{from{opacity:0;transform:translateY(8px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes dmBubbleIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}} @keyframes callPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45)}70%{box-shadow:0 0 0 28px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}</style>${outgoingMeetCall?html`<div style=${{position:'fixed',inset:0,zIndex:99998,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(2,6,23,.52)',backdropFilter:'blur(10px)'}}>
+    <div style=${{width:'min(520px,calc(100vw - 32px))',border:'1px solid rgba(148,163,184,.22)',borderRadius:28,background:'linear-gradient(180deg,rgba(15,23,42,.98),rgba(2,6,23,.98))',boxShadow:'0 30px 90px rgba(0,0,0,.55)',padding:28,textAlign:'center',color:'#fff'}}>
+      <div style=${{width:72,height:72,borderRadius:24,margin:'0 auto 16px',display:'grid',placeItems:'center',background:'rgba(34,197,94,.16)',fontSize:34}}>🎥</div>
+      <div style=${{fontSize:13,fontWeight:900,letterSpacing:'.14em',textTransform:'uppercase',color:'#93c5fd',marginBottom:8}}>Call started</div>
+      <div style=${{fontSize:30,fontWeight:950,marginBottom:8}}>Waiting for ${outgoingMeetCall.peer}</div>
+      <div style=${{fontSize:14,color:'#cbd5e1',lineHeight:1.5,marginBottom:22}}>ProjectTracker will stay open. Join Google Meet in a new tab only when you click below. The room is created with open access, so invitees should not wait in lobby.</div>
+      <div style=${{display:'flex',gap:14,justifyContent:'center',flexWrap:'wrap'}}>
+        <button onClick=${closeOutgoingMeet} style=${{border:0,borderRadius:999,padding:'14px 22px',fontWeight:900,background:'rgba(148,163,184,.16)',color:'#e2e8f0',cursor:'pointer'}}>Stay here</button>
+        <button onClick=${joinOutgoingMeet} style=${{border:0,borderRadius:999,padding:'14px 22px',fontWeight:950,background:'#22c55e',color:'#052e16',cursor:'pointer',boxShadow:'0 18px 40px rgba(34,197,94,.28)'}}>Join as host</button>
+      </div>
+    </div>
+  </div>`:null}${incomingCall?html`<div style=${{position:'fixed',inset:0,zIndex:99999,display:'flex',alignItems:'center',justifyContent:'center',background:'radial-gradient(circle at 50% 22%,rgba(34,197,94,.18),rgba(2,6,23,.94) 42%,rgba(0,0,0,.98))',backdropFilter:'blur(14px)'}}>
     <div style=${{position:'absolute',top:22,left:26,fontSize:13,fontWeight:800,color:'#fff',letterSpacing:.5,opacity:.85}}>Project Tracker Call</div>
     <div style=${{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',width:'100%',height:'100%',textAlign:'center',padding:24}}>
       <div style=${{width:132,height:132,borderRadius:'50%',marginBottom:28,display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#334155,#0f172a)',border:'3px solid rgba(255,255,255,.18)',boxShadow:'0 0 0 12px rgba(255,255,255,.04),0 30px 90px rgba(0,0,0,.65)',fontSize:54,animation:'callPulse 1.2s infinite'}}>📹</div>
@@ -9089,7 +9113,7 @@ function App(){
         _setView('dm');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         const w=window.open(joinUrl,'_blank','noopener,noreferrer');
-        if(!w) window.location.href=joinUrl;
+        if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
     }catch(e){
       console.warn('[Call] response failed',e);

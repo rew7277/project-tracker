@@ -5598,12 +5598,20 @@ def _create_google_meet_event(access_token, title, attendee_emails=None):
 def _create_google_meet_space(access_token):
     """Create a real Google Meet space using the Google Meet REST API.
 
-    This must run server-side with a valid OAuth access token. Browsers cannot
-    create Google Meet rooms anonymously; Google requires an authorized token.
+    Important UX fix: set accessType=OPEN. Without this, API-created Meet
+    rooms can inherit restricted/default host settings, so both caller and
+    receiver may sit in the lobby waiting for a host. OPEN lets anyone with the
+    generated meeting link join without knocking, which matches the instant
+    ProjectTracker call flow.
     """
     if not access_token:
         raise ValueError("Missing Google OAuth access token")
-    body = _json_mod.dumps({}).encode("utf-8")
+    body = _json_mod.dumps({
+        "config": {
+            "accessType": "OPEN",
+            "entryPointAccess": "ALL"
+        }
+    }).encode("utf-8")
     req = _urlrequest.Request("https://meet.googleapis.com/v2/spaces", data=body, method="POST", headers={
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
