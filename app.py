@@ -5908,6 +5908,9 @@ def respond_instant_call():
         invite_content = invite["content"] if invite else ""
         current_status = ((re.search(r"CALL_STATUS:([^\n]+)", invite_content) or [None, ""])[1] or "").strip().lower()
         expires_at = int((((re.search(r"CALL_EXPIRES_AT:([^\n]+)", invite_content) or [None, "0"])[1] or "0").strip()) or 0)
+        call_sender = invite["sender"] if invite else ""
+        call_recipient = invite["recipient"] if invite else ""
+        call_users = [x for x in [call_sender, call_recipient] if x]
         if action in ("accept", "reject"):
             if not invite or current_status != "ringing":
                 return jsonify({"ok": False, "error": "This call invite is no longer active", "status": current_status or "missing"}), 409
@@ -5921,9 +5924,13 @@ def respond_instant_call():
         me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
         if not peer_id:
-            msg = db.execute("SELECT sender,recipient FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
-            if msg:
-                peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+            if invite:
+                peer_id = invite["sender"] if invite["sender"] != me else invite["recipient"]
+            else:
+                msg = db.execute("SELECT sender,recipient FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
+                if msg:
+                    peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+                    call_users = [x for x in [msg["sender"], msg["recipient"]] if x]
         # Update the original invite row so old/completed calls stop rendering live Accept/Reject buttons
         # when a user opens chat history later.
         status_text = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
@@ -5938,8 +5945,10 @@ def respond_instant_call():
                 db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
         except Exception as e:
             log.warning("[call] failed to update invite status: %s", e)
-        if peer_id and action != "missed":
-            text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else f"📴 {me_name} ended the call")
+        # Do not create extra accepted/rejected/missed DM rows. The original call card is updated.
+        # Keep a single friendly ended row only for explicit manual end.
+        if peer_id and action == "end":
+            text = f"📴 {me_name} ended the call"
             mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
             db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -5948,12 +5957,12 @@ def respond_instant_call():
         else:
             row = None
     status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
-    users = [x for x in [me, peer_id] if x]
+    users = call_users or [x for x in [me, peer_id] if x]
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     if peer_id: _bust_dm_thread(ws_id, me, peer_id)
     if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
     _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url, "createdAt": now})
-    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row})
+    return jsonify({"ok": True, "status": status, "users": users, "meetUrl": meet_url, "message": row})
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required

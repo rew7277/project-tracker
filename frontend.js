@@ -3868,6 +3868,9 @@ function renderMd(text){
 function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function ptCallStoreGet(callId){try{return (JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{})[callId]||'';}catch{return '';}}
 function ptCallStoreSet(callId,status){try{if(!callId)return;const all=JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{};all[callId]=status;localStorage.setItem('ptCallState:v1',JSON.stringify(all));}catch{}}
+function ptSetActiveCallUsers(ids){try{localStorage.setItem('ptActiveCallUsers:v1',JSON.stringify(Array.from(ids||[]).filter(Boolean)));window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:Array.from(ids||[]).filter(Boolean)}}));}catch{}}
+function ptGetActiveCallUsers(){try{return new Set(JSON.parse(localStorage.getItem('ptActiveCallUsers:v1')||'[]')||[]);}catch{return new Set();}}
+function ptClearActiveCallUsers(){try{localStorage.removeItem('ptActiveCallUsers:v1');window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:[]}}));}catch{}}
 /** Open a new tab with a friendly loading page instead of about:blank.
  *  Must be called synchronously inside a user-gesture handler so the
  *  browser doesn't block the popup.  Once the Meet URL is ready, set
@@ -4229,6 +4232,7 @@ function MessagesView({projects,users,cu,tasks}){
       if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
       dmMeetCloseTimerRef.current=null;
       dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
+      ptClearActiveCallUsers();
       setActiveCallUsers(new Set());
       if(c){
         ptCallStoreSet(c.callId,'ended');
@@ -4526,7 +4530,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const callTimeoutRef=useRef(null);
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
-  const [activeCallUsers,setActiveCallUsers]=useState(new Set());
+  const [activeCallUsers,setActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
+  useEffect(()=>{const h=e=>setActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
   const dmMeetWindowRef=useRef(null);
   const dmMeetCallRef=useRef(null);
   const dmMeetCloseTimerRef=useRef(null);
@@ -4776,8 +4781,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(msg&&msg.type==='call_status'&&data){
         const ids=new Set(data.users||[]);
         if(data.callId&&data.status)ptCallStoreSet(data.callId,data.status);
-        if(data.status==='in_call') setActiveCallUsers(ids);
+        if(data.status==='in_call'){ptSetActiveCallUsers(ids); setActiveCallUsers(ids);}
         if(['rejected','ended','missed'].includes(data.status)){
+          ptClearActiveCallUsers();
           setActiveCallUsers(new Set());
           if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
         }
@@ -9105,7 +9111,8 @@ function App(){
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
   const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
-  const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(new Set());
+  const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
+  useEffect(()=>{const h=e=>setGlobalActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
   const globalDismissedCallIds=useRef(new Set());
   const globalCallTimeoutRef=useRef(null);
   const globalRingtoneRef=useRef(null);
@@ -9148,6 +9155,7 @@ function App(){
       if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
       globalMeetCloseTimerRef.current=null;
       globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
+      ptClearActiveCallUsers();
       setGlobalActiveCallUsers(new Set());
       if(c){
         ptCallStoreSet(c.callId,'ended');
@@ -9350,8 +9358,9 @@ function App(){
               const d=msg.data||{};
               const ids=new Set(d.users||[]);
               if(d.callId&&d.status)ptCallStoreSet(d.callId,d.status);
-              if(d.status==='in_call')setGlobalActiveCallUsers(ids);
+              if(d.status==='in_call'){ptSetActiveCallUsers(ids);setGlobalActiveCallUsers(ids);}
               if(['rejected','ended','missed'].includes(d.status)){
+                ptClearActiveCallUsers();
                 setGlobalActiveCallUsers(new Set());
                 if(globalIncomingCall&&globalIncomingCall.callId===d.callId){
                   globalDismissedCallIds.current.add(d.callId);

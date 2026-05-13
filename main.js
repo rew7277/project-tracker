@@ -4039,6 +4039,9 @@ function renderMd(text){
 function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function ptCallStoreGet(callId){try{return (JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{})[callId]||'';}catch{return '';}}
 function ptCallStoreSet(callId,status){try{if(!callId)return;const all=JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{};all[callId]=status;localStorage.setItem('ptCallState:v1',JSON.stringify(all));}catch{}}
+function ptSetActiveCallUsers(ids){try{localStorage.setItem('ptActiveCallUsers:v1',JSON.stringify(Array.from(ids||[]).filter(Boolean)));window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:Array.from(ids||[]).filter(Boolean)}}));}catch{}}
+function ptGetActiveCallUsers(){try{return new Set(JSON.parse(localStorage.getItem('ptActiveCallUsers:v1')||'[]')||[]);}catch{return new Set();}}
+function ptClearActiveCallUsers(){try{localStorage.removeItem('ptActiveCallUsers:v1');window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:[]}}));}catch{}}
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
@@ -4360,6 +4363,7 @@ function MessagesView({projects,users,cu,tasks}){
       if(dmMeetCloseTimerRef.current)clearInterval(dmMeetCloseTimerRef.current);
       dmMeetCloseTimerRef.current=null;
       dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
+      ptClearActiveCallUsers();
       setActiveCallUsers(new Set());
       if(c){
         ptCallStoreSet(c.callId,'ended');
@@ -4396,6 +4400,7 @@ function MessagesView({projects,users,cu,tasks}){
     }
     api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
       .then(r=>{
+        if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setActiveCallUsers&&setActiveCallUsers(ids);}catch(_){ }try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}
         if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
         if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
       })
@@ -4658,7 +4663,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const callTimeoutRef=useRef(null);
   const mediaRecorderRef=useRef(null);
   const voiceChunksRef=useRef([]);
-  const [activeCallUsers,setActiveCallUsers]=useState(new Set());
+  const [activeCallUsers,setActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
+  useEffect(()=>{const h=e=>setActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
   const dmMeetWindowRef=useRef(null);
   const dmMeetCallRef=useRef(null);
   const dmMeetCloseTimerRef=useRef(null);
@@ -4885,8 +4891,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(msg&&msg.type==='call_status'&&data){
         const ids=new Set(data.users||[]);
         if(data.callId&&data.status)ptCallStoreSet(data.callId,data.status);
-        if(data.status==='in_call') setActiveCallUsers(ids);
+        if(data.status==='in_call'){ptSetActiveCallUsers(ids); setActiveCallUsers(ids);}
         if(['rejected','ended','missed'].includes(data.status)){
+          ptClearActiveCallUsers();
           setActiveCallUsers(new Set());
           if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
         }
@@ -5232,6 +5239,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
       .then(r=>{
+        if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setActiveCallUsers&&setActiveCallUsers(ids);}catch(_){ }try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}
         if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
         if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
       })
@@ -9233,7 +9241,8 @@ function App(){
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
   const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
-  const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(new Set());
+  const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
+  useEffect(()=>{const h=e=>setGlobalActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
   const globalDismissedCallIds=useRef(new Set());
   const globalCallTimeoutRef=useRef(null);
   const globalRingtoneRef=useRef(null);
@@ -9276,6 +9285,7 @@ function App(){
       if(globalMeetCloseTimerRef.current)clearInterval(globalMeetCloseTimerRef.current);
       globalMeetCloseTimerRef.current=null;
       globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
+      ptClearActiveCallUsers();
       setGlobalActiveCallUsers(new Set());
       if(c){
         ptCallStoreSet(c.callId,'ended');
@@ -9337,7 +9347,7 @@ function App(){
         else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Accept again.','error');
       }
       api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
-        .then(r=>{if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+        .then(r=>{if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
         .catch(e=>{ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); });
     };
     document.addEventListener('click',h,true);
@@ -9358,7 +9368,7 @@ function App(){
       // Wait for server call_status=in_call before storing active call state.
     }
     api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
-      .then(r=>{if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+      .then(r=>{if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
       .catch(e=>{console.warn('[Call] response failed',e);if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');});
   },[globalIncomingCall,cu,stopGlobalRingtone,_setView,trackGlobalMeetWindow]);
 
@@ -9457,8 +9467,9 @@ function App(){
               const d=msg.data||{};
               const ids=new Set(d.users||[]);
               if(d.callId&&d.status)ptCallStoreSet(d.callId,d.status);
-              if(d.status==='in_call')setGlobalActiveCallUsers(ids);
+              if(d.status==='in_call'){ptSetActiveCallUsers(ids);setGlobalActiveCallUsers(ids);}
               if(['rejected','ended','missed'].includes(d.status)){
+                ptClearActiveCallUsers();
                 setGlobalActiveCallUsers(new Set());
                 if(globalIncomingCall&&globalIncomingCall.callId===d.callId){
                   globalDismissedCallIds.current.add(d.callId);
