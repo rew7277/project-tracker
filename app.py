@@ -5796,6 +5796,11 @@ def get_incoming_calls():
     - expired invites are marked missed and become inactive
     """
     ws_id = wid(); me = session["user_id"]
+    # Short-circuit: serve from cache (2s TTL) to avoid full table scan on every poll.
+    _cache_key = f"calls_incoming:{ws_id}:{me}"
+    _cached = _cache_get(_cache_key)
+    if _cached is not None:
+        return jsonify(_cached)
     now_ms = int(datetime.now().timestamp()*1000)
     calls = []
     expired = []
@@ -5849,7 +5854,9 @@ def get_incoming_calls():
             new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", raw, count=1)
             db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, msg_id, ws_id))
             _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [caller_id, receiver_id], "sender": caller_id, "recipient": receiver_id, "meetUrl": meet_url, "createdAt": ts()})
-    return jsonify({"ok": True, "calls": calls})
+    result = {"ok": True, "calls": calls}
+    _cache_set(_cache_key, result)
+    return jsonify(result)
 
 @app.route("/api/calls/status", methods=["GET"])
 @login_required
@@ -6019,61 +6026,82 @@ def send_dm():
     now=ts()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
+    # ── Round-trip 1: get both users in one query ─────────────────────────────
     with get_db(autocommit=True) as db:
-        target=db.execute("SELECT id FROM users WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''", (recipient, ws_id)).fetchone()
-        if not target:
-            return jsonify({"error":"Recipient not found"}),404
+        users_rows=db.execute(
+            "SELECT id,name FROM users WHERE workspace_id=? AND id IN (?,?) AND COALESCE(deleted_at,'')=''",
+            (ws_id, me, recipient)
+        ).fetchall()
+    users_map={r["id"]:r["name"] for r in (users_rows or [])}
+    if recipient not in users_map:
+        return jsonify({"error":"Recipient not found"}),404
+    sender_name=users_map.get(me) or "Someone"
+    preview=content[:60]+("..." if len(content)>60 else "")
 
-        # Hard idempotency: client_msg_id survives retries and avoids duplicates.
-        existing=None
+    # ── Round-trip 2: idempotency check + insert (client_msg_id preferred) ────
+    row=None
+    with get_db(autocommit=True) as db:
+        # Idempotency: if client_msg_id present, check for duplicate first.
         if client_msg_id:
             try:
-                existing=db.execute("""SELECT * FROM direct_messages
-                    WHERE workspace_id=? AND sender=? AND recipient=? AND client_msg_id=?
-                    ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, client_msg_id)).fetchone()
+                existing=db.execute(
+                    "SELECT * FROM direct_messages WHERE workspace_id=? AND sender=? AND client_msg_id=? LIMIT 1",
+                    (ws_id, me, client_msg_id)
+                ).fetchone()
+                if existing:
+                    row=dict(existing)
             except Exception:
-                existing=None
-        if not existing:
-            # Use IST-aware cutoff so string comparison against stored 'YYYY-MM-DDTHH:MM:SS+05:30'
-            # timestamps is correct.  datetime.now() returns UTC on Railway/Heroku, which would
-            # make the 10-second window ~5.5 hours wide and falsely suppress legitimate retries.
-            recent_cutoff=(now_ist()-timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S')+'+05:30'
-            existing=db.execute("""SELECT * FROM direct_messages
-                WHERE workspace_id=? AND sender=? AND recipient=? AND content=? AND COALESCE(reply_to,'')=? AND ts>=?
-                ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, content, reply_to, recent_cutoff)).fetchone()
-        if existing:
-            row=dict(existing)
-            return jsonify(row)
+                pass
 
-        try:
-            db.execute("""INSERT INTO direct_messages(
-                           id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                           delivered_at,seen_at,edited,deleted,pinned,client_msg_id
-                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                       (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0,client_msg_id))
-        except Exception:
-            # Older deployments may not have the client_msg_id column until migrations run.
-            db.execute("""INSERT INTO direct_messages(
-                           id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                           delivered_at,seen_at,edited,deleted,pinned
-                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                       (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0))
-        row=dict(db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone())
-        if client_msg_id and not row.get("client_msg_id"):
-            row["client_msg_id"]=client_msg_id
-        sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
-        sender_name=sender["name"] if sender and sender["name"] else "Someone"
-        preview=content[:60]+("..." if len(content)>60 else "")
-        try:
-            nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+        if not row:
             try:
-                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                           (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+                result=db.execute("""INSERT INTO direct_messages(
+                               id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
+                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
+                r=result.fetchone()
+                if r:
+                    row=dict(r)
             except Exception:
-                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                           (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
+                # RETURNING not supported or client_msg_id column missing; fall back.
+                try:
+                    db.execute("""INSERT INTO direct_messages(
+                                   id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
+                except Exception:
+                    db.execute("""INSERT INTO direct_messages(
+                                   id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                                   delivered_at,seen_at,edited,deleted,pinned
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0))
+                row={"id":mid,"workspace_id":ws_id,"sender":me,"recipient":recipient,
+                     "content":content,"read":0,"ts":now,"reply_to":reply_to or "",
+                     "delivered_at":now,"seen_at":"","edited":0,"deleted":0,"pinned":0,
+                     "client_msg_id":client_msg_id}
+
+    if not row:
+        return jsonify({"error":"Failed to send message"}),500
+
+    if client_msg_id and not row.get("client_msg_id"):
+        row["client_msg_id"]=client_msg_id
+
+    # ── Round-trip 3: notification insert — run in background ─────────────────
+    def _insert_notif():
+        nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+        try:
+            with get_db(autocommit=True) as db2:
+                try:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                               (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+                except Exception:
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                               (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
         except Exception as e:
             log.warning("[DM] notification insert failed: %s", e)
+    threading.Thread(target=_insert_notif, daemon=True).start()
 
     # Bust caches and push the committed row immediately. Keep slower Web Push work
     # outside the critical path so the receiver gets the real DB message first.

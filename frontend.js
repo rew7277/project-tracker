@@ -4906,8 +4906,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgThreadId(recipient);
         setMsgs(prev=>{
           const base=Array.isArray(prev)?prev:[];
-          const replaced=base.some(x=>x.id===tempId||x.client_msg_id===clientMsgId);
-          const list=replaced?base.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x):[...base,confirmed];
+          const replaced=base.some(x=>x.id===tempId||x.id===m.id||(x.client_msg_id&&x.client_msg_id===clientMsgId));
+          const list=replaced?base.map(x=>(x.id===tempId||x.id===m.id||(x.client_msg_id&&x.client_msg_id===clientMsgId))?confirmed:x):[...base,confirmed];
           const next=normalizeDmList(list);
           threadCache.current.set(recipient,next);
           _saveDmCache(recipient,next);
