@@ -6005,8 +6005,14 @@ def send_dm():
         sender_name=sender["name"] if sender and sender["name"] else "Someone"
         preview=content[:60]+("..." if len(content)>60 else "")
 
-    # Do slow fanout after the response path. The sender already has an
-    # optimistic bubble, and the receiver is notified by SSE from this thread.
+    # Publish the DM immediately before any slower notification work. This makes
+    # receiver chats update through SSE instantly instead of waiting for polling
+    # or the background notification insert.
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    _bust_dm_thread(ws_id, me, recipient)
+    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+
+    # Do slower notification fanout after the response path.
     def _after_dm_send():
         try:
             with get_db() as db2:
@@ -6020,8 +6026,6 @@ def send_dm():
         except Exception as e:
             log.warning("[DM] notification insert failed: %s", e)
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        _bust_dm_thread(ws_id, me, recipient)
-        _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
         _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
     threading.Thread(target=_after_dm_send, daemon=True).start()
     return jsonify(row)

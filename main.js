@@ -4356,6 +4356,7 @@ function MessagesView({projects,users,cu,tasks}){
         dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
         setActiveCallUsers(new Set());
         ptCallStoreSet(c.callId,'ended');
+        window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
     },1500);
@@ -4369,7 +4370,7 @@ function MessagesView({projects,users,cu,tasks}){
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)){
-        if(acceptWin){acceptWin.location.href=(r&&r.meetUrl)||call.meetUrl;}
+        if(acceptWin){acceptWin.location.href=(r&&r.meetUrl)||call.meetUrl;trackDmMeetWindow(acceptWin,call);}
         else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
       }
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
@@ -4848,6 +4849,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         if(data.message){applyReactionMessage(data.message);return;}
         if(data.sender===toId||data.recipient===toId)loadMsgs(toId,'reaction');
         return;
+      }
+      if(msg&&msg.type==='dm_created'&&data&&data.message){
+        const m=data.message;
+        const peer=(m.sender===cu.id)?m.recipient:m.sender;
+        const belongs=peer===toId || data.sender===toId || data.recipient===toId;
+        if(belongs){
+          setMsgThreadId(toId);
+          setLoadingThread('');
+          setMsgs(prev=>{
+            const base=Array.isArray(prev)?prev:[];
+            if(base.some(x=>x.id===m.id))return base;
+            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender));
+            const next=mergePendingReactionState(toId,[...withoutTmp,m]);
+            threadCache.current.set(toId,next);
+            _saveDmCache(toId,next);
+            if(m.sender!==cu.id)playSound('notif');
+            return next;
+          });
+          onDmRead(toId);
+          return;
+        }
       }
       loadMsgs(toId,'sse');
     };
@@ -9186,6 +9208,7 @@ function App(){
         globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
         setGlobalActiveCallUsers(new Set());
         ptCallStoreSet(c.callId,'ended');
+        window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:c.callId,status:'ended',users:[c.peerId].filter(Boolean)}}}));
         api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
     },1500);
