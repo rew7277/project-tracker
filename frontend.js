@@ -9021,7 +9021,14 @@ function App(){
     if(!call||!call.callId||globalDismissedCallIds.current.has(call.callId))return;
     const meet=String(call.meetUrl||'').trim();
     if(!/^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(meet))return;
-    setGlobalIncomingCall({callId:call.callId,from:call.from||'Someone',meetUrl:meet,peerId:call.peerId||call.sender||''});
+    const expiresAt=Number(call.expiresAt||0)||0;
+    if(expiresAt && Date.now()>=expiresAt){
+      globalDismissedCallIds.current.add(call.callId);
+      ptCallStoreSet(call.callId,'missed');
+      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId||call.sender||'',meetUrl:meet},{quiet:true}).catch(()=>{});
+      return;
+    }
+    setGlobalIncomingCall({callId:call.callId,from:call.from||'Someone',meetUrl:meet,peerId:call.peerId||call.sender||'',expiresAt});
   },[]);
 
   useEffect(()=>{
@@ -9084,6 +9091,7 @@ function App(){
   useEffect(()=>{
     if(!globalIncomingCall){stopGlobalRingtone();return;}
     startGlobalRingtone();
+    const remaining=globalIncomingCall.expiresAt ? Math.max(0, Number(globalIncomingCall.expiresAt)-Date.now()) : 20000;
     globalCallTimeoutRef.current=setTimeout(()=>{
       const call=globalIncomingCall;
       if(!call||globalDismissedCallIds.current.has(call.callId))return;
@@ -9092,8 +9100,8 @@ function App(){
       setGlobalIncomingCall(null);
       ptCallStoreSet(call.callId,'missed');
       api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
-    },20000);
-    return()=>stopGlobalRingtone();
+    },remaining);
+    return()=>{ if(globalCallTimeoutRef.current)clearTimeout(globalCallTimeoutRef.current); stopGlobalRingtone(); };
   },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
 
   useEffect(()=>{try{window.PT_CURRENT_USER_ID=cu&&cu.id?String(cu.id):'';}catch{}},[cu]);
@@ -9113,8 +9121,8 @@ function App(){
         if(!c)return;
         const expiresAt=Number(c.expiresAt||0)||0;
         if(expiresAt&&Date.now()>expiresAt)return;
-        showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender});
-        showBrowserNotif('📞 Incoming video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender});},{tag:'call-'+c.callId,requireInteraction:true});
+        showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});
+        showBrowserNotif('📞 Incoming video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});},{tag:'call-'+c.callId,requireInteraction:true});
       }catch(e){}
     };
     check();
@@ -9155,11 +9163,13 @@ function App(){
                 const callId=((raw.match(/CALL_INVITE:([^\n]+)/)||[])[1]||'').trim();
                 const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
                 const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
+                const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
                 const isMine=String(m.recipient||'')===String(cu.id);
-                if(callId&&status==='ringing'&&isMine&&!globalDismissedCallIds.current.has(callId)){
+                const isFresh=expiresAt ? Date.now()<expiresAt : false;
+                if(callId&&status==='ringing'&&isFresh&&isMine&&!globalDismissedCallIds.current.has(callId)){
                   const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Someone').trim();
-                  showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});
-                  showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});},{tag:'call-'+callId,requireInteraction:true});
+                  showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender,expiresAt});
+                  showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender,expiresAt});},{tag:'call-'+callId,requireInteraction:true});
                 }
               }catch(e){}
             }
@@ -9183,7 +9193,7 @@ function App(){
                 const validMeet=typeof d.meetUrl==='string' && /^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(d.meetUrl);
                 if(isFresh&&validMeet){
                   const sender=(data.users||[]).find(u=>u.id===d.sender)||{};
-                  setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl,peerId:d.sender});
+                  setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl,peerId:d.sender,expiresAt});
                   showBrowserNotif('📞 Incoming video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
                 }
               }

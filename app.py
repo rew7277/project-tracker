@@ -5811,6 +5811,15 @@ def get_incoming_calls():
             call_id = ((re.search(r"CALL_INVITE:([^\n]+)", raw) or [None, ""])[1] or "").strip()
             meet_url = ((re.search(r"MEET_LINK:([^\n]+)", raw) or [None, ""])[1] or "").strip()
             expires_at = int(((re.search(r"CALL_EXPIRES_AT:([^\n]+)", raw) or [None, "0"])[1] or "0").strip() or 0)
+            # Safety fallback: older deployments/process restarts may leave CALL_STATUS:ringing
+            # in history. Treat any ringing invite older than 20s as expired even if the
+            # timeout thread did not run or CALL_EXPIRES_AT is missing/bad.
+            try:
+                msg_age_ms = max(0, int((datetime.now() - datetime.fromisoformat((r["ts"] or now()).replace("Z","+00:00").replace("+00:00",""))).total_seconds()*1000))
+            except Exception:
+                msg_age_ms = 999999
+            if not expires_at:
+                expires_at = now_ms - 1 if msg_age_ms > 20000 else now_ms + max(1000, 20000 - msg_age_ms)
             caller_id = ((re.search(r"CALL_CALLER_ID:([^\n]+)", raw) or [None, r["sender"]])[1] or r["sender"]).strip()
             receiver_id = ((re.search(r"CALL_RECEIVER_ID:([^\n]+)", raw) or [None, r["recipient"]])[1] or r["recipient"]).strip()
             caller_name = ((re.search(r"CALL_FROM:([^\n]+)", raw) or [None, r["caller_name"] or "Someone"])[1] or "Someone").strip()
