@@ -6050,33 +6050,34 @@ def send_dm():
         sender_name=sender["name"] if sender and sender["name"] else "Someone"
         preview=content[:60]+("..." if len(content)>60 else "")
 
-    # Publish the DM immediately before any slower notification work. This makes
-    # receiver chats update through SSE instantly instead of waiting for polling
-    # or the background notification insert.
-    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-    _bust_dm_thread(ws_id, me, recipient)
-    _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
-    _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
-    # Real browser push as a fallback when SSE is on another worker or the browser tab is throttled.
-    # This uses the actual message id/tag, so clicking cannot open a fake/empty alert.
-    _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
-
-    # Do slower notification fanout after the response path.
-    def _after_dm_send():
+    # IMPORTANT: respond to the sender immediately after the DB insert.
+    # Earlier versions waited for cache busting / SSE / push notification work.
+    # On Railway/proxy pressure that made the sender bubble stay as “Sending…”
+    # and made the receiver see the message 15–60 seconds later.  The realtime
+    # fanout now runs in a tiny background job using the already-created row.
+    def _after_dm_send_realtime():
         try:
-            with get_db() as db2:
-                nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-                try:
-                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
-                except Exception:
-                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
+            _bust_dm_thread(ws_id, me, recipient)
+            _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+            _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+            _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
+            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
+            try:
+                with get_db() as db2:
+                    nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+                    try:
+                        db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                                    (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+                    except Exception:
+                        db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                                    (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
+            except Exception as e:
+                log.warning("[DM] notification insert failed: %s", e)
+            _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+            _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
         except Exception as e:
-            log.warning("[DM] notification insert failed: %s", e)
-        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
-    threading.Thread(target=_after_dm_send, daemon=True).start()
+            log.warning("[DM] realtime fanout failed: %s", e)
+    threading.Thread(target=_after_dm_send_realtime, daemon=True).start()
     return jsonify(row)
 
 

@@ -4864,7 +4864,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         });
         onDmRead(requestedTo);
       }
-    },2000);
+    },700);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -4906,7 +4906,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setMsgs(prev=>{
             const base=Array.isArray(prev)?prev:[];
             if(base.some(x=>x.id===m.id))return base;
-            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender));
+            const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
             const next=mergePendingReactionState(toId,[...withoutTmp,m]);
             setThreadMessages(toId,next,false);
             if(m.sender!==cu.id)playSound('notif');
@@ -4994,16 +4994,30 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId});
+      const postPromise=api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId});
+      const m=await Promise.race([
+        postPromise,
+        new Promise(resolve=>setTimeout(()=>resolve({ok:false,timeout:true}),8000))
+      ]);
       if(recipient===activeToRef.current&&m&&m.id){
+        const confirmed={...m,_pending:false,_failed:false};
         setMsgThreadId(recipient);
         setMsgs(prev=>{
-          const next=prev.map(x=>x.id===tempId?m:x);
+          const next=normalizeDmList(prev.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x));
           threadCache.current.set(recipient,next);
           _saveDmCache(recipient,next);
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
+      }else if(m&&m.timeout){
+        // Do not leave the sender bubble stuck as Sending forever. The server
+        // insert usually succeeded but realtime fanout/proxy response was slow;
+        // mark it sent locally and reconcile from /api/dm shortly after.
+        setMsgs(prev=>{
+          const next=prev.map(x=>x.id===tempId?{...x,_pending:false,_softSent:true}:x);
+          threadCache.current.set(recipient,next); _saveDmCache(recipient,next); return next;
+        });
+        setTimeout(()=>loadMsgs(recipient,'send-timeout-reconcile'),1200);
       }
     }catch(e){
       console.warn('[DM] send failed', e);
