@@ -3868,6 +3868,20 @@ function renderMd(text){
 function escapeHtml(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function ptCallStoreGet(callId){try{return (JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{})[callId]||'';}catch{return '';}}
 function ptCallStoreSet(callId,status){try{if(!callId)return;const all=JSON.parse(localStorage.getItem('ptCallState:v1')||'{}')||{};all[callId]=status;localStorage.setItem('ptCallState:v1',JSON.stringify(all));}catch{}}
+/** Open a new tab with a friendly loading page instead of about:blank.
+ *  Must be called synchronously inside a user-gesture handler so the
+ *  browser doesn't block the popup.  Once the Meet URL is ready, set
+ *  win.location.href to navigate the tab to the real meeting. */
+function openMeetLoadingWindow(){
+  const win=window.open('','_blank');
+  if(!win)return null;
+  try{
+    win.document.open();
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connecting to Google Meet…</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:20px}svg{animation:spin 1.2s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}h1{font-size:20px;font-weight:600;color:#f1f5f9}p{font-size:14px;color:#94a3b8}</style></head><body><svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="20" stroke="#334155" stroke-width="4"/><path d="M24 4a20 20 0 0 1 20 20" stroke="#3b82f6" stroke-width="4" stroke-linecap="round"/></svg><h1>Connecting to Google Meet…</h1><p>Please wait while your meeting room is being created.</p></body></html>`);
+    win.document.close();
+  }catch(e){}
+  return win;
+}
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
@@ -4241,7 +4255,7 @@ function MessagesView({projects,users,cu,tasks}){
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
+    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)){
@@ -4947,7 +4961,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
     setStartingMeet(true);
-    const hostWin=window.open('about:blank','_blank');
+    const hostWin=openMeetLoadingWindow();
     // Keep ProjectTracker open and do not render any intermediate ProjectTracker-created page in the Meet tab.
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
@@ -5098,7 +5112,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
+    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
@@ -9185,7 +9199,7 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
-      const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
+      const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
       try{
         const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
         if(action==='accept'){
@@ -9206,7 +9220,7 @@ function App(){
     globalDismissedCallIds.current.add(call.callId);
     stopGlobalRingtone();
     setGlobalIncomingCall(null);
-    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
+    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){

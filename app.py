@@ -720,23 +720,25 @@ def _cache_set(key, val):
         _CACHE[key] = {"val": val, "ts": _time.time(), "refreshing": False}
 
 def _cache_bust(workspace_id, *tables):
-    """Invalidate specific table caches for a workspace on writes."""
+    """Invalidate specific table caches for a workspace on writes.
+    Uses SCAN (non-blocking) instead of KEYS to avoid stalling Redis."""
     if _redis_client is not None:
         try:
-            keys_to_delete = []
+            keys_to_delete = set()
+            patterns = []
             for t in tables:
-                # Use targeted pattern per table — much faster than scanning all ws keys
-                pattern = f"ptcache:{t}:{workspace_id}*"
-                matched = _redis_client.keys(pattern)
-                keys_to_delete.extend(matched)
-                # Also bust appdata cache which embeds multiple tables
+                patterns.append(f"ptcache:{t}:{workspace_id}*")
                 if t != "appdata":
-                    appdata_pattern = f"ptcache:appdata:{workspace_id}*"
-                    keys_to_delete.extend(_redis_client.keys(appdata_pattern))
-            # Deduplicate and delete in one round-trip
-            unique_keys = list(set(keys_to_delete))
-            if unique_keys:
-                _redis_client.delete(*unique_keys)
+                    patterns.append(f"ptcache:appdata:{workspace_id}*")
+            for pattern in set(patterns):
+                cursor = 0
+                while True:
+                    cursor, batch = _redis_client.scan(cursor, match=pattern, count=200)
+                    keys_to_delete.update(batch)
+                    if cursor == 0:
+                        break
+            if keys_to_delete:
+                _redis_client.delete(*keys_to_delete)
             return
         except Exception:
             pass
@@ -782,13 +784,19 @@ def _cache_inject_item(workspace_id, bucket, item):
         except Exception: pass
 
 def _cache_bust_ws(workspace_id):
-    """Bust ALL cache entries for a workspace."""
+    """Bust ALL cache entries for a workspace (uses SCAN, non-blocking)."""
     if _redis_client is not None:
         try:
             pattern = f"ptcache:*{workspace_id}*"
-            keys = _redis_client.keys(pattern)
-            if keys:
-                _redis_client.delete(*keys)
+            keys_to_delete = set()
+            cursor = 0
+            while True:
+                cursor, batch = _redis_client.scan(cursor, match=pattern, count=200)
+                keys_to_delete.update(batch)
+                if cursor == 0:
+                    break
+            if keys_to_delete:
+                _redis_client.delete(*keys_to_delete)
             return
         except Exception:
             pass
@@ -9089,16 +9097,25 @@ def full_audit_log():
     return jsonify(rows=[dict(r) for r in rows], total=total, page=page, pages=max(1, -(-total//limit)))
 
 # ═══════════════════════════════════════════════════════════════
-#  REAL-TIME SERVER-SENT EVENTS
+#  REAL-TIME SERVER-SENT EVENTS  (Redis Pub/Sub cross-worker)
 # ═══════════════════════════════════════════════════════════════
 import queue as _queue
 _sse_clients: dict[str, list] = {}
 _sse_lock = threading.Lock()
 
-def _sse_publish(workspace_id, event_type, data):
+# ── Redis Pub/Sub for cross-worker SSE delivery ──────────────────
+# When Redis is available each gunicorn worker subscribes to the
+# "sse_bus" channel.  _sse_publish pushes to Redis so ALL workers
+# forward the event to their locally-connected SSE clients.
+# Falls back to in-process-only delivery when Redis is not set.
+_SSE_REDIS_CHANNEL = "pt_sse_bus"
+_sse_pubsub_client = None   # dedicated Redis connection for pub/sub
+
+def _sse_local_push(workspace_id, event_type, data):
+    """Push an event into this worker's in-memory SSE queues."""
     with _sse_lock:
         queues = _sse_clients.get(workspace_id, [])
-        dead   = []
+        dead = []
         for q in queues:
             try:
                 q.put_nowait({"type": event_type, "data": data})
@@ -9106,6 +9123,49 @@ def _sse_publish(workspace_id, event_type, data):
                 dead.append(q)
         for q in dead:
             queues.remove(q)
+
+def _sse_publish(workspace_id, event_type, data):
+    """Publish an SSE event.  Uses Redis Pub/Sub when available so that
+    ALL gunicorn workers deliver the event to their connected clients."""
+    payload = json.dumps({"ws": workspace_id, "type": event_type, "data": data},
+                         separators=(",", ":"))
+    if _redis_client is not None:
+        try:
+            _redis_client.publish(_SSE_REDIS_CHANNEL, payload)
+            return   # Redis listener will call _sse_local_push on every worker
+        except Exception as _pub_err:
+            log.warning("[SSE] Redis publish failed (%s) — falling back to local", _pub_err)
+    # No Redis: deliver only to this worker's clients (single-worker mode)
+    _sse_local_push(workspace_id, event_type, data)
+
+def _sse_redis_listener():
+    """Background thread that subscribes to the Redis SSE bus and forwards
+    messages to this worker's local SSE queues.  Reconnects automatically."""
+    _REDIS_URL = os.environ.get("REDIS_URL", "")
+    if not _REDIS_URL:
+        return  # Nothing to do without Redis
+    import redis as _redis_lib
+    while True:
+        try:
+            r = _redis_lib.from_url(_REDIS_URL, decode_responses=True,
+                                     socket_connect_timeout=5, socket_timeout=30)
+            ps = r.pubsub(ignore_subscribe_messages=True)
+            ps.subscribe(_SSE_REDIS_CHANNEL)
+            log.info("[SSE] Redis pub/sub listener ready on %s", _SSE_REDIS_CHANNEL)
+            for msg in ps.listen():
+                if msg and msg.get("type") == "message":
+                    try:
+                        ev = json.loads(msg["data"])
+                        _sse_local_push(ev["ws"], ev["type"], ev["data"])
+                    except Exception:
+                        pass
+        except Exception as _le:
+            log.warning("[SSE] Redis listener error (%s) — reconnecting in 3s", _le)
+            time.sleep(3)
+
+# Start the listener thread once per worker process
+_sse_listener_thread = threading.Thread(target=_sse_redis_listener, daemon=True)
+_sse_listener_thread.start()
 
 @app.route("/api/stream")
 @login_required
