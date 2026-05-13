@@ -5761,13 +5761,29 @@ def respond_instant_call():
     if action not in ("accept", "reject", "end", "missed"):
         return jsonify({"ok": False, "error": "Invalid call action"}), 400
     ws_id = wid(); me = session["user_id"]; now = ts()
+    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
+    updated_invites = []
     with get_db() as db:
         me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
-        if not peer_id:
-            msg = db.execute("SELECT sender,recipient FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
-            if msg:
-                peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+        invite_rows = db.execute("SELECT * FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 5", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchall()
+        if not peer_id and invite_rows:
+            msg = invite_rows[0]
+            peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
+        # Rewrite the original invite message status so old/completed calls render as call history,
+        # not as active Accept/Reject cards after refresh or thread reload.
+        for inv in invite_rows:
+            content = inv["content"] or ""
+            if "CALL_STATUS:" in content:
+                import re as _re
+                next_content = _re.sub(r"CALL_STATUS:[^\n]+", f"CALL_STATUS:{status}", content)
+            else:
+                next_content = content + f"\nCALL_STATUS:{status}"
+            if next_content != content:
+                db.execute("UPDATE direct_messages SET content=?, edited=1 WHERE id=? AND workspace_id=?", (next_content, inv["id"], ws_id))
+                updated = db.execute("SELECT * FROM direct_messages WHERE id=?", (inv["id"],)).fetchone()
+                if updated:
+                    updated_invites.append(dict(updated))
         if peer_id:
             text = f"✅ {me_name} accepted the call" if action == "accept" else (f"❌ {me_name} rejected the call" if action == "reject" else (f"📴 Missed call from {me_name}" if action == "missed" else f"📴 {me_name} ended the call"))
             mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
@@ -5777,13 +5793,14 @@ def respond_instant_call():
             row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
         else:
             row = None
-    status = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
     users = [x for x in [me, peer_id] if x]
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     if peer_id: _bust_dm_thread(ws_id, me, peer_id)
+    for inv in updated_invites:
+        _sse_publish(ws_id, "dm_updated", {"id": inv.get("id"), "sender": inv.get("sender"), "recipient": inv.get("recipient"), "message": inv})
     if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
     _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url, "createdAt": now})
-    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row})
+    return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row, "updatedInvites": updated_invites})
 
 @app.route("/api/dm/react",methods=["POST"])
 @login_required
