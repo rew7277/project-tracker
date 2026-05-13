@@ -2428,6 +2428,8 @@ def init_db():
             "ALTER TABLE direct_messages ADD COLUMN delivered_at TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN seen_at TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN reply_to TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN client_msg_id TEXT DEFAULT ''",
+            "CREATE INDEX IF NOT EXISTS idx_dm_client_msg ON direct_messages(workspace_id, sender, recipient, client_msg_id)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
@@ -6003,6 +6005,7 @@ def send_dm():
     content=(d.get("content") or "").strip()
     recipient=(d.get("recipient") or "").strip()
     reply_to=(d.get("reply_to") or "").strip()
+    client_msg_id=(d.get("client_msg_id") or "").strip()
     if not content:
         return jsonify({"error":"Empty"}),400
     if not recipient:
@@ -6011,7 +6014,6 @@ def send_dm():
     ws_id=wid()
     me=session["user_id"]
     now=ts()
-    client_msg_id=(d.get("client_msg_id") or "").strip()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
     with get_db() as db:
@@ -6019,65 +6021,71 @@ def send_dm():
         if not target:
             return jsonify({"error":"Recipient not found"}),404
 
-        # Idempotency guard: fast double-clicks, Enter+button submits, mobile retries,
-        # or client reconnection retries must not create 3-4 copies of the same DM.
-        # We cannot rely on schema changes here, so use client_msg_id when present and
-        # also collapse identical sender/recipient/content/reply_to messages in a short window.
-        recent_cutoff=(datetime.now()-timedelta(seconds=8)).strftime('%Y-%m-%dT%H:%M:%S')
+        # Hard idempotency: client_msg_id survives retries and avoids duplicates.
         existing=None
         if client_msg_id:
-            existing=db.execute("""SELECT * FROM direct_messages
-                WHERE workspace_id=? AND sender=? AND recipient=? AND content LIKE ?
-                ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, f"%CLIENT_MSG_ID:{client_msg_id}%")).fetchone()
+            try:
+                existing=db.execute("""SELECT * FROM direct_messages
+                    WHERE workspace_id=? AND sender=? AND recipient=? AND client_msg_id=?
+                    ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, client_msg_id)).fetchone()
+            except Exception:
+                existing=None
         if not existing:
+            recent_cutoff=(datetime.now()-timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S')
             existing=db.execute("""SELECT * FROM direct_messages
                 WHERE workspace_id=? AND sender=? AND recipient=? AND content=? AND COALESCE(reply_to,'')=? AND ts>=?
                 ORDER BY ts DESC LIMIT 1""", (ws_id, me, recipient, content, reply_to, recent_cutoff)).fetchone()
         if existing:
             row=dict(existing)
-            sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
-            sender_name=sender["name"] if sender and sender["name"] else "Someone"
-            preview=content[:60]+("..." if len(content)>60 else "")
             return jsonify(row)
 
-        db.execute("""INSERT INTO direct_messages(
-                       id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                       delivered_at,seen_at,edited,deleted,pinned
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                   (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0))
+        try:
+            db.execute("""INSERT INTO direct_messages(
+                           id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                           delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0,client_msg_id))
+        except Exception:
+            # Older deployments may not have the client_msg_id column until migrations run.
+            db.execute("""INSERT INTO direct_messages(
+                           id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                           delivered_at,seen_at,edited,deleted,pinned
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (mid,ws_id,me,recipient,content,0,now,reply_to,now,"",0,0,0))
         row=dict(db.execute("SELECT * FROM direct_messages WHERE id=? AND workspace_id=?",(mid,ws_id)).fetchone())
+        if client_msg_id and not row.get("client_msg_id"):
+            row["client_msg_id"]=client_msg_id
         sender=db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?",(me,ws_id)).fetchone()
         sender_name=sender["name"] if sender and sender["name"] else "Someone"
         preview=content[:60]+("..." if len(content)>60 else "")
-
-    # IMPORTANT: respond to the sender immediately after the DB insert.
-    # Earlier versions waited for cache busting / SSE / push notification work.
-    # On Railway/proxy pressure that made the sender bubble stay as “Sending…”
-    # and made the receiver see the message 15–60 seconds later.  The realtime
-    # fanout now runs in a tiny background job using the already-created row.
-    def _after_dm_send_realtime():
         try:
-            _bust_dm_thread(ws_id, me, recipient)
-            _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-            _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
-            _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
-            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
+            nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
             try:
-                with get_db() as db2:
-                    nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-                    try:
-                        db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                                    (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
-                    except Exception:
-                        db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                                    (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
-            except Exception as e:
-                log.warning("[DM] notification insert failed: %s", e)
-            _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-            _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient})
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
+                           (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+            except Exception:
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                           (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
         except Exception as e:
-            log.warning("[DM] realtime fanout failed: %s", e)
-    threading.Thread(target=_after_dm_send_realtime, daemon=True).start()
+            log.warning("[DM] notification insert failed: %s", e)
+
+    # Bust caches and push the committed row immediately. Keep slower Web Push work
+    # outside the critical path so the receiver gets the real DB message first.
+    try:
+        _bust_dm_thread(ws_id, me, recipient)
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": recipient, "content": preview, "message": row})
+        _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
+        _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": mid})
+    except Exception as e:
+        log.warning("[DM] immediate SSE fanout failed: %s", e)
+
+    def _after_dm_push():
+        try:
+            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
+        except Exception as e:
+            log.warning("[DM] web push failed: %s", e)
+    threading.Thread(target=_after_dm_push, daemon=True).start()
     return jsonify(row)
 
 
