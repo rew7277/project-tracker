@@ -3878,6 +3878,9 @@ function renderChatContent(text){
     if(localTerminal.includes(stored)) effectiveStatus=stored;
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
     const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
+    const callerId=((raw.match(/CALL_CALLER_ID:([^\n]+)/)||[])[1]||'').trim();
+    const receiverId=((raw.match(/CALL_RECEIVER_ID:([^\n]+)/)||[])[1]||'').trim();
+    const currentUserId=String(window.PT_CURRENT_USER_ID||'');
     const isExpired=(effectiveStatus==='ringing')&&(!expiresAt||Date.now()>expiresAt);
     const finalStatus=isExpired?'missed':effectiveStatus;
     const isOngoing=finalStatus==='in_call';
@@ -3887,8 +3890,8 @@ function renderChatContent(text){
     let actions='';
     // Accept/Reject is ONLY for fresh ringing calls. Completed, missed, rejected, ended,
     // expired, and accepted/in-call history cards are rendered as plain status cards.
-    if(!isEnded&&callId&&hasValidMeet&&isRinging){
-      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+    if(!isEnded&&callId&&hasValidMeet&&isRinging&&(!receiverId||receiverId===currentUserId)){
+      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
     const title=isEnded?'Call ended':(isOngoing?'Call in progress':'Video call');
     const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
@@ -4208,7 +4211,7 @@ function MessagesView({projects,users,cu,tasks}){
         dmMeetWindowRef.current=null;dmMeetCallRef.current=null;
         setActiveCallUsers(new Set());
         ptCallStoreSet(c.callId,'ended');
-        api.post('/api/calls/respond',{callId:c.callId,action:'end',peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
+        api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
     },1500);
   };
@@ -4504,6 +4507,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id || dismissedCallIds.current.has(id))return null;
     const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
     const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
+    const callerId=((raw.match(/CALL_CALLER_ID:([^\n]+)/)||[])[1]||'').trim();
+    const receiverId=((raw.match(/CALL_RECEIVER_ID:([^\n]+)/)||[])[1]||'').trim();
+    const currentUserId=String(window.PT_CURRENT_USER_ID||'');
     if(status && status!=='ringing')return null;
     if(!expiresAt || Date.now()>expiresAt)return null;
     if(m.recipient && m.recipient!==cu.id)return null;
@@ -9007,7 +9013,7 @@ function App(){
         globalMeetWindowRef.current=null;globalMeetCallRef.current=null;
         setGlobalActiveCallUsers(new Set());
         ptCallStoreSet(c.callId,'ended');
-        api.post('/api/calls/respond',{callId:c.callId,action:'end',peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
+        api.post('/api/calls/end',{callId:c.callId,peerId:c.peerId,meetUrl:c.meetUrl},{quiet:true}).catch(()=>{});
       }
     },1500);
   },[]);
@@ -9064,8 +9070,6 @@ function App(){
       if(action==='accept'){
         setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         ptCallStoreSet(call.callId,'in_call');
-        setDmTargetUser(call.peerId);
-        _setView('dm');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         const w=window.open(joinUrl,'_blank');
         if(w)trackGlobalMeetWindow(w,call);
@@ -9091,6 +9095,32 @@ function App(){
     },20000);
     return()=>stopGlobalRingtone();
   },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
+
+  useEffect(()=>{try{window.PT_CURRENT_USER_ID=cu&&cu.id?String(cu.id):'';}catch{}},[cu]);
+
+  // Polling fallback for incoming calls. SSE is instant, but this guarantees the
+  // receiver gets the caller badge even if /api/stream reconnects or a page misses
+  // the live event. Only active ringing calls for the current user are returned.
+  useEffect(()=>{
+    if(!cu)return;
+    let stopped=false;
+    const check=async()=>{
+      try{
+        const res=await api.get('/api/calls/incoming',{quiet:true});
+        const calls=(res&&Array.isArray(res.calls))?res.calls:[];
+        if(stopped||!calls.length)return;
+        const c=calls.find(x=>x&&x.callId&&!globalDismissedCallIds.current.has(x.callId));
+        if(!c)return;
+        const expiresAt=Number(c.expiresAt||0)||0;
+        if(expiresAt&&Date.now()>expiresAt)return;
+        showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender});
+        showBrowserNotif('📞 Incoming video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender});},{tag:'call-'+c.callId,requireInteraction:true});
+      }catch(e){}
+    };
+    check();
+    const id=setInterval(check,3000);
+    return()=>{stopped=true;clearInterval(id);};
+  },[cu,showGlobalCallPopup]);
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
   // A single EventSource replaces the need for manual polling on task/project/
@@ -9127,7 +9157,7 @@ function App(){
                 const status=((raw.match(/CALL_STATUS:([^\n]+)/)||[])[1]||'ringing').trim().toLowerCase();
                 const isMine=String(m.recipient||'')===String(cu.id);
                 if(callId&&status==='ringing'&&isMine&&!globalDismissedCallIds.current.has(callId)){
-                  const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone').trim();
+                  const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Someone').trim();
                   showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});
                   showBrowserNotif('📞 Incoming video call', from+' is calling you',()=>{window.focus();showGlobalCallPopup({callId,from,meetUrl,peerId:m.sender});},{tag:'call-'+callId,requireInteraction:true});
                 }
@@ -9147,8 +9177,9 @@ function App(){
                 }
               }
               if(d.status==='ringing'&&d.recipient===cu.id&&!globalDismissedCallIds.current.has(d.callId)){
+                const expiresAt=Number(d.expiresAt||0)||0;
                 const createdAt=d.createdAt?Date.parse(d.createdAt):Date.now();
-                const isFresh=Number.isFinite(createdAt)?(Date.now()-createdAt<120000):true;
+                const isFresh=expiresAt ? Date.now()<expiresAt : (Number.isFinite(createdAt)?(Date.now()-createdAt<20000):true);
                 const validMeet=typeof d.meetUrl==='string' && /^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(d.meetUrl);
                 if(isFresh&&validMeet){
                   const sender=(data.users||[]).find(u=>u.id===d.sender)||{};

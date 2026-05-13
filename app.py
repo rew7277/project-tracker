@@ -5779,6 +5779,99 @@ def create_google_meet_call():
         "message": row
     })
 
+
+@app.route("/api/calls/incoming", methods=["GET"])
+@login_required
+def get_incoming_calls():
+    """Return active ringing calls for the logged-in receiver.
+
+    Correct flow enforced here:
+    - only receiver sees incoming caller badge
+    - only status=ringing and not expired is returned
+    - expired invites are marked missed and become inactive
+    """
+    ws_id = wid(); me = session["user_id"]
+    now_ms = int(datetime.now().timestamp()*1000)
+    calls = []
+    expired = []
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT dm.*, u.name AS caller_name
+            FROM direct_messages dm
+            LEFT JOIN users u ON u.id=dm.sender AND u.workspace_id=dm.workspace_id
+            WHERE dm.workspace_id=?
+              AND dm.recipient=?
+              AND dm.content LIKE '%CALL_INVITE:%'
+              AND dm.content LIKE '%CALL_STATUS:ringing%'
+            ORDER BY dm.ts DESC
+            LIMIT 20
+        """, (ws_id, me)).fetchall()
+        for r in rows:
+            raw = r["content"] or ""
+            call_id = ((re.search(r"CALL_INVITE:([^\n]+)", raw) or [None, ""])[1] or "").strip()
+            meet_url = ((re.search(r"MEET_LINK:([^\n]+)", raw) or [None, ""])[1] or "").strip()
+            expires_at = int(((re.search(r"CALL_EXPIRES_AT:([^\n]+)", raw) or [None, "0"])[1] or "0").strip() or 0)
+            caller_id = ((re.search(r"CALL_CALLER_ID:([^\n]+)", raw) or [None, r["sender"]])[1] or r["sender"]).strip()
+            receiver_id = ((re.search(r"CALL_RECEIVER_ID:([^\n]+)", raw) or [None, r["recipient"]])[1] or r["recipient"]).strip()
+            caller_name = ((re.search(r"CALL_FROM:([^\n]+)", raw) or [None, r["caller_name"] or "Someone"])[1] or "Someone").strip()
+            if not call_id or receiver_id != me:
+                continue
+            if not meet_url.startswith("https://meet.google.com/"):
+                continue
+            if expires_at and now_ms > expires_at:
+                expired.append((r["id"], raw, call_id, caller_id, receiver_id, meet_url))
+                continue
+            calls.append({
+                "callId": call_id,
+                "status": "ringing",
+                "sender": caller_id,
+                "senderName": caller_name,
+                "recipient": receiver_id,
+                "meetUrl": meet_url,
+                "expiresAt": expires_at,
+                "messageId": r["id"],
+            })
+        for msg_id, raw, call_id, caller_id, receiver_id, meet_url in expired:
+            new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", raw, count=1)
+            db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, msg_id, ws_id))
+            _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [caller_id, receiver_id], "sender": caller_id, "recipient": receiver_id, "meetUrl": meet_url, "createdAt": ts()})
+    return jsonify({"ok": True, "calls": calls})
+
+@app.route("/api/calls/end", methods=["POST"])
+@login_required
+def end_instant_call_alias():
+    d = request.json or {}
+    call_id = (d.get("callId") or "").strip()
+    peer_id = (d.get("peerId") or d.get("targetId") or "").strip()
+    meet_url = (d.get("meetUrl") or "").strip()
+    ws_id = wid(); me = session["user_id"]; now = ts()
+    with get_db() as db:
+        invite = db.execute("SELECT id,sender,recipient,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone() if call_id else None
+        if invite:
+            if not peer_id:
+                peer_id = invite["sender"] if invite["sender"] != me else invite["recipient"]
+            raw = invite["content"] or ""
+            if not meet_url:
+                meet_url = ((re.search(r"MEET_LINK:([^\n]+)", raw) or [None, ""])[1] or "").strip()
+            new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:ended", raw, count=1) if "CALL_STATUS:" in raw else raw + "\nCALL_STATUS:ended"
+            db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
+        if peer_id:
+            me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
+            me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
+            mid = f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+            db.execute("""INSERT INTO direct_messages(id,workspace_id,sender,recipient,content,read,ts,reply_to,delivered_at,seen_at,edited,deleted,pinned)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (mid, ws_id, me, peer_id, f"📴 {me_name} ended the call", 0, now, "", now, "", 0, 0, 0))
+            row = dict(db.execute("SELECT * FROM direct_messages WHERE id=?", (mid,)).fetchone())
+        else:
+            row = None
+    users = [x for x in [me, peer_id] if x]
+    _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+    if peer_id: _bust_dm_thread(ws_id, me, peer_id)
+    if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
+    _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ended", "action": "end", "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url, "createdAt": now})
+    return jsonify({"ok": True, "status": "ended"})
+
 @app.route("/api/calls/respond", methods=["POST"])
 @login_required
 def respond_instant_call():
@@ -5789,8 +5882,22 @@ def respond_instant_call():
     meet_url = (d.get("meetUrl") or "https://meet.google.com/new").strip() or "https://meet.google.com/new"
     if action not in ("accept", "reject", "end", "missed"):
         return jsonify({"ok": False, "error": "Invalid call action"}), 400
-    ws_id = wid(); me = session["user_id"]; now = ts()
+    ws_id = wid(); me = session["user_id"]; now = ts(); now_ms = int(datetime.now().timestamp()*1000)
     with get_db() as db:
+        invite = db.execute("SELECT id,sender,recipient,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone() if call_id else None
+        invite_content = invite["content"] if invite else ""
+        current_status = ((re.search(r"CALL_STATUS:([^\n]+)", invite_content) or [None, ""])[1] or "").strip().lower()
+        expires_at = int((((re.search(r"CALL_EXPIRES_AT:([^\n]+)", invite_content) or [None, "0"])[1] or "0").strip()) or 0)
+        if action in ("accept", "reject"):
+            if not invite or current_status != "ringing":
+                return jsonify({"ok": False, "error": "This call invite is no longer active", "status": current_status or "missing"}), 409
+            if expires_at and now_ms > expires_at:
+                new_content = re.sub(r"CALL_STATUS:[^\n]+", "CALL_STATUS:missed", invite_content, count=1)
+                db.execute("UPDATE direct_messages SET content=? WHERE id=? AND workspace_id=?", (new_content, invite["id"], ws_id))
+                _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "missed", "action": "missed", "users": [invite["sender"], invite["recipient"]], "sender": invite["sender"], "recipient": invite["recipient"], "createdAt": now})
+                return jsonify({"ok": False, "error": "This call invite expired", "status": "missed"}), 410
+            if action in ("accept", "reject") and invite["recipient"] != me:
+                return jsonify({"ok": False, "error": "Only the receiver can accept or reject this call"}), 403
         me_row = db.execute("SELECT name FROM users WHERE id=? AND workspace_id=?", (me, ws_id)).fetchone()
         me_name = me_row["name"] if me_row and me_row["name"] else "Someone"
         if not peer_id:
@@ -5799,7 +5906,7 @@ def respond_instant_call():
                 peer_id = msg["sender"] if msg["sender"] != me else msg["recipient"]
         # Update the original invite row so old/completed calls stop rendering live Accept/Reject buttons
         # when a user opens chat history later.
-        status_text = "in_call" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
+        status_text = "accepted" if action == "accept" else ("rejected" if action == "reject" else ("missed" if action == "missed" else "ended"))
         try:
             invite = db.execute("SELECT id,content FROM direct_messages WHERE workspace_id=? AND content LIKE ? ORDER BY ts DESC LIMIT 1", (ws_id, f"%CALL_INVITE:{call_id}%")).fetchone()
             if invite:
