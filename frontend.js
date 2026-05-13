@@ -4221,11 +4221,16 @@ function MessagesView({projects,users,cu,tasks}){
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
+    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)) window.open((r&&r.meetUrl)||call.meetUrl,'_blank');
+      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)){
+        if(acceptWin){acceptWin.location.href=(r&&r.meetUrl)||call.meetUrl;}
+        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
+      }
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
     }catch(e){
+      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
       console.warn('[DM] call response failed',e);
       if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
     }
@@ -4828,7 +4833,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const recipient=toId;
     setStartingMeet(true);
     const hostWin=window.open('about:blank','_blank');
-    if(hostWin){try{hostWin.document.write('<!doctype html><title>Opening Meet…</title><body style="font-family:sans-serif;background:#111827;color:white;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Creating Google Meet…</body>');}catch{}}
+    // Keep ProjectTracker open and do not render any intermediate ProjectTracker-created page in the Meet tab.
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(!r||!r.ok||!r.meetUrl){
@@ -4978,18 +4983,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
+    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
         setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         ptCallStoreSet(call.callId,'in_call');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=window.open(joinUrl,'_blank');
-        if(w)trackDmMeetWindow(w,call);
-        if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
+        if(acceptWin){acceptWin.location.href=joinUrl;trackDmMeetWindow(acceptWin,call);}
+        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
     }catch(e){
+      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
       console.warn('[DM] call response failed',e);
       if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
     }
@@ -9051,16 +9057,16 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
+      const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
       try{
         const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
         if(action==='accept'){
           ptCallStoreSet(call.callId,'in_call');
           const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-          const w=window.open(joinUrl,'_blank');
-          if(w)trackGlobalMeetWindow(w,call);
-          if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
+          if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
+          else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
         }
-      }catch(e){ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
+      }catch(e){ try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{} if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
     };
     document.addEventListener('click',h,true);
     return()=>document.removeEventListener('click',h,true);
@@ -9072,17 +9078,18 @@ function App(){
     globalDismissedCallIds.current.add(call.callId);
     stopGlobalRingtone();
     setGlobalIncomingCall(null);
+    const acceptWin = action==='accept' ? window.open('about:blank','_blank') : null;
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
         setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         ptCallStoreSet(call.callId,'in_call');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=window.open(joinUrl,'_blank');
-        if(w)trackGlobalMeetWindow(w,call);
-        if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
+        if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
+        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
     }catch(e){
+      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
       console.warn('[Call] response failed',e);
       if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');
     }
