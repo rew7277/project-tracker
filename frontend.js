@@ -3870,23 +3870,28 @@ function renderChatContent(text){
     const from=((raw.match(/CALL_FROM:([^\n]+)/)||[])[1]||'Teammate').trim();
     const callId=(callIdMatch&&callIdMatch[1]?callIdMatch[1]:'').trim();
     const stored=callId?ptCallStoreGet(callId):'';
-    const effectiveStatus=stored||status;
+    const serverTerminal=['ended','rejected','accepted','missed','cancelled','expired'];
+    const localTerminal=['ended','rejected','missed','cancelled','expired'];
+    // Never let stale localStorage resurrect Accept/Reject on completed history.
+    // Server content/status is the source of truth once it is no longer ringing.
+    let effectiveStatus=status && status!=='ringing' ? status : (stored||status);
+    if(localTerminal.includes(stored)) effectiveStatus=stored;
     const meetUrl=((raw.match(/MEET_LINK:([^\n]+)/)||[])[1]||'').trim();
     const expiresAt=Number(((raw.match(/CALL_EXPIRES_AT:([^\n]+)/)||[])[1]||'0').trim())||0;
     const isExpired=(effectiveStatus==='ringing')&&(!expiresAt||Date.now()>expiresAt);
     const finalStatus=isExpired?'missed':effectiveStatus;
     const isOngoing=finalStatus==='in_call';
     const isRinging=finalStatus==='ringing';
-    const isEnded=/accepted the call|rejected the call|ended the call|missed call/i.test(raw)||['ended','rejected','accepted','missed'].includes(finalStatus);
+    const isEnded=/accepted the call|rejected the call|ended the call|missed call/i.test(raw)||serverTerminal.includes(finalStatus)||localTerminal.includes(finalStatus);
     const hasValidMeet=/^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(meetUrl);
     let actions='';
-    if(!isEnded&&callId&&hasValidMeet&&(isRinging||isOngoing)){
-      actions=isOngoing
-        ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="join" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Join call</button></div>`
-        : `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
+    // Accept/Reject is ONLY for fresh ringing calls. Completed, missed, rejected, ended,
+    // expired, and accepted/in-call history cards are rendered as plain status cards.
+    if(!isEnded&&callId&&hasValidMeet&&isRinging){
+      actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept / Reject</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#ef4444;color:white;cursor:pointer">Reject</button></div>`;
     }
-    const title=isEnded?'Call ended':(isOngoing?'Ongoing call':'Video call');
-    const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is active. Use Join call if you need to re-open Meet.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
+    const title=isEnded?'Call ended':(isOngoing?'Call in progress':'Video call');
+    const body=isEnded?safe.replace(/\n/g,'<br>'):(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling. Click Accept / Reject below, or use the full-screen popup.'));
     return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(239,68,68,.25);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(239,68,68,.13),rgba(124,58,237,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#ef4444'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
@@ -4186,7 +4191,7 @@ function MessagesView({projects,users,cu,tasks}){
       setIncomingCall(null);
       stopRingtone();
       api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
-    },45000);
+    },20000);
     return()=>stopRingtone();
   },[incomingCall,startRingtone,stopRingtone]);
 
@@ -4215,7 +4220,7 @@ function MessagesView({projects,users,cu,tasks}){
     setIncomingCall(null);
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)) window.open((r&&r.meetUrl)||call.meetUrl,'_blank','noopener,noreferrer');
+      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)) window.open((r&&r.meetUrl)||call.meetUrl,'_blank');
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
     }catch(e){
       console.warn('[DM] call response failed',e);
@@ -4224,7 +4229,7 @@ function MessagesView({projects,users,cu,tasks}){
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
-    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank');
     if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
   };
   const closeOutgoingMeet=()=>{if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);};
@@ -4816,7 +4821,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
     setStartingMeet(true);
-    const hostWin=window.open('about:blank','_blank','noopener,noreferrer');
+    const hostWin=window.open('about:blank','_blank');
     if(hostWin){try{hostWin.document.write('<!doctype html><title>Opening Meet…</title><body style="font-family:sans-serif;background:#111827;color:white;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Creating Google Meet…</body>');}catch{}}
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
@@ -4956,8 +4961,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       dismissedCallIds.current.add(call.callId);
       stopRingtone();
       setIncomingCall(null);
+      ptCallStoreSet(call.callId,'missed');
       api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
-    },45000);
+    },20000);
     return()=>stopRingtone();
   },[incomingCall,startRingtone,stopRingtone]);
   const respondIncomingCall=async(action)=>{
@@ -4972,7 +4978,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         ptCallStoreSet(call.callId,'in_call');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        const w=window.open(joinUrl,'_blank');
         if(w)trackDmMeetWindow(w,call);
         if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
@@ -4984,7 +4990,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
-    const w=window.open(outgoingMeetCall.meetUrl,'_blank','noopener,noreferrer');
+    const w=window.open(outgoingMeetCall.meetUrl,'_blank');
     if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join as host again.','error');
   };
   const closeOutgoingMeet=()=>{if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);};
@@ -9024,7 +9030,7 @@ function App(){
         return;
       }
       if(action==='join'){
-        const w=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+        const w=window.open(call.meetUrl,'_blank');
         if(w)trackGlobalMeetWindow(w,call);
         if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Join again.','error');
         return;
@@ -9037,7 +9043,7 @@ function App(){
         if(action==='accept'){
           ptCallStoreSet(call.callId,'in_call');
           const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-          const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+          const w=window.open(joinUrl,'_blank');
           if(w)trackGlobalMeetWindow(w,call);
           if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
         }
@@ -9061,7 +9067,7 @@ function App(){
         setDmTargetUser(call.peerId);
         _setView('dm');
         const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        const w=window.open(joinUrl,'_blank','noopener,noreferrer');
+        const w=window.open(joinUrl,'_blank');
         if(w)trackGlobalMeetWindow(w,call);
         if(!w && typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
       }
@@ -9080,8 +9086,9 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
+      ptCallStoreSet(call.callId,'missed');
       api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
-    },45000);
+    },20000);
     return()=>stopGlobalRingtone();
   },[globalIncomingCall,startGlobalRingtone,stopGlobalRingtone]);
 
