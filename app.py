@@ -2509,6 +2509,7 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target)",
             # Optimized index for DM conversation fetch (UNION query: each branch hits this index)
             "CREATE INDEX IF NOT EXISTS idx_dm_conversation ON direct_messages(workspace_id, sender, recipient, ts DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_dm_ws_recipient_read_ts ON direct_messages(workspace_id, recipient, read, ts DESC)",
             # Soft-delete support
             "ALTER TABLE users ADD COLUMN deleted_at TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN deleted_at TEXT DEFAULT ''",
@@ -5497,38 +5498,32 @@ def get_dm(other_id):
             # because they are zero-padded. Clients pass epoch-ms; convert here.
             try:
                 since_ms = int(since)
-                from datetime import timezone
-                since_dt = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc)
-                since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
+                # direct_messages.ts is stored in IST as YYYY-MM-DDTHH:MM:SS+05:30.
+                # Convert epoch-ms back to the same sortable format; using UTC here
+                # makes incremental polling return wrong/duplicate rows and can hide
+                # freshly committed messages in busy chats.
+                since_dt = datetime.utcfromtimestamp(since_ms / 1000) + IST_OFFSET
+                since_str = since_dt.strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
             except (ValueError, TypeError):
                 since_str = since  # caller passed an ISO string directly
-            # UNION instead of OR: Postgres can use the index on each branch separately
             rows=db.execute(
                 """SELECT * FROM direct_messages
-                   WHERE workspace_id=? AND sender=? AND recipient=? AND ts > ?
-                   UNION ALL
-                   SELECT * FROM direct_messages
-                   WHERE workspace_id=? AND sender=? AND recipient=? AND ts > ?
-                   ORDER BY ts""",
-                (ws_id, me, other_id, since_str, ws_id, other_id, me, since_str)
+                   WHERE workspace_id=?
+                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
+                     AND ts > ?
+                   ORDER BY ts
+                   LIMIT 100""",
+                (ws_id, me, other_id, other_id, me, since_str)
             ).fetchall()
         else:
             # Full load — cap at 200 most recent to bound response size.
-            # UNION instead of OR: each branch can use idx_dm_sender_ws independently
             rows=db.execute(
-                """SELECT * FROM (
-                     SELECT * FROM direct_messages
-                     WHERE workspace_id=? AND sender=? AND recipient=?
-                     ORDER BY ts DESC LIMIT 200
-                   ) a
-                   UNION ALL
-                   SELECT * FROM (
-                     SELECT * FROM direct_messages
-                     WHERE workspace_id=? AND sender=? AND recipient=?
-                     ORDER BY ts DESC LIMIT 200
-                   ) b
-                   ORDER BY ts DESC LIMIT 200""",
-                (ws_id, me, other_id, ws_id, other_id, me)
+                """SELECT * FROM direct_messages
+                   WHERE workspace_id=?
+                     AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
+                   ORDER BY ts DESC
+                   LIMIT 200""",
+                (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
         # Mark incoming messages as read — only if there are unread ones (avoids needless cache bust)

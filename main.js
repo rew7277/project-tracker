@@ -218,12 +218,17 @@ const _apiNotifyError = (url, message, status) => {
   window.dispatchEvent(new CustomEvent('pt:api-error', { detail: { url, message, status } }));
 };
 const _apiRequest = async (u, opts = {}) => {
+  const method = (opts.method || 'GET').toUpperCase();
+  const timeoutMs = opts.timeoutMs || (method === 'GET' ? 10000 : 15000);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const method = (opts.method || 'GET').toUpperCase();
     const headers = { ...(opts.headers || {}) };
     const cached = method === 'GET' ? _apiEtagCache[u] : null;
     if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
-    const r = await fetch(u, { credentials: 'include', signal: _apiAbortCtrl.signal, ...opts, headers });
+    const cleanOpts = { ...opts };
+    delete cleanOpts.timeoutMs;
+    const r = await fetch(u, { credentials: 'include', ...cleanOpts, headers, signal: ctrl.signal });
     if (r.status === 304 && cached) return cached.data;
     const data = await _apiRead(r);
     if (!r.ok) {
@@ -235,9 +240,11 @@ const _apiRequest = async (u, opts = {}) => {
     if (method === 'GET' && etag) _apiEtagCache[u] = { etag, data };
     return data;
   } catch (e) {
-    if (e.name === 'AbortError') return null;
+    if (e.name === 'AbortError') return { ok:false, error:'Request timed out', status:408 };
     if(!opts.quiet) _apiNotifyError(u, e.message || 'Network error', 0);
     return { ok:false, error:e.message || 'Network error', status:0 };
+  } finally {
+    clearTimeout(timer);
   }
 };
 const api={
@@ -4844,27 +4851,32 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
     else setLoadingThread(toId);
     loadMsgs(toId,'selected');
+    let dmPollBusy=false;
     const id=setInterval(async()=>{
-      const requestedTo=toId;
-      const cached=threadCache.current.get(requestedTo)||[];
-      const lastMsg=cached.length?cached[cached.length-1]:null;
-      const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
-      const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true});
-      if(requestedTo!==activeToRef.current)return;
-      if(Array.isArray(d)){
-        if(sinceParam&&d.length===0)return;
-        const seen=new Set(cached.map(m=>m.id));
-        const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
-        setMsgThreadId(requestedTo);
-        setThreadMessages(requestedTo,merged,false);
-        setLoadingThread('');
-        setMsgs(prev=>{
-          if(merged.length>prev.length){playSound('notif');}
-          return merged;
-        });
-        onDmRead(requestedTo);
-      }
-    },700);
+      if(dmPollBusy)return;
+      dmPollBusy=true;
+      try{
+        const requestedTo=toId;
+        const cached=threadCache.current.get(requestedTo)||[];
+        const lastMsg=cached.length?cached[cached.length-1]:null;
+        const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+        const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
+        if(requestedTo!==activeToRef.current)return;
+        if(Array.isArray(d)){
+          if(sinceParam&&d.length===0)return;
+          const seen=new Set(cached.map(m=>m.id));
+          const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
+          setMsgThreadId(requestedTo);
+          setThreadMessages(requestedTo,merged,false);
+          setLoadingThread('');
+          setMsgs(prev=>{
+            if(merged.length>prev.length){playSound('notif');}
+            return merged;
+          });
+          onDmRead(requestedTo);
+        }
+      }finally{dmPollBusy=false;}
+    },2000);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -4993,8 +5005,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return next;
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
+    // Do not let one slow network request lock the composer. The recent-send guard
+    // already prevents accidental double-click duplicates.
+    setSending(false);
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:12000});
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
         setMsgThreadId(recipient);
