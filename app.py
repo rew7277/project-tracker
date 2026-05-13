@@ -5614,18 +5614,43 @@ def _create_google_meet_space(access_token):
     return {"space": space, "meetUrl": meet_url, "meetingCode": space.get("meetingCode") or ""}
 
 def _server_google_token():
-    # Configure this on the server/Railway. It should be a valid Google OAuth
-    # access token for a Workspace/service account flow or a user OAuth flow.
-    return (os.environ.get("GOOGLE_MEET_ACCESS_TOKEN") or os.environ.get("GOOGLE_ACCESS_TOKEN") or "").strip()
+    """Return a server-side Google OAuth token for Meet API.
+
+    Supported production config, in this order:
+    1) GOOGLE_MEET_ACCESS_TOKEN / GOOGLE_ACCESS_TOKEN - quick test only; expires.
+    2) GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN - recommended.
+
+    Google Meet rooms cannot be created with a random/browser-generated URL.
+    The backend must call POST https://meet.googleapis.com/v2/spaces with an
+    OAuth token that has the meetings.space.created scope.
+    """
+    direct = (os.environ.get("GOOGLE_MEET_ACCESS_TOKEN") or os.environ.get("GOOGLE_ACCESS_TOKEN") or "").strip()
+    if direct:
+        return direct
+    cid = (os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+    secret = (os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    refresh = (os.environ.get("GOOGLE_REFRESH_TOKEN") or os.environ.get("GOOGLE_MEET_REFRESH_TOKEN") or "").strip()
+    if not (cid and secret and refresh):
+        return ""
+    data = _urlparse.urlencode({
+        "client_id": cid,
+        "client_secret": secret,
+        "refresh_token": refresh,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    req = _urlrequest.Request("https://oauth2.googleapis.com/token", data=data, method="POST", headers={"Content-Type":"application/x-www-form-urlencoded"})
+    with _urlrequest.urlopen(req, timeout=15) as resp:
+        tok = _json_mod.loads(resp.read())
+    return (tok.get("access_token") or "").strip()
 
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
-    """Start an instant DM call invite without Google Calendar OAuth.
+    """Start an instant DM call invite using a real server-created Google Meet room.
 
-    This intentionally does NOT call Calendar or require Google sign-in inside
-    this app. It sends an in-app ringing invite immediately; when the receiver
-    accepts, their browser opens Google's own instant Meet launcher.
+    The backend must create the Meet space before ringing the receiver. This
+    prevents broken/random meeting codes and avoids showing a popup for calls
+    that cannot actually be joined.
     """
     d = request.json or {}
     target_id = (d.get("targetId") or d.get("recipient") or "").strip()
@@ -5639,20 +5664,30 @@ def create_google_meet_call():
     me = session["user_id"]
     now = ts()
     call_id = f"call{int(datetime.now().timestamp()*1000)}{secrets.token_hex(3)}"
-    # Prefer a real server-created Google Meet room. This does not require the
-    # caller/receiver to sign in to this app, but Google still requires the
-    # server to use an authorized OAuth token. Without GOOGLE_MEET_ACCESS_TOKEN
-    # we fall back to a same-call nickname URL; admins should configure the token
-    # for production to avoid Google prompting for account/login while creating.
-    meet_url = ""
+    # Create a real Google Meet room first. Do NOT generate fake Meet URLs like
+    # /lookup/<callId>; Google rejects those with "Check your meeting code".
+    # If OAuth is not configured, fail cleanly instead of ringing the receiver
+    # with a broken link.
     meet_provider = "google_meet_api"
     try:
-        created = _create_google_meet_space(_server_google_token())
-        meet_url = created.get("meetUrl") or ""
+        token = _server_google_token()
+        if not token:
+            return jsonify({
+                "ok": False,
+                "error": "Google Meet is not configured on the server. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN with the meetings.space.created scope.",
+                "code": "GOOGLE_MEET_NOT_CONFIGURED"
+            }), 503
+        created = _create_google_meet_space(token)
+        meet_url = (created.get("meetUrl") or "").strip()
+        if not meet_url or not meet_url.startswith("https://meet.google.com/"):
+            raise ValueError("Meet API did not return a valid meetingUri")
     except Exception as e:
-        log.warning("[call] Google Meet API create failed; using nickname fallback: %s", e)
-        meet_provider = "google_meet_nickname_fallback"
-        meet_url = f"https://meet.google.com/lookup/{call_id}"
+        log.warning("[call] Google Meet API create failed: %s", e)
+        return jsonify({
+            "ok": False,
+            "error": "Unable to create a real Google Meet room. Check server Google OAuth configuration and Meet API access.",
+            "code": "GOOGLE_MEET_CREATE_FAILED"
+        }), 502
 
     with get_db() as db:
         target = db.execute("SELECT id,name,email FROM users WHERE id=? AND workspace_id=? AND deleted_at=''", (target_id, ws_id)).fetchone()
@@ -5691,7 +5726,7 @@ def create_google_meet_call():
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
         _bust_dm_thread(ws_id, me, target_id)
         _sse_publish(ws_id, "dm_created", {"id": mid, "sender": me, "recipient": target_id, "message": row})
-        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "senderName": sender_name, "recipient": target_id, "recipientName": target_name, "meetUrl": meet_url})
+        _sse_publish(ws_id, "call_status", {"callId": call_id, "status": "ringing", "users": [me, target_id], "sender": me, "senderName": sender_name, "recipient": target_id, "recipientName": target_name, "meetUrl": meet_url, "createdAt": now})
         _sse_publish(ws_id, "notification_updated", {"reason": "call", "sender": me, "recipient": target_id})
     threading.Thread(target=_after_call_start, daemon=True).start()
 
@@ -5739,7 +5774,7 @@ def respond_instant_call():
     _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
     if peer_id: _bust_dm_thread(ws_id, me, peer_id)
     if row: _sse_publish(ws_id, "dm_created", {"id": row.get("id"), "sender": me, "recipient": peer_id, "message": row})
-    _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url})
+    _sse_publish(ws_id, "call_status", {"callId": call_id, "status": status, "action": action, "users": users, "sender": me, "recipient": peer_id, "meetUrl": meet_url, "createdAt": now})
     return jsonify({"ok": True, "status": status, "meetUrl": meet_url, "message": row})
 
 @app.route("/api/dm/react",methods=["POST"])

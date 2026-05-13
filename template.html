@@ -4973,7 +4973,7 @@ function MessagesView({projects,users,cu,tasks}){
     setIncomingCall(null);
     try{
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept') window.open((r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new','_blank','noopener,noreferrer');
+      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)) window.open((r&&r.meetUrl)||call.meetUrl,'_blank','noopener,noreferrer');
       if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
     }catch(e){
       console.warn('[DM] call response failed',e);
@@ -5415,8 +5415,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           if(incomingCall&&incomingCall.callId===data.callId){ dismissedCallIds.current.add(data.callId); stopRingtone(); setIncomingCall(null); }
         }
         if(data.status==='ringing'&&data.recipient===cu.id&&!dismissedCallIds.current.has(data.callId)){
-          const sender=(users||[]).find(u=>u.id===data.sender)||{};
-          setIncomingCall({callId:data.callId,from:sender.name||'Someone',meetUrl:data.meetUrl||'https://meet.google.com/new',peerId:data.sender});
+          const createdAt=data.createdAt?Date.parse(data.createdAt):Date.now();
+          const isFresh=Number.isFinite(createdAt)?(Date.now()-createdAt<120000):true;
+          const validMeet=typeof data.meetUrl==='string' && /^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(data.meetUrl);
+          if(isFresh&&validMeet){
+            const sender=(users||[]).find(u=>u.id===data.sender)||{};
+            setIncomingCall({callId:data.callId,from:sender.name||data.senderName||'Someone',meetUrl:data.meetUrl,peerId:data.sender});
+          }
         }
         return;
       }
@@ -5554,28 +5559,31 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!toId||startingMeet)return;
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
-    const tempId='tmpcall'+Date.now();
-    const localCallId='local'+Date.now();
-    const meetUrl='https://meet.google.com/lookup/'+localCallId;
-    const body=`📞 Incoming video call\n${cu.name||'Someone'} is calling you.\nCALL_INVITE:${localCallId}\nCALL_FROM:${cu.name||'Someone'}\nCALL_STATUS:ringing\nMEET_LINK:${meetUrl}`;
-    const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:'',_pending:false,_local:true};
     setStartingMeet(true);
-    setMsgThreadId(recipient);
-    setMsgs(prev=>{const next=[...prev,optimistic];threadCache.current.set(recipient,next);return next;});
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
-      if(r&&r.message){
-        setMsgs(prev=>{const next=prev.map(x=>x.id===tempId?r.message:x);threadCache.current.set(recipient,next);_saveDmCache&&_saveDmCache(recipient,next);return next;});
+      if(!r||!r.ok||!r.meetUrl){
+        throw new Error((r&&r.error)||'Google Meet room was not created');
+      }
+      if(r.message){
+        setMsgThreadId(recipient);
+        setMsgs(prev=>{
+          const exists=prev.some(x=>x.id===r.message.id);
+          const next=exists?prev.map(x=>x.id===r.message.id?r.message:x):[...prev,r.message];
+          threadCache.current.set(recipient,next);
+          _saveDmCache&&_saveDmCache(recipient,next);
+          return next;
+        });
       }
       setActiveCallUsers(new Set([cu.id,recipient].filter(Boolean)));
-      const waitUrl=(r&&((r.launchUrl)||r.meetUrl))||meetUrl;
-      const callWindow=window.open(waitUrl,'_blank','noopener,noreferrer');
-      if(!callWindow && typeof window.showToast==='function') window.showToast('Popup blocked. Use the Meet link in chat to join.','error');
-      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting in Meet','success');
+      const callWindow=window.open(r.meetUrl,'_blank','noopener,noreferrer');
+      if(!callWindow && typeof window.showToast==='function') window.showToast('Popup blocked. Allow popups to wait in the Meet room.','error');
+      if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting in Google Meet','success');
     }catch(e){
-      console.warn('[DM] instant call failed',e);
-      setMsgs(prev=>{const next=prev.filter(x=>x.id!==tempId);threadCache.current.set(recipient,next);return next;});
-      if(typeof window.showToast==='function') window.showToast('Unable to start call. Please try again.','error');
+      console.warn('[DM] Google Meet call failed',e);
+      const msg=(e&&e.message)||'Unable to create Google Meet. Configure server Google OAuth first.';
+      if(typeof window.showToast==='function') window.showToast(msg,'error');
+      else alert(msg);
     }finally{setStartingMeet(false);}
   };
   const toggleRecording=async()=>{
@@ -5701,7 +5709,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
       if(action==='accept'){
         setActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new';
+        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         const w=window.open(joinUrl,'_blank','noopener,noreferrer');
         if(!w) window.location.href=joinUrl;
       }
@@ -5793,7 +5801,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         </div>
         ${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
         ${editingId?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>✎ Editing message <button style=${{float:'right'}} onClick=${()=>{setEditingId('');setTxt('');}}>×</button></div>`:null}
-        <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(37,99,235,.18)':'linear-gradient(135deg,#2563eb,#7c3aed)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
+        <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(34,197,94,.18)':'linear-gradient(135deg,#16a34a,#22c55e)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
         <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
@@ -9750,7 +9758,7 @@ function App(){
         setGlobalActiveCallUsers(new Set([cu.id,call.peerId].filter(Boolean)));
         setDmTargetUser(call.peerId);
         _setView('dm');
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl||'https://meet.google.com/new';
+        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
         const w=window.open(joinUrl,'_blank','noopener,noreferrer');
         if(!w) window.location.href=joinUrl;
       }
@@ -9811,9 +9819,14 @@ function App(){
                 }
               }
               if(d.status==='ringing'&&d.recipient===cu.id&&!globalDismissedCallIds.current.has(d.callId)){
-                const sender=(data.users||[]).find(u=>u.id===d.sender)||{};
-                setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl||'https://meet.google.com/new',peerId:d.sender});
-                showBrowserNotif('📞 Incoming video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
+                const createdAt=d.createdAt?Date.parse(d.createdAt):Date.now();
+                const isFresh=Number.isFinite(createdAt)?(Date.now()-createdAt<120000):true;
+                const validMeet=typeof d.meetUrl==='string' && /^https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(d.meetUrl);
+                if(isFresh&&validMeet){
+                  const sender=(data.users||[]).find(u=>u.id===d.sender)||{};
+                  setGlobalIncomingCall({callId:d.callId,from:d.senderName||sender.name||'Someone',meetUrl:d.meetUrl,peerId:d.sender});
+                  showBrowserNotif('📞 Incoming video call', (d.senderName||sender.name||'Someone')+' is calling you',()=>{window.focus();},{tag:'call-'+d.callId,requireInteraction:true});
+                }
               }
             }
             if(msg.type==='presence'){
