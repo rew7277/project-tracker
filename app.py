@@ -7606,9 +7606,38 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v3: no request interception */
+    js = """/* Project Tracker service worker v4: push notification deep routing */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch(e) { data = {title:'Project Tracker', body: event.data ? event.data.text() : ''}; }
+  const title = data.title || 'Project Tracker';
+  const options = {
+    body: data.body || '',
+    icon: data.icon || '/icon-192.png',
+    badge: data.badge || '/icon-192.png',
+    tag: data.tag || ('pt-' + Date.now()),
+    data: { url: data.url || data.nav_url || '/', tag: data.tag || '' },
+    renotify: true
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const url = (event.notification && event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil((async()=>{
+    const allClients = await clients.matchAll({type:'window', includeUncontrolled:true});
+    for (const client of allClients) {
+      try {
+        await client.focus();
+        client.postMessage({type:'PF_NAVIGATE', url:url});
+        return;
+      } catch(e) {}
+    }
+    await clients.openWindow(url);
+  })());
+});
 """
     return Response(js, mimetype="application/javascript", headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 

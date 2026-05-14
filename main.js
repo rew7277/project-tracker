@@ -16,7 +16,8 @@ if('serviceWorker' in navigator){
 
       navigator.serviceWorker.addEventListener('message', function(e){
         if(e.data && e.data.type === 'PF_NAVIGATE'){
-          window.location.hash = e.data.url || '/';
+          var u=e.data.url || '/';
+          try{ window.location.href=u; }catch(_e){ window.location.hash=u; }
           window.focus();
         }
         if(e.data && e.data.type === 'PF_NOTIF_CLICK'){
@@ -9306,7 +9307,8 @@ function deepLinkFromSearch(){
     if(action==='task')return {view:'tasks',taskId:id};
     if(action==='ticket')return {view:'tickets',ticketId:id};
     if(action==='project')return {view:'projects',projectId:id};
-    if(['dashboard','ops','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action};
+    if(action==='dm')return {view:'dm',dmUser:sp.get('user')||sp.get('sender')||sp.get('id')||''};
+    if(['dashboard','ops','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action,dmUser:sp.get('user')||sp.get('sender')||''};
   }catch(e){}
   return {};
 }
@@ -9330,6 +9332,7 @@ function App(){
       if(dl.taskId)setInitialTaskId(dl.taskId);
       if(dl.ticketId)setInitialTicketId(dl.ticketId);
       if(dl.projectId)setInitialProjectId(dl.projectId);
+      if(dl.dmUser)setDmTargetUser(String(dl.dmUser));
       const pid=projectIdFromPath();
       if(pid){setInitialProjectId(pid);setView('projects');}
     }catch(e){}
@@ -9354,6 +9357,7 @@ function App(){
     }catch(e){}
     return 'dashboard';
   });
+  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
@@ -9373,49 +9377,74 @@ function App(){
     }catch(e){}
   },[]);
   const routeToNotification=useCallback((n={})=>{
-    const s=v=>String(v||'').trim();
+    // Deep notification router: handles DB notifications, web-push URLs, older rows
+    // that do not yet have entity_id/entity_type, and duplicate frontend bundles.
+    const s=v=>String(v==null?'':v).trim();
     const low=v=>s(v).toLowerCase();
     const type=low(n.type);
-    const entityType=low(n.entity_type||n.kind||n.target_type||n.notification_type);
-    const content=low(n.content||n.body||n.title);
-    const rawEntityId=s(n.entity_id||n.target_id||n.id_ref||'');
-    const taskId=s(n.task_id||(entityType==='task'?rawEntityId:''));
-    const projectId=s(n.project_id||(entityType==='project'?rawEntityId:''));
-    const ticketId=s(n.ticket_id||(entityType==='ticket'?rawEntityId:''));
-    const messageProjectId=s(n.project_id||(entityType==='message'||entityType==='channel'?rawEntityId:''));
-    const dmPeer=s(n.peer_id||n.dm_user_id||n.sender_id||n.from_user_id||n.sender||(entityType==='dm'||entityType==='direct_message'||entityType==='call'?rawEntityId:''));
-    const isDm=type==='dm'||type==='direct_message'||type==='direct-message'||entityType==='dm'||entityType==='direct_message'||entityType==='direct-message'||content.includes('direct message');
-    const isCall=type==='call'||type==='video_call'||type==='meet_call'||entityType==='call'||entityType==='video_call'||content.includes('calling you')||content.includes('video call');
-    if(isDm||isCall){
-      if(dmPeer)setDmTargetUser(String(dmPeer));
+    const entityType=low(n.entity_type||n.kind||n.target_type||n.notification_type||n.action);
+    const content=s(n.content||n.body||n.title||n.message);
+    const contentLow=content.toLowerCase();
+    const rawEntityId=s(n.entity_id||n.target_id||n.id_ref||n.ref_id||n.object_id||'');
+    const users=Array.isArray(data.users)?data.users:[];
+    const tasks=Array.isArray(data.tasks)?data.tasks:[];
+    const projects=Array.isArray(data.projects)?data.projects:[];
+    const tickets=Array.isArray(data.tickets)?data.tickets:[];
+    const byId=(arr,id)=>id?arr.find(x=>String(x.id)===String(id)):null;
+    const byName=(arr,fields)=>arr.find(x=>fields.some(f=>x&&x[f]&&contentLow.includes(String(x[f]).toLowerCase())));
+    const userFromText=users.find(u=>u&&u.id!==cu?.id&&(
+      (u.name&&contentLow.includes(String(u.name).toLowerCase()))||
+      (u.email&&contentLow.includes(String(u.email).toLowerCase()))
+    ));
+
+    let dmPeer=s(n.peer_id||n.dm_user_id||n.sender_id||n.from_user_id||n.sender||n.caller_id);
+    const looksDm=['dm','direct_message','direct-message','message_received'].includes(type)||['dm','direct_message','direct-message'].includes(entityType)||contentLow.includes('direct message')||contentLow.includes('sent you a message');
+    const looksCall=['call','video_call','meet_call','incoming_call'].includes(type)||['call','video_call','meet_call'].includes(entityType)||contentLow.includes('calling you')||contentLow.includes('video call')||contentLow.includes('meet call');
+    if(!dmPeer&&(looksDm||looksCall)) dmPeer=rawEntityId||s(userFromText&&userFromText.id);
+    if(looksDm||looksCall){
+      if(dmPeer){
+        setDmTargetUser(String(dmPeer));
+        try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));}catch(_e){}
+      }
       _setView('dm');
       return;
     }
-    const finalTaskId=taskId||(['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated'].includes(type)?rawEntityId:'');
-    if(entityType==='task'||finalTaskId||['task_assigned','status_change','comment','deadline','task_updated','task.created','task.updated'].includes(type)){
-      if(finalTaskId)setInitialTaskId(String(finalTaskId));
+
+    let taskId=s(n.task_id||(entityType==='task'?rawEntityId:''));
+    if(!taskId&&['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)) taskId=rawEntityId;
+    if(!taskId){const t=byName(tasks,['title','name']); if(t)taskId=String(t.id);}
+    if(entityType==='task'||taskId||['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)||contentLow.includes('task')){
+      if(taskId)setInitialTaskId(String(taskId));
       _setView('tasks');
       return;
     }
-    const finalTicketId=ticketId||(['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)?rawEntityId:'');
-    if(entityType==='ticket'||finalTicketId||type==='ticket'||type==='ticket_assigned'||type==='ticket_updated'||content.startsWith('🎫')){
-      if(finalTicketId)setInitialTicketId(String(finalTicketId));
-      _setView('tickets');
-      return;
-    }
-    const finalProjectId=projectId||(['project_added','project_updated','project.created','project.updated'].includes(type)?rawEntityId:'');
-    if(entityType==='project'||finalProjectId||type==='project_added'||type==='project_updated'){
-      if(finalProjectId)setInitialProjectId(String(finalProjectId));
+
+    let projectId=s(n.project_id||(entityType==='project'?rawEntityId:''));
+    if(!projectId&&['project_added','project_updated','project.created','project.updated','project'].includes(type)) projectId=rawEntityId;
+    if(!projectId){const p=byName(projects,['name','title']); if(p)projectId=String(p.id);}
+    if(entityType==='project'||projectId||['project_added','project_updated','project.created','project.updated','project'].includes(type)||contentLow.includes('project')){
+      if(projectId)setInitialProjectId(String(projectId));
       _setView('projects');
       return;
     }
-    if(entityType==='message'||entityType==='channel'||type==='message'||type==='channel_message'||type==='project_message'){
-      try{ if(messageProjectId) sessionStorage.setItem('pt_open_project_message', String(messageProjectId)); }catch(_e){}
+
+    let ticketId=s(n.ticket_id||(entityType==='ticket'?rawEntityId:''));
+    if(!ticketId&&['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)) ticketId=rawEntityId;
+    if(!ticketId){const tk=byName(tickets,['title','subject','name']); if(tk)ticketId=String(tk.id);}
+    if(entityType==='ticket'||ticketId||['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)||contentLow.includes('ticket')||content.startsWith('🎫')){
+      if(ticketId)setInitialTicketId(String(ticketId));
+      _setView('tickets');
+      return;
+    }
+
+    if(entityType==='message'||entityType==='channel'||['message','channel_message','project_message'].includes(type)){
+      const msgProjectId=s(n.project_id||rawEntityId);
+      try{ if(msgProjectId) sessionStorage.setItem('pt_open_project_message', String(msgProjectId)); }catch(_e){}
       _setView('messages');
       return;
     }
     _setView('notifs');
-  },[_setView]);
+  },[_setView,data,cu]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
@@ -9448,7 +9477,6 @@ function App(){
       }
     }catch(e){}
   },[]);
-  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
   const [teamCtx,setTeamCtxRaw]=useState(()=>{try{return localStorage.getItem('pf_team_ctx')||'';}catch{return '';}});
   const setTeamCtx=useCallback((id,forceDev=false)=>{
     if(cu&&cu.role!=='Admin'&&cu.role!=='Manager'&&!forceDev)return;

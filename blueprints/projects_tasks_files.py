@@ -299,11 +299,11 @@ def create_project():
         for uid in members:
             if uid != session["user_id"]:
                 nid=f"n{int(datetime.now().timestamp()*1000)}"
-                db.execute("INSERT INTO notifications VALUES (?,?,?,?,?,?,?)",
-                           (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts()))
+                db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                           (nid,wid(),"project_added",f"You were added to project '{d['name']}'",uid,0,ts(),pid,"project"))
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"📁 Added to project: {d['name']}",
-                          f"{cname} added you to '{d['name']}'","/"),daemon=True).start()
+                          f"{cname} added you to '{d['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
         # Inject into appdata cache FIRST so workers with stale cache get the new project immediately.
         _cache_inject_item(wid(), "projects", dict(p))
         # Bust the FULL workspace cache — this forces the next /api/app-data background
@@ -341,15 +341,15 @@ def update_project(pid):
         base_ts=int(datetime.now().timestamp()*1000)
         if newly_added:
             # Batch all notification inserts in ONE round-trip instead of N separate queries
-            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(newly_added))
+            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(newly_added))
             flat=[v for i,uid in enumerate(newly_added)
                   for v in (f"n{base_ts+i}",wid(),"project_added",
-                            f"{aname} added you to project '{updated['name']}'",uid,0,ts())]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES {placeholders}",flat)
+                            f"{aname} added you to project '{updated['name']}'",uid,0,ts(),pid,"project")]
+            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
             for uid in newly_added:
                 threading.Thread(target=push_notification_to_user,
                     args=(db,uid,f"\U0001f4c1 Added to project: {updated['name']}",
-                          f"{aname} added you to '{updated['name']}'","/"),daemon=True).start()
+                          f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"),daemon=True).start()
     # Bust FULL workspace cache so app-data reflects member changes instantly on next poll.
     # Previously only busted 'projects' standalone cache, leaving app-data cache stale —
     # that's why added members weren't visible until cache expired.
@@ -474,16 +474,16 @@ def create_task():
         notif_rows=[]
         if assignee_user:
             notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
-                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts()))
+                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts(),tid,"task"))
         for i,uid in enumerate(proj_members):
             if uid==session["user_id"] or uid==d.get("assignee"): continue
             proj_name=proj["name"] if proj else ""
             notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
-                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts()))
+                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts(),tid,"task"))
         if notif_rows:
-            placeholders=",".join(["(?,?,?,?,?,?,?)"]*len(notif_rows))
+            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
             flat=[v for row in notif_rows for v in row]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES {placeholders}",flat)
+            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
         # Send emails + push notifications in background threads (non-blocking)
         if assignee_user:
             if assignee_user["email"]:
@@ -492,7 +492,7 @@ def create_task():
                     daemon=True).start()
             threading.Thread(target=push_notification_to_user,
                 args=(db,d["assignee"],f"✅ New task assigned: {d['title']}",
-                      f"{cname} assigned you this task [{d.get('priority','medium')}]","/"),
+                      f"{cname} assigned you this task [{d.get('priority','medium')}]",f"/?action=task&id={tid}"),
                 daemon=True).start()
         for uid in proj_members:
             if uid==session["user_id"] or uid==d.get("assignee"): continue
