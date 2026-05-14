@@ -9511,7 +9511,7 @@ function App(){
       const teamParam=tCtx?'team_id='+tCtx:'';
       const qs=[teamParam,bustParam].filter(Boolean).join('&');
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
-      const d=await api.get(appDataUrl);
+      const d=await api.get(appDataUrl,{timeoutMs:30000}); // cold-start can take >10s
       if(!d||d.error){
         const st=Number(d&&d.status)||0;
         // Only a real auth failure should send the user back to login.
