@@ -2705,6 +2705,22 @@ def _set_logged_out_at(uid, ts_val):
     except Exception:
         pass
 
+
+def _evict_me_cache(uid):
+    """Evict the per-user /api/auth/me cache from Redis and local memory."""
+    if not uid:
+        return
+    if _redis_client is not None:
+        try:
+            _redis_client.delete(f"ptcache:me:{uid}")
+        except Exception:
+            pass
+    try:
+        with _CACHE_LOCK:
+            _CACHE.pop(f"me:{uid}", None)
+    except Exception:
+        pass
+
 def login_required(f):
     @wraps(f)
     def d(*a,**kw):
@@ -4481,19 +4497,68 @@ def add_user():
         if "UNIQUE" in str(e): return jsonify({"error":"Email already in use"}),400
         return jsonify({"error":str(e)}),500
 
+
+@app.route("/api/profile", methods=["PUT"])
+@login_required
+def update_profile():
+    """Allow any logged-in user to update their own lightweight profile fields.
+    This is used for self avatar changes, so Developers are not blocked by
+    the Admin/Manager-only /api/users/<uid> route.
+    """
+    uid = session["user_id"]
+    d = request.json or {}
+    allowed = {"name", "avatar_data"}
+    if not any(k in d for k in allowed):
+        return jsonify({"error":"No supported profile fields supplied"}),400
+    with get_db() as db:
+        if "name" in d:
+            name = str(d.get("name") or "").strip()
+            if not name:
+                return jsonify({"error":"Name is required"}),400
+            av = "".join(w[0] for w in name.split())[:2].upper()
+            db.execute("UPDATE users SET name=?, avatar=? WHERE id=? AND workspace_id=?",
+                       (name, av, uid, wid()))
+        if "avatar_data" in d:
+            avatar_data = d.get("avatar_data")
+            if avatar_data and not str(avatar_data).startswith("data:image/"):
+                return jsonify({"error":"Invalid avatar image"}),400
+            db.execute("UPDATE users SET avatar_data=? WHERE id=? AND workspace_id=?",
+                       (avatar_data, uid, wid()))
+        _evict_me_cache(uid)
+        _cache_bust_ws(wid())
+        u = db.execute("SELECT * FROM users WHERE id=? AND workspace_id=?", (uid, wid())).fetchone()
+        if not u:
+            return jsonify({"error":"Not found"}),404
+        result = dict(u)
+        for k in ("password", "plain_password", "totp_secret"):
+            result.pop(k, None)
+        return jsonify(result)
+
 @app.route("/api/users/<uid>",methods=["PUT"])
 @login_required
 @require_role("Admin", "Manager")
 def update_user(uid):
     d=request.json or {}
     with get_db() as db:
-        if "role" in d: db.execute("UPDATE users SET role=? WHERE id=? AND workspace_id=?",(d["role"],uid,wid()))
+        changed_self_cache = False
+        if "role" in d:
+            db.execute("UPDATE users SET role=? WHERE id=? AND workspace_id=?",(d["role"],uid,wid()))
+            changed_self_cache = True
         if "name" in d:
             av="".join(w[0] for w in d["name"].split())[:2].upper()
             db.execute("UPDATE users SET name=?,avatar=? WHERE id=? AND workspace_id=?",(d["name"],av,uid,wid()))
-        if "email" in d: db.execute("UPDATE users SET email=? WHERE id=? AND workspace_id=?",(d["email"],uid,wid()))
-        if "password" in d: db.execute("UPDATE users SET password=? WHERE id=? AND workspace_id=?",(hash_pw(d["password"]),uid,wid()))
-        if "avatar_data" in d: db.execute("UPDATE users SET avatar_data=? WHERE id=? AND workspace_id=?",(d["avatar_data"],uid,wid()))
+            changed_self_cache = True
+        if "email" in d:
+            db.execute("UPDATE users SET email=? WHERE id=? AND workspace_id=?",(d["email"],uid,wid()))
+            changed_self_cache = True
+        if "password" in d:
+            db.execute("UPDATE users SET password=? WHERE id=? AND workspace_id=?",(hash_pw(d["password"]),uid,wid()))
+            changed_self_cache = True
+        if "avatar_data" in d:
+            db.execute("UPDATE users SET avatar_data=? WHERE id=? AND workspace_id=?",(d["avatar_data"],uid,wid()))
+            changed_self_cache = True
+        if changed_self_cache:
+            _evict_me_cache(uid)
         u=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
         if u:
             caller=db.execute("SELECT role FROM users WHERE id=?",(session["user_id"],)).fetchone()

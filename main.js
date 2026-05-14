@@ -1696,7 +1696,7 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                     const reader=new FileReader();
                     reader.onload=async ev=>{
                       const dataUrl=ev.target.result;
-                      const res=await api.put('/api/users/'+cu.id,{avatar_data:dataUrl});
+                      const res=await api.put('/api/profile',{avatar_data:dataUrl});
                       if(res&&res.id){
                         setCu&&setCu(prev=>({...prev,avatar_data:dataUrl}));
                         setUploadMsg('✓ Photo updated!');
@@ -4884,7 +4884,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },8000);
+    },3000);
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -4928,6 +4928,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             const base=Array.isArray(prev)?prev:[];
             const existingIdx=base.findIndex(x=>x.id===m.id || (x.client_msg_id&&m.client_msg_id&&x.client_msg_id===m.client_msg_id));
             if(existingIdx>=0){
+              const existing=base[existingIdx];
+              // Avoid a second render/blink when the optimistic send was already
+              // confirmed by the API and the same message arrives again via SSE.
+              if(!existing._pending&&!existing._failed&&String(existing.id)===String(m.id)){
+                return base;
+              }
               const next=normalizeDmList(base.map((x,i)=>i===existingIdx?{...x,...m,_pending:false,_failed:false}:x));
               setThreadMessages(toId,next,false);
               return next;
@@ -9445,6 +9451,22 @@ function App(){
                 if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
               }).catch(()=>{});
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
+              // Show incoming DM browser/toast notification directly from SSE.
+              // This avoids waiting for the 2s poll and keeps notifications immediate.
+              try{
+                const m=(msg.data&&msg.data.message)||msg.message||msg.data||{};
+                if(msg.type==='dm_created'&&m&&m.id&&!notifiedDmIdsRef.current.has(m.id)){
+                  notifiedDmIdsRef.current.add(m.id);
+                  const raw=String(m.content||'');
+                  if(String(m.sender||'')!==String(cu.id)&&String(m.recipient||'')===String(cu.id)&&!raw.includes('CALL_INVITE:')){
+                    const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
+                    const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
+                    window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
+                    showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);_setView('dm');window.focus();},{tag:'dm-'+m.id});
+                    playSound('notif');
+                  }
+                }
+              }catch(_){}
               // Fallback for calls: if the dedicated call_status event is missed but the DM invite arrives,
               // still show the full-screen call popup. This fixes chat-card-only ringing.
               try{
