@@ -18,6 +18,7 @@ import re, struct, traceback, hmac, math, zlib, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import datetime, timedelta
 from functools import wraps
+import notification_engine as _ne
 
 # ── Structured logging ────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1924,6 +1925,32 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     send_email(user_email, subject, html, workspace_id)
 
 
+
+def send_sla_breach_email(user_email, user_name, ticket_title, ticket_id, priority, workspace_id):
+    subject = f"🚨 SLA breach risk: {ticket_title}"
+    body_html = f"""
+    <div style="font-family:Inter,Arial,sans-serif;background:#0f172a;color:#e5e7eb;padding:24px;border-radius:14px">
+      <h2 style="margin:0 0 10px;color:#f87171">SLA breach risk</h2>
+      <p>Hi {user_name or 'there'},</p>
+      <p>The ticket <b>{ticket_title}</b> is still unresolved and is marked <b>{priority}</b>.</p>
+      <p style="color:#94a3b8">Ticket ID: {ticket_id}</p>
+      <p>Please review and escalate if needed.</p>
+    </div>
+    """
+    return send_email(user_email, subject, body_html, workspace_id)
+
+def send_approval_request_email(user_email, user_name, approval_title, requester_name, approval_id, workspace_id):
+    subject = f"Approval needed: {approval_title}"
+    body_html = f"""
+    <div style="font-family:Inter,Arial,sans-serif;background:#0f172a;color:#e5e7eb;padding:24px;border-radius:14px">
+      <h2 style="margin:0 0 10px;color:#60a5fa">Approval needed</h2>
+      <p>Hi {user_name or 'there'},</p>
+      <p><b>{requester_name}</b> requested your approval for <b>{approval_title}</b>.</p>
+      <p style="color:#94a3b8">Approval ID: {approval_id}</p>
+    </div>
+    """
+    return send_email(user_email, subject, body_html, workspace_id)
+
 def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
     """Futuristic @mention notification email."""
     accent   = "#a78bfa"
@@ -2316,6 +2343,16 @@ def init_db():
                 user_id TEXT, read INTEGER DEFAULT 0, ts TEXT,
                 sender_id TEXT DEFAULT '', entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '',
                 followup_sent INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                user_id TEXT PRIMARY KEY, workspace_id TEXT,
+                enable_in_app INTEGER DEFAULT 1, enable_desktop INTEGER DEFAULT 1,
+                enable_email INTEGER DEFAULT 1, mute_after_hours INTEGER DEFAULT 0,
+                office_start TEXT DEFAULT '09:00', office_end TEXT DEFAULT '18:00',
+                priority_only INTEGER DEFAULT 0, digest_frequency TEXT DEFAULT 'daily',
+                task_assigned INTEGER DEFAULT 1, ticket_updated INTEGER DEFAULT 1,
+                mention_comment INTEGER DEFAULT 1, approval_needed INTEGER DEFAULT 1,
+                deadline_approaching INTEGER DEFAULT 1, daily_summary INTEGER DEFAULT 1,
+                updated TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS reminders (
                 id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT,
                 task_id TEXT, task_title TEXT, remind_at TEXT,
@@ -2411,6 +2448,8 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(workspace_id, assignee)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(workspace_id, stage)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_user ON notifications(workspace_id, user_id, read)",
+            "CREATE TABLE IF NOT EXISTS notification_prefs (user_id TEXT PRIMARY KEY, workspace_id TEXT, enable_in_app INTEGER DEFAULT 1, enable_desktop INTEGER DEFAULT 1, enable_email INTEGER DEFAULT 1, mute_after_hours INTEGER DEFAULT 0, office_start TEXT DEFAULT '09:00', office_end TEXT DEFAULT '18:00', priority_only INTEGER DEFAULT 0, digest_frequency TEXT DEFAULT 'daily', task_assigned INTEGER DEFAULT 1, ticket_updated INTEGER DEFAULT 1, mention_comment INTEGER DEFAULT 1, approval_needed INTEGER DEFAULT 1, deadline_approaching INTEGER DEFAULT 1, daily_summary INTEGER DEFAULT 1, updated TEXT DEFAULT '')",
+            "CREATE INDEX IF NOT EXISTS idx_notification_prefs_ws ON notification_prefs(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_timelogs_user ON time_logs(workspace_id, user_id)",
             "CREATE INDEX IF NOT EXISTS idx_timelogs_date ON time_logs(workspace_id, date)",
             "CREATE TABLE IF NOT EXISTS task_events (id TEXT PRIMARY KEY, workspace_id TEXT, task_id TEXT, user_id TEXT, event_type TEXT, old_val TEXT DEFAULT \'\', new_val TEXT DEFAULT \'\', ts TEXT)",
@@ -5085,34 +5124,29 @@ def create_task():
             if proj:
                 try: proj_members=json.loads(proj["members"] or "[]")
                 except: proj_members=[]
-        # Build ALL notification rows first, then batch-insert in ONE query
-        notif_rows=[]
-        if assignee_user:
-            notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
-                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts(),tid,'task'))
-        for i,uid in enumerate(proj_members):
-            if uid==session["user_id"] or uid==d.get("assignee"): continue
-            proj_name=proj["name"] if proj else ""
-            notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
-                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts(),tid,'task'))
-        if notif_rows:
-            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
-            flat=[v for row in notif_rows for v in row]
-            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
-        # Send emails + push notifications in background threads (non-blocking)
+        # Preference-aware hybrid notifications: in-app, urgent desktop push, email.
         _task_url=f"/?action=task&id={tid}"
         if assignee_user:
-            if assignee_user["email"]:
-                threading.Thread(target=send_task_assigned_email,
-                    args=(assignee_user["email"],assignee_user["name"],d["title"],cname,tid,wid()),
-                    daemon=True).start()
-            _enqueue_push(push_notification_to_user, db, d["assignee"],
-                f"✅ New task assigned: {d['title']}",
-                f"{cname} assigned you this task [{d.get('priority','medium')}]", _task_url)
+            email_fn = send_task_assigned_email if assignee_user["email"] else None
+            email_args = (assignee_user["email"], assignee_user["name"], d["title"], cname, tid, wid()) if email_fn else ()
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=d["assignee"],
+                notif_type="task_assigned", title=f"✅ New task assigned: {d['title']}",
+                body=f"{cname} assigned you to '{d['title']}'", priority=d.get("priority","medium"),
+                entity_id=tid, entity_type="task", sender_id=session["user_id"], url=_task_url,
+                email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=ts())
         for uid in proj_members:
             if uid==session["user_id"] or uid==d.get("assignee"): continue
-            _enqueue_push(push_notification_to_user, *(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
-                      f"{cname} created '{d['title']}'",_task_url))
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid,
+                notif_type="task_created", title=f"📋 New task in {proj['name'] if proj else ''}",
+                body=f"{cname} created task '{d['title']}' in {proj['name'] if proj else ''}",
+                priority=d.get("priority","medium"), entity_id=tid, entity_type="task",
+                sender_id=session["user_id"], url=_task_url, push_fn=push_notification_to_user, now=ts())
+        for uid in _ne.team_lead_targets(db, wid(), d.get("team_id","")):
+            if uid in {session["user_id"], d.get("assignee","")}: continue
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="team_summary",
+                title=f"Team task created: {d['title']}", body=f"{cname} created a team task: {d['title']}",
+                priority=d.get("priority","medium"), entity_id=tid, entity_type="task",
+                sender_id=session["user_id"], url=_task_url, push_fn=push_notification_to_user, now=ts())
         # Use RETURNING * result if available; fall back to SELECT only if needed
         if t is None:
             t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
@@ -6509,25 +6543,32 @@ def create_ticket():
                     d.get("priority","medium"),d.get("status","open"),d.get("assignee",""),
                     session["user_id"],d.get("project",""),json.dumps(d.get("tags",[])),now,now,
                     d.get("team_id","")))
+        reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+        rname=reporter["name"] if reporter else "Someone"
         if d.get("assignee"):
-            nid=f"n{int(datetime.now().timestamp()*1000)}"
-            reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-            rname=reporter["name"] if reporter else "Someone"
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
-            # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
-            if assignee_tkt and assignee_tkt["email"]:
-                threading.Thread(target=send_ticket_assigned_email,
-                    args=(assignee_tkt["email"],assignee_tkt["name"],d["title"],
-                          rname,tid,d.get("priority","medium"),wid()),
-                    daemon=True).start()
+            email_fn = send_ticket_assigned_email if assignee_tkt and assignee_tkt["email"] else None
+            email_args = (assignee_tkt["email"],assignee_tkt["name"],d["title"],rname,tid,d.get("priority","medium"),wid()) if email_fn else ()
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=d["assignee"],
+                notif_type="ticket_assigned", title=f"🎫 Ticket assigned: {d['title']}",
+                body=f"🎫 {rname} assigned ticket: {d['title']}", priority=d.get("priority","medium"),
+                entity_id=tid, entity_type="ticket", sender_id=session["user_id"], url=f"/?view=tickets&id={tid}",
+                email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
+        if d.get("priority","medium").lower() in ("high","critical","urgent"):
+            for uid in set(_ne.team_lead_targets(db, wid(), d.get("team_id","")) + _ne.role_targets(db, wid(), ("Manager","Admin"))):
+                if uid == session["user_id"] or uid == d.get("assignee",""): continue
+                _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="ticket_updated",
+                    title=f"🚨 Priority ticket created: {d['title']}", body=f"{rname} created {d.get('priority','high')} priority ticket: {d['title']}",
+                    priority=d.get("priority","high"), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
+                    url=f"/?view=tickets&id={tid}", push_fn=push_notification_to_user, now=now)
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     # Targeted bust: only tickets + appdata. Avoids wiping user/project/task caches.
     _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
+
+@app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
 def update_ticket(tid):
     d=request.json or {}
@@ -6559,15 +6600,25 @@ def update_ticket(tid):
                     continue
                 _tkt_notified.add(_tkt_uid)
                 _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
-                if _tkt_user and _tkt_user["email"]:
-                    threading.Thread(target=send_ticket_status_email,
-                        args=(_tkt_user["email"], _tkt_user["name"], t["title"],
-                              d["status"], _tkt_changer_name, tid, wid()),
-                        daemon=True).start()
-    _cache_bust(wid(), "tickets", "appdata")
+                email_fn = send_ticket_status_email if _tkt_user and _tkt_user["email"] else None
+                email_args = (_tkt_user["email"], _tkt_user["name"], t["title"], d["status"], _tkt_changer_name, tid, wid()) if email_fn else ()
+                _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=_tkt_uid, notif_type="ticket_updated",
+                    title=f"🎫 Ticket updated: {t['title']}", body=f"{_tkt_changer_name} changed ticket status to {d['status']}: {t['title']}",
+                    priority=d.get("priority", t["priority"]), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
+                    url=f"/?view=tickets&id={tid}", email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
+            if d.get("priority", t["priority"]).lower() in ("high","critical","urgent"):
+                for uid in set(_ne.team_lead_targets(db, wid(), d.get("team_id",cur_team_id)) + _ne.role_targets(db, wid(), ("Manager","Admin"))):
+                    if uid in _tkt_notified or uid == session["user_id"]: continue
+                    _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="ticket_updated",
+                        title=f"🚨 Priority ticket updated: {t['title']}", body=f"{_tkt_changer_name} updated priority ticket: {t['title']}",
+                        priority=d.get("priority", t["priority"]), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
+                        url=f"/?view=tickets&id={tid}", push_fn=push_notification_to_user, now=now)
+    _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
     return jsonify(result)
+
+@app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
 def delete_ticket(tid):
     with get_db() as db:
@@ -6991,6 +7042,21 @@ def delete_note(nid):
     return jsonify({'ok': True})
 
 # ── Notifications ─────────────────────────────────────────────────────────────
+
+@app.route("/api/notification-prefs", methods=["GET"])
+@login_required
+def get_notification_prefs():
+    with get_db() as db:
+        prefs = _ne.get_user_prefs(db, wid(), session["user_id"])
+        return jsonify(prefs)
+
+@app.route("/api/notification-prefs", methods=["PUT"])
+@login_required
+def update_notification_prefs():
+    with get_db() as db:
+        prefs = _ne.update_user_prefs(db, wid(), session["user_id"], request.json or {})
+    _cache_bust(wid(), "notifications", "notifs", "appdata")
+    return jsonify(prefs)
 
 @app.route("/api/notifications")
 @login_required
@@ -8678,6 +8744,9 @@ try:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
+    with get_db() as _db_ne:
+        _ne.ensure_notification_prefs_schema(_db_ne)
+    _ne.start_background_workers(sys.modules[__name__])
     ensure_timelog_schema()   # always run — adds any missing time_log columns
     _ensure_logout_column()    # add logged_out_at if upgrading from older deploy
     _close_ddl_conn()         # release shared DDL connection after all migrations
@@ -9678,10 +9747,21 @@ def create_approval():
          json.dumps(approvers), json.dumps([]), "", "", now, now, d.get("expires_at", ""))
     )
     with get_db() as db:
+        requester = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+        requester_name = requester["name"] if requester else "Someone"
         for approver_id in approvers:
-            nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid, wid(), "approval_requested", f"Your approval needed: {d['title']}", approver_id, 0, now))
+            user = db.execute("SELECT name,email FROM users WHERE id=?", (approver_id,)).fetchone()
+            email_fn = send_approval_request_email if user and user["email"] else None
+            email_args = (user["email"], user["name"], d["title"], requester_name, aid, wid()) if email_fn else ()
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=approver_id, notif_type="approval_requested",
+                title=f"Approval needed: {d['title']}", body=f"Your approval needed: {d['title']}",
+                priority=d.get("priority","high"), entity_id=aid, entity_type="approval", sender_id=session["user_id"],
+                url=f"/?view=approvals&id={aid}", email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
+        for uid in _ne.role_targets(db, wid(), ("Manager","Admin")):
+            if uid in approvers or uid == session["user_id"]: continue
+            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="manager_summary",
+                title=f"Approval pending: {d['title']}", body=f"Approval requested by {requester_name}: {d['title']}",
+                priority="medium", entity_id=aid, entity_type="approval", sender_id=session["user_id"], now=now)
         return jsonify(dict(db.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()))
 
 @app.route("/api/approvals/<aid>/approve", methods=["POST"])

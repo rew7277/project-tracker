@@ -5340,8 +5340,74 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   </div>`;
 }
 
+/* ─── Notification Preferences ─────────────────────────────────────────────── */
+function NotifPrefsPanel(){
+  const [prefs,setPrefs]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const [err,setErr]=useState('');
+  useEffect(()=>{api.get('/api/notification-prefs').then(setPrefs).catch(e=>setErr(e.message||'Could not load preferences'));},[]);
+  const save=async(patch)=>{
+    const next={...(prefs||{}),...patch};
+    setPrefs(next); setSaving(true); setErr('');
+    try{setPrefs(await api.put('/api/notification-prefs',next));}
+    catch(e){setErr(e.message||'Could not save preferences');}
+    finally{setSaving(false);}
+  };
+  const Toggle=({k,title,sub})=>html`<label style=${{display:'flex',justifyContent:'space-between',gap:14,alignItems:'center',padding:'13px 14px',border:'1px solid var(--bd)',borderRadius:14,background:'var(--sf)'}}>
+    <span><div style=${{fontSize:13,fontWeight:850,color:'var(--tx)'}}>${title}</div>${sub?html`<div style=${{fontSize:11,color:'var(--tx3)',marginTop:3}}>${sub}</div>`:null}</span>
+    <input type="checkbox" checked=${!!(prefs&&prefs[k])} onChange=${e=>save({[k]:e.target.checked?1:0})} />
+  </label>`;
+  if(!prefs)return html`<div style=${{padding:24,color:'var(--tx3)'}}>Loading notification preferences...</div>`;
+  return html`<div style=${{maxWidth:880,display:'grid',gap:14}}>
+    ${err?html`<div style=${{padding:12,borderRadius:12,background:'rgba(239,68,68,.1)',color:'var(--rd)',fontSize:12}}>${err}</div>`:null}
+    <div class="glass" style=${{padding:16,borderRadius:18}}>
+      <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:4}}>Delivery channels</div>
+      <div style=${{fontSize:12,color:'var(--tx3)',marginBottom:12}}>Controls are checked before every in-app, desktop, and email notification.</div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:10}}>
+        <${Toggle} k="enable_in_app" title="In-app notifications" sub="Real-time dashboard alerts"/>
+        <${Toggle} k="enable_desktop" title="Desktop notifications" sub="Urgent browser/Tauri alerts only"/>
+        <${Toggle} k="enable_email" title="Email alerts" sub="Summaries, approvals and escalations"/>
+      </div>
+    </div>
+    <div class="glass" style=${{padding:16,borderRadius:18}}>
+      <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:12}}>Noise control</div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:10}}>
+        <${Toggle} k="mute_after_hours" title="Mute after office hours" sub="Urgent/high priority still comes through"/>
+        <${Toggle} k="priority_only" title="Priority alerts only" sub="Only high / critical items"/>
+        <label style=${{padding:'13px 14px',border:'1px solid var(--bd)',borderRadius:14,background:'var(--sf)'}}>
+          <div style=${{fontSize:13,fontWeight:850,color:'var(--tx)',marginBottom:8}}>Office hours</div>
+          <div style=${{display:'flex',gap:8,alignItems:'center'}}>
+            <input type="time" value=${prefs.office_start||'09:00'} onChange=${e=>save({office_start:e.target.value})} style=${{background:'var(--sf2)',color:'var(--tx)',border:'1px solid var(--bd)',borderRadius:10,padding:'7px'}}/>
+            <span style=${{fontSize:12,color:'var(--tx3)'}}>to</span>
+            <input type="time" value=${prefs.office_end||'18:00'} onChange=${e=>save({office_end:e.target.value})} style=${{background:'var(--sf2)',color:'var(--tx)',border:'1px solid var(--bd)',borderRadius:10,padding:'7px'}}/>
+          </div>
+        </label>
+      </div>
+    </div>
+    <div class="glass" style=${{padding:16,borderRadius:18}}>
+      <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)',marginBottom:12}}>Notification types</div>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:10}}>
+        <${Toggle} k="task_assigned" title="Task assigned" sub="Immediate owner notification"/>
+        <${Toggle} k="ticket_updated" title="Ticket updates" sub="Requester, assignee, leads and managers"/>
+        <${Toggle} k="mention_comment" title="Mentions & comments" sub="Only relevant participants"/>
+        <${Toggle} k="approval_needed" title="Approval needed" sub="Manager/admin approval flow"/>
+        <${Toggle} k="deadline_approaching" title="Deadline approaching" sub="24-hour reminder"/>
+        <${Toggle} k="daily_summary" title="Daily summary" sub="End-of-day overview"/>
+      </div>
+      <div style=${{marginTop:12,display:'flex',gap:10,alignItems:'center'}}>
+        <span style=${{fontSize:12,color:'var(--tx3)'}}>Digest frequency</span>
+        <select value=${prefs.digest_frequency||'daily'} onChange=${e=>save({digest_frequency:e.target.value})} style=${{background:'var(--sf2)',color:'var(--tx)',border:'1px solid var(--bd)',borderRadius:10,padding:'8px 10px'}}>
+          <option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Bi-weekly</option><option value="off">Off</option>
+        </select>
+        ${saving?html`<span style=${{fontSize:11,color:'var(--tx3)'}}>Saving...</span>`:html`<span style=${{fontSize:11,color:'var(--gn)'}}>Saved</span>`}
+      </div>
+    </div>
+  </div>`;
+}
+
 /* ─── NotifsView ──────────────────────────────────────────────────────────── */
 function NotifsView({notifs,reload,setData,onNavigate}){
+  const [tab,setTab]=useState('list');
   const NT={
     task_assigned:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,c:'var(--ac)',nav:'tasks',label:'View Tasks'}, status_change:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>`,c:'var(--cy)',nav:'tasks',label:'View Tasks'}, comment:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,c:'var(--pu)',nav:'tasks',label:'View Tasks'}, deadline:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'var(--am)',nav:'tasks',label:'View Tasks'}, dm:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="12" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/></svg>`,c:'#06b6d4',nav:'dm',label:'Open Messages'}, project_added:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/></svg>`,c:'#10b981',nav:'projects',label:'View Projects'}, reminder:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,c:'#f59e0b',nav:'tasks',label:'View Tasks'}, call:{icon:html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.28a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.29 6.29l1.24-.82a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,c:'#22c55e',nav:'dashboard',label:'Join Instant Meet'}, };
   const unread=safe(notifs).filter(n=>!n.read).length;
@@ -5356,6 +5422,11 @@ function NotifsView({notifs,reload,setData,onNavigate}){
     api.put('/api/notifications/read-all',{}).then(()=>reload()).catch(()=>reload());
   };
   return html`<div class="fi" style=${{height:'100%',overflowY:'auto',padding:'18px 22px',boxSizing:'border-box'}}>
+    <div style=${{display:'flex',gap:8,marginBottom:16}}>
+      <button class=${'btn '+(tab==='list'?'bp':'brd')} style=${{fontSize:12}} onClick=${()=>setTab('list')}>🔔 Notifications</button>
+      <button class=${'btn '+(tab==='prefs'?'bp':'brd')} style=${{fontSize:12}} onClick=${()=>setTab('prefs')}>⚙ Preferences</button>
+    </div>
+    ${tab==='prefs'?html`<${NotifPrefsPanel}/>`:html`<>
     <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
       <span style=${{fontSize:13,color:'var(--tx2)'}}>${unread>0?html`<b style=${{color:'var(--ac)'}}>${unread}</b> unread`:'All caught up!'}</span>
       <div style=${{display:'flex',gap:8}}>
@@ -5383,6 +5454,7 @@ function NotifsView({notifs,reload,setData,onNavigate}){
         `;})}
 
     </div>
+    </>`}
   </div>`;
 }
 
