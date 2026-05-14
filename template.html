@@ -5201,7 +5201,7 @@ function MessagesView({projects,users,cu,tasks}){
             const isSystem=m.is_system===1||m.sender==='system';
             const timeStr=fmtTime(m.ts);
             if(isSystem) return html`
-              <div key=${m.id} style=${{display:'flex',justifyContent:'center',padding:'3px 0',marginBottom:6}}>
+              <div key=${m.client_msg_id||m.id} style=${{display:'flex',justifyContent:'center',padding:'3px 0',marginBottom:6}}>
                 <div style=${{display:'flex',flexDirection:'column',alignItems:'center',gap:3,maxWidth:'90%'}}>
                   <div style=${{fontSize:12,color:'var(--tx)',fontWeight:500,background:'var(--sf2)',border:'1px solid var(--bd)',borderRadius:20,padding:'5px 16px',textAlign:'center',lineHeight:1.5}}
                     dangerouslySetInnerHTML=${{__html:renderMd(m.content)}}></div>
@@ -5211,7 +5211,7 @@ function MessagesView({projects,users,cu,tasks}){
             const s=safe(users).find(u=>u.id===m.sender);
             const isMe=m.sender===cu.id;
             return html`
-              <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',marginBottom:6}}>
+              <div key=${m.client_msg_id||m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',marginBottom:6}}>
                 ${!isMe?html`<${Av} u=${s} size=${25}/>`:null}
                 <div style=${{display:'flex',flexDirection:'column',gap:3,alignItems:isMe?'flex-end':'flex-start',maxWidth:'65%'}}>
                   ${!isMe?html`<span style=${{fontSize:11,color:'var(--tx3)',fontWeight:600,marginLeft:2}}>${(s&&s.name)||'?'}</span>`:null}
@@ -5675,7 +5675,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgThreadId(recipient);
         setMsgs(prev=>{
           const base=Array.isArray(prev)?prev:[];
-          const replaced=base.some(x=>x.id===tempId||x.client_msg_id===clientMsgId);
+          const replaced=base.some(x=>x.id===tempId||x.id===m.id||(x.client_msg_id&&x.client_msg_id===clientMsgId));
           const list=replaced?base.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x):[...base,confirmed];
           const next=normalizeDmList(list);
           threadCache.current.set(recipient,next);
@@ -5690,7 +5690,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       console.warn('[DM] send failed', e);
       window._pfToast&&window._pfToast('error','Message not sent',String(e&&e.message||e||'Network/server error').slice(0,140));
       setMsgs(prev=>{
-        const next=(Array.isArray(prev)?prev:[]).map(x=>x.id===tempId?{...x,_failed:true,_pending:false}:x);
+        const next=(Array.isArray(prev)?prev:[]).map(x=>(x.id===tempId||(x.client_msg_id&&x.client_msg_id===clientMsgId))?{...x,_failed:true,_pending:false}:x);
         threadCache.current.set(recipient,next);
         _saveDmCache(recipient,next);
         return next;
@@ -5937,7 +5937,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
         ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
-          <div key=${m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
+          <div key=${m.client_msg_id||m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>

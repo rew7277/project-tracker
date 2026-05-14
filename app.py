@@ -4672,7 +4672,7 @@ def _fetch_app_data_from_db(ws, team_id, uid):
     with get_db(autocommit=True) as db:
         users = [dict(r) for r in db.execute(
             "SELECT id,name,email,role,avatar,color,workspace_id,last_active,"
-            "two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",
+            "two_fa_enabled,totp_verified,avatar_data FROM users WHERE workspace_id=? ORDER BY name",
             (ws,)
         ).fetchall()]
         projects = [dict(r) for r in db.execute(proj_sql, proj_params).fetchall()]
@@ -6089,19 +6089,7 @@ def send_dm():
     sender_name=users_map.get(me) or "Someone"
     preview=content[:60]+("..." if len(content)>60 else "")
 
-    # Push an immediate ephemeral DM event before the DB round-trip finishes.
-    # This makes the receiver see the message instantly even when PostgreSQL is slow.
-    # The committed row is published again after INSERT and merges by the same id/client_msg_id without UI blinking.
-    try:
-        instant_row={
-            "id": mid, "workspace_id": ws_id, "sender": me, "recipient": recipient,
-            "content": content, "read": 0, "ts": now, "reply_to": reply_to or "",
-            "delivered_at": now, "seen_at": "", "edited": 0, "deleted": 0, "pinned": 0,
-            "client_msg_id": client_msg_id, "_instant": True
-        }
-        _sse_publish(ws_id, "dm_created", {"id": instant_row["id"], "sender": me, "recipient": recipient, "content": preview, "message": instant_row})
-    except Exception as e:
-        log.warning("[DM] instant SSE pre-publish failed: %s", e)
+    # Do not pre-publish before DB commit. One committed dm_created event avoids duplicate renders/blinking.
 
     # ── Round-trip 2: idempotency check + insert (client_msg_id preferred) ────
     row=None
@@ -9342,7 +9330,7 @@ def sse_stream():
         generate(),
         mimetype="text/event-stream",
         headers={
-            "Cache-Control":    "no-cache",
+            "Cache-Control":    "no-cache, no-transform",
             "X-Accel-Buffering":"no",
             "Connection":       "keep-alive",
             "Content-Encoding": "identity",
