@@ -7083,40 +7083,6 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
-
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
-
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
   const QUICK=[
