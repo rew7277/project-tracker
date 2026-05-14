@@ -9419,9 +9419,9 @@ function App(){
         showBrowserNotif('📞 Video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});},{tag:'call-'+c.callId,requireInteraction:true});
       }catch(e){}
     };
-    check();
+    const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
     const id=setInterval(check,5000);
-    return()=>{stopped=true;clearInterval(id);};
+    return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
@@ -9538,12 +9538,12 @@ function App(){
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    beat();
+    const presStartId=setTimeout(()=>beat(),4000); // delay avoids cold-start stampede
     const beatId=setInterval(beat,30000);
     const onFocus=()=>{beat();};
     window.addEventListener('focus',onFocus);
     // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
-    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
+    return()=>{clearTimeout(presStartId);clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -9812,10 +9812,10 @@ function App(){
     };
 
     // Startup jitter: 5–13 s delay so poll doesn't collide with bootstrap on mount
-    const startDelay=600;
+    const startDelay=5000; // stagger away from cold-start stampede
     const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-    const id=setInterval(pollOnce,2000); // fast fallback when SSE/proxy is delayed
+    const id=setInterval(pollOnce,10000); // SSE is primary; poll is a fallback only
     return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
   },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 

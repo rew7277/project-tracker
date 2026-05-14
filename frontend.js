@@ -1143,7 +1143,7 @@ function PersonalTwoFAToggle({cu,setCu}){
     const r=await api.post('/api/auth/totp/setup',{});
     if(r.error){setMsg(r.error);return;}
     setTotpData(r);setShowSetup(true);setVerifyToken('');
-    queueMicrotask(() => {if(inpRef.current)inpRef.current.focus();},400);
+    setTimeout(() => {if(inpRef.current)inpRef.current.focus();},400);
   };
 
   const confirmSetup=async()=>{
@@ -4228,7 +4228,7 @@ function MessagesView({projects,users,cu,tasks}){
   useEffect(()=>{
     if(!incomingCall){ stopRingtone(); return; }
     startRingtone();
-    callTimeoutRef.current=queueMicrotask(() => {
+    callTimeoutRef.current=setTimeout(() => {
       const call=incomingCall;
       if(!call)return;
       dismissedCallIds.current.add(call.callId);
@@ -4236,7 +4236,7 @@ function MessagesView({projects,users,cu,tasks}){
       stopRingtone();
       api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
     },20000);
-    return()=>stopRingtone();
+    return()=>{clearTimeout(callTimeoutRef.current);stopRingtone();};
   },[incomingCall,startRingtone,stopRingtone]);
 
   const trackDmMeetWindow=(win,call)=>{
@@ -4632,7 +4632,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           if(!ringtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain);
           osc.start(); osc.stop(ctx.currentTime+0.18);
-          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
+          setTimeout(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
         };
         ringtoneCtxRef.current=ctx; tick(); ringtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1200)};
         const oldStop=stopRingtone;
@@ -5127,7 +5127,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!incomingCall){ stopRingtone(); return; }
     startRingtone();
-    callTimeoutRef.current=queueMicrotask(() => {
+    callTimeoutRef.current=setTimeout(() => {
       const call=incomingCall;
       if(!call||dismissedCallIds.current.has(call.callId))return;
       dismissedCallIds.current.add(call.callId);
@@ -5136,7 +5136,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       // Local timeout only hides the popup; server updates the original call card.
       // Do not write a local missed state that can leak into DM history.
     },20000);
-    return()=>stopRingtone();
+    return()=>{clearTimeout(callTimeoutRef.current);stopRingtone();};
   },[incomingCall,startRingtone,stopRingtone]);
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
@@ -5355,7 +5355,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     if(r.error){setTotpMsg(r.error);return;}
     setTotpMsg('✓ Google Authenticator configured!');
     setShowTotpSetup(false);setTotpData(null);
-    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1500);
+    setTimeout(() => {setTotpMsg('');reload&&reload();},1500);
   };
 
   const resetTotp=async()=>{
@@ -5365,7 +5365,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     setTwoFaLoading(false);
     if(r.error){alert(r.error);return;}
     setTotpMsg('✓ 2FA reset');
-    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1200);
+    setTimeout(() => {setTotpMsg('');reload&&reload();},1200);
   };
 
   const toggleEmailOtp=async()=>{
@@ -6388,7 +6388,7 @@ function AiDocsView({cu,projects,tasks,users}){
     setInput('');
   };
 
-  const scrollToBottom=()=>{ queueMicrotask(() => { if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
+  const scrollToBottom=()=>{ setTimeout(() => { if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
 
   const fmtRecent=(iso)=>{
     try{
@@ -9159,7 +9159,7 @@ function App(){
         const tick=()=>{
           if(!globalRingtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain); osc.start(); osc.stop(ctx.currentTime+0.20);
-          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
+          setTimeout(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
         };
         globalRingtoneCtxRef.current=ctx; tick(); globalRingtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1250)};
         return;
@@ -9274,7 +9274,7 @@ function App(){
     if(!globalIncomingCall){stopGlobalRingtone();return;}
     startGlobalRingtone();
     const remaining=globalIncomingCall.expiresAt ? Math.max(0, Number(globalIncomingCall.expiresAt)-Date.now()) : 20000;
-    globalCallTimeoutRef.current=queueMicrotask(() => {
+    globalCallTimeoutRef.current=setTimeout(() => {
       const call=globalIncomingCall;
       if(!call||globalDismissedCallIds.current.has(call.callId))return;
       globalDismissedCallIds.current.add(call.callId);
@@ -9307,9 +9307,9 @@ function App(){
         showBrowserNotif('📞 Video call',(c.senderName||'Someone')+' is calling you',()=>{window.focus();showGlobalCallPopup({callId:c.callId,from:c.senderName||'Someone',meetUrl:c.meetUrl,peerId:c.sender,expiresAt:c.expiresAt});},{tag:'call-'+c.callId,requireInteraction:true});
       }catch(e){}
     };
-    check();
+    const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
     const id=setInterval(check,15000);
-    return()=>{stopped=true;clearInterval(id);};
+    return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
   // ── SSE real-time stream ──────────────────────────────────────────────────
@@ -9442,12 +9442,12 @@ function App(){
       if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
     }).catch(()=>{});
     const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    beat();
+    const presStartId=setTimeout(()=>beat(),4000); // delay avoids cold-start stampede
     const beatId=setInterval(beat,30000);
     const onFocus=()=>{beat();};
     window.addEventListener('focus',onFocus);
     // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
-    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
+    return()=>{clearTimeout(presStartId);clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -9524,7 +9524,10 @@ function App(){
           return;
         }
         console.warn('[Load] App data failed, keeping current session/state:', d);
-        try{window._pfToast&&window._pfToast('error','Data refresh failed',String(d.error||'Server error'));}catch{}
+        // Suppress toast for timeouts/network errors (499, 408, 0) — server may be cold-starting
+        if(st!==0&&st!==408){
+          try{window._pfToast&&window._pfToast('error','Data refresh failed',String(d.error||'Server error'));}catch{}
+        }
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
@@ -9571,7 +9574,7 @@ function App(){
   useEffect(()=>{
     const q=(globalSearch||'').trim();
     if(!q||q.length<2){setSearchSubtasks([]);return;}
-    const t=queueMicrotask(() => {
+    const t=setTimeout(() => {
       api.get('/api/subtasks/search?q='+encodeURIComponent(q))
         .then(d=>{if(Array.isArray(d))setSearchSubtasks(d);})
         .catch(()=>{});
@@ -9668,9 +9671,9 @@ function App(){
       }catch(e){}
       finally{latestBusy=false;}
     };
-    pullLatest();
+    const pullStartId=setTimeout(()=>pullLatest(),5000); // delay avoids cold-start stampede
     const id=setInterval(pullLatest,30000); // fallback only; SSE handles instant delivery
-    return()=>clearInterval(id);
+    return()=>{clearTimeout(pullStartId);clearInterval(id);};
   },[cu,data.users]);
 
   const prevNotifIdsRef=useRef(null); // null = not yet seeded
@@ -9705,7 +9708,7 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='task'){
               _setView('tasks');
-              queueMicrotask(() => {
+              setTimeout(() => {
                 const taskEl=document.querySelector(`[data-task-id="${n.entity_id}"]`);
                 if(taskEl)taskEl.click();
               },100);
@@ -9716,7 +9719,7 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='ticket'){
               _setView('tickets');
-              queueMicrotask(() => {
+              setTimeout(() => {
                 const ticketEl=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);
                 if(ticketEl)ticketEl.click();
               },100);
