@@ -5446,9 +5446,11 @@ def upload_file():
 def download_file(fid):
     with get_db() as db:
         row=db.execute("SELECT * FROM files WHERE id=? AND workspace_id=?",(fid,wid())).fetchone()
-        if not row: return jsonify({"error":"Not found"}),404
+        if not row: return jsonify({"error":"File not found or already deleted"}),404
     path=os.path.join(UPLOAD_DIR,fid)
-    if not os.path.exists(path): return jsonify({"error":"File missing"}),404
+    if not os.path.exists(path):
+        # Railway/local disk can be ephemeral after restart; do not treat this as auth failure.
+        return jsonify({"error":"File content is no longer available on this server. Please re-upload the attachment."}),410
     return send_file(path,download_name=row["name"],as_attachment=True,mimetype=row["mime"])
 
 @app.route("/api/files/<fid>",methods=["DELETE"])

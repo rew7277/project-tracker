@@ -9605,11 +9605,15 @@ function App(){
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
       const d=await api.get(appDataUrl);
       if(!d||d.error){
-        console.warn('[Load] dashboard bootstrap failed; keeping current screen to avoid toast/refresh loops', d && d.error);
-        if(d && (d.status===401 || d.status===403)){
+        const st=Number(d&&d.status)||0;
+        if(st===401||st===403){
+          console.warn('[Load] Authentication expired, clearing session');
+          try{localStorage.removeItem('pf_had_session');}catch{}
           setCu(null);
           setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+          return;
         }
+        console.warn('[Load] App data failed, keeping current session/state:', d);
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
