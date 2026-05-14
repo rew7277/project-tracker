@@ -4739,6 +4739,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setThreadMessages(id,merged,true);
       setLoadingThread('');
       onDmRead(id);
+      // Clear global incoming cache — full network fetch has now merged all messages.
+      try{if(window._pfDmIncoming&&window._pfDmIncoming[id])delete window._pfDmIncoming[id];}catch(_){}
       console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
     }else{
       setMsgThreadId(id);
@@ -4750,7 +4752,23 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
     const cached=threadCache.current.get(toId);
-    if(cached){setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');}
+    // Pre-populate from global incoming cache (messages received via SSE/poll before this
+    // component mounted) so the thread is visible before the network call completes.
+    const incomingBuf=(window._pfDmIncoming&&window._pfDmIncoming[toId])||[];
+    if(cached||incomingBuf.length){
+      const base=cached||[];
+      if(incomingBuf.length){
+        const seenIds=new Set(base.map(m=>String(m.id)));
+        const merged=normalizeDmList([...base,...incomingBuf.filter(m=>!seenIds.has(String(m.id)))]);
+        setMsgThreadId(toId);
+        setMsgs(merged);
+        setLoadingThread('');
+        threadCache.current.set(toId,merged);
+        try{if(window._pfDmIncoming)delete window._pfDmIncoming[toId];}catch(_){}
+      }else{
+        setMsgThreadId(toId);setMsgs(cached);setLoadingThread('');
+      }
+    }
     else setLoadingThread(toId);
     loadMsgs(toId,'selected');
     let dmPollBusy=false;
@@ -4785,7 +4803,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             const mergedIds=new Set(merged.map(m=>m.id));
             const extraPending=prevArr.filter(m=>!mergedIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm')));
             const final=extraPending.length?normalizeDmList([...merged,...extraPending]):merged;
-            if(final.length>prevArr.length){playSound('notif');}
+            if(final.length>prevArr.length){
+              const added=final.slice(prevArr.length);
+              if(added.some(m=>String(m.sender)!==String(cu.id)))playSound('notif');
+            }
             return final;
           });
           onDmRead(requestedTo);
@@ -9345,7 +9366,22 @@ function App(){
                 try{
                   const m=(msg.data&&msg.data.message)||{};
                   if(m&&m.id&&window.__ptSeenDmIds&&window.__ptSeenDmIds.has(m.id)){
-                    window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
+                    // Cache incoming DM messages globally so DirectMessages can pre-populate instantly
+              // on mount without waiting for the loadMsgs network call to complete.
+              try{
+                if(msg.type==='dm_created'){
+                  const m=(msg.data&&msg.data.message)||msg.message||msg.data||{};
+                  const peer=String(m.sender||'')!==String(cu.id)?m.sender:m.recipient;
+                  if(m&&m.id&&peer){
+                    window._pfDmIncoming=window._pfDmIncoming||{};
+                    window._pfDmIncoming[peer]=window._pfDmIncoming[peer]||[];
+                    if(!window._pfDmIncoming[peer].find(x=>String(x.id)===String(m.id))){
+                      window._pfDmIncoming[peer].push(m);
+                    }
+                  }
+                }
+              }catch(_){}
+              window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
                     return;
                   }
                   window.__ptSeenDmIds=window.__ptSeenDmIds||new Set();
@@ -9655,7 +9691,19 @@ function App(){
             window.__ptSeenDmIds.add(m.id);
             // Inject the real message immediately into the DM panel. This avoids
             // fake alerts that open before the message is visible.
-            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
+            // Cache latest-unread messages globally so DirectMessages can pre-populate instantly
+            // even when the component was not mounted when the fallback poll fired.
+            try{
+              const peer=String(m.sender||'')!==String(cu.id)?m.sender:m.recipient;
+              if(peer){
+                window._pfDmIncoming=window._pfDmIncoming||{};
+                window._pfDmIncoming[peer]=window._pfDmIncoming[peer]||[];
+                if(!window._pfDmIncoming[peer].find(x=>String(x.id)===String(m.id))){
+                  window._pfDmIncoming[peer].push(m);
+                }
+              }
+            }catch(_){}
+            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',soundPlayed:true,data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
             const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){

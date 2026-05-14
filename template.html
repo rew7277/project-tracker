@@ -5553,7 +5553,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setThreadMessages(requestedTo,merged,false);
           setLoadingThread('');
           setMsgs(prev=>{
-            if(merged.length>prev.length){playSound('notif');}
+            if(merged.length>prev.length){
+              const added=merged.slice(prev.length);
+              if(added.some(m=>String(m.sender)!==String(cu.id)))playSound('notif');
+            }
             return merged;
           });
           onDmRead(requestedTo);
@@ -10447,7 +10450,7 @@ function App(){
                 }
               }
             }catch(_){}
-            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
+            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',soundPlayed:true,data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
             const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
