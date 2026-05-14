@@ -118,7 +118,6 @@ window._pfPushUnsubscribe = async function(){
 
 
 
-
 (function(){
 'use strict';
 
@@ -194,15 +193,13 @@ const _apiCleanMessage = (message, status) => {
   return msg;
 };
 const _API_SILENT_PREFIXES = [
-  '/api/auth/me',
-  '/api/app-data',
-  '/api/presence',
-  '/api/notifications',
-  '/api/reminders/due',
-  '/api/calls/incoming',
-  '/api/dm/unread',
-  '/api/timelogs',
-  '/api/files' // missing/deleted attachment must not look like auth failure
+  '/api/auth/me',          // expected on logged-out/expired sessions
+  '/api/app-data',         // background refresh; show banner in UI, not toast spam
+  '/api/presence',         // heartbeat/polling
+  '/api/notifications',    // SSE/fallback polling
+  '/api/reminders/due',    // reminder polling
+  '/api/dm/unread',        // DM polling
+  '/api/timelogs'          // dashboard background poll
 ];
 const _apiShouldToast = (url, status) => {
   const u = String(url || '').split('?')[0];
@@ -214,7 +211,8 @@ const _apiNotifyError = (url, message, status) => {
   message = _apiCleanMessage(message, status);
   const key = `${status || 0}:${String(url || '').split('?')[0]}:${message || ''}`;
   const now = Date.now();
-  if ((now - (_apiErrorSeen.get(key) || 0)) < 120000) return; // prevent polling-error toast spam
+  // One visible toast per unique API problem every 2 minutes. Background polls are console-only.
+  if ((now - (_apiErrorSeen.get(key) || 0)) < 120000) return;
   _apiErrorSeen.set(key, now);
   console.warn('[API]', status || 'network', url, message);
   if (!_apiShouldToast(url, status)) return;
@@ -222,7 +220,7 @@ const _apiNotifyError = (url, message, status) => {
 };
 const _apiRequest = async (u, opts = {}) => {
   const method = (opts.method || 'GET').toUpperCase();
-  const timeoutMs = opts.timeoutMs || (method === 'GET' ? 12000 : 15000);
+  const timeoutMs = opts.timeoutMs || (method === 'GET' ? 10000 : 15000);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -236,7 +234,7 @@ const _apiRequest = async (u, opts = {}) => {
     const data = await _apiRead(r);
     if (!r.ok) {
       const message = data?.error || data?.message || `HTTP ${r.status}`;
-      if (!(r.status === 401 && !u.startsWith('/api/auth/'))) _apiNotifyError(u, message, r.status);
+      if(!opts.quiet) _apiNotifyError(u, message, r.status);
       return { ok:false, error:message, status:r.status, data };
     }
     const etag = r.headers.get('ETag');
@@ -244,7 +242,7 @@ const _apiRequest = async (u, opts = {}) => {
     return data;
   } catch (e) {
     if (e.name === 'AbortError') return { ok:false, error:'Request timed out', status:408 };
-    _apiNotifyError(u, e.message || 'Network error', 0);
+    if(!opts.quiet) _apiNotifyError(u, e.message || 'Network error', 0);
     return { ok:false, error:e.message || 'Network error', status:0 };
   } finally {
     clearTimeout(timer);
@@ -252,11 +250,11 @@ const _apiRequest = async (u, opts = {}) => {
 };
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:(u,o)=>_apiRequest(u,o||{}),
-  post:(u,b,o)=>_apiRequest(u,{...(o||{}),method:'POST',headers:{'Content-Type':'application/json',...((o&&o.headers)||{})},body:JSON.stringify(b ?? {})}),
-  put:(u,b,o)=>_apiRequest(u,{...(o||{}),method:'PUT',headers:{'Content-Type':'application/json',...((o&&o.headers)||{})},body:JSON.stringify(b ?? {})}),
-  del:u=>_apiRequest(u,{method:'DELETE'}),
-  upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
+  get:(u,opts={})=>_apiRequest(u,opts),
+  post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
+  upload:(u,fd,opts={})=>_apiRequest(u,{...opts,method:'POST',body:fd}),
 };
 
 const STAGES={
@@ -361,7 +359,7 @@ function AuthScreen({onLogin}){
       const p=new URLSearchParams(window.location.search);
       if(p.get('google_auth')==='1'){
         fetch('/api/auth/me').then(r=>r.ok?r.json():null).then(u=>{
-          if(u&&u.id){history.replaceState(null,'','/');onLogin(u);}
+          if(u&&u.id){history.replaceState(null,'',workspaceBasePath(u));onLogin(u);}
         }).catch(()=>{});
       }
     }catch(e){}
@@ -1899,9 +1897,16 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
     }
     if(task&&task.id)payload.id=task.id;
     if(!rmEnabled&&!opts.keepOpen){
+      // TRUE INSTANT SAVE: close the modal first, then let the parent do the
+      // optimistic UI update + API write in the background. This avoids the
+      // button/spinner feeling stuck while the server sends notifications, writes
+      // activity rows, or waits on slow hosting cold-starts.
       const closeNow=()=>{setSaving(false);onClose();};
-      if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
-      else closeNow();
+      if(window.ReactDOM&&typeof ReactDOM.flushSync==='function'){
+        ReactDOM.flushSync(closeNow);
+      } else {
+        closeNow();
+      }
       setTimeout(()=>Promise.resolve(onSave(payload)).catch(()=>{}),0);
       return payload;
     }
@@ -2230,6 +2235,7 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     };
     if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
     else closeNow();
+
     api.put('/api/projects/'+project.id,{name,description:desc,target_date:tDate,color,members,team_id:projTeamId},{quiet:true}).then(saved=>{
       if(saved&&!saved.error){
         setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===project.id?{...p,...saved,_localTs:Date.now()}:p)}));
@@ -2255,28 +2261,30 @@ function ProjectDetail({project,allTasks,allUsers,cu,onClose,onReload,setData,on
     }catch(_){}
     onReload();
   };
-  const saveTask=async p=>{
-    let r;
+  const saveTask=p=>{
+    // Fully optimistic + fire-and-forget. The modal closes instantly; the server
+    // confirmation patches the temporary task in the background. This removes the
+    // visible ~2s wait caused by task notifications/email work on the backend.
     if(p.id&&allTasks.find(t=>t.id===p.id)){
-      // UPDATE: optimistic patch
-      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
-      r=await api.put('/api/tasks/'+p.id,p);
-    } else {
-      // CREATE: post then show immediately
-      // Pre-optimistic: show task immediately before API responds
-      const tempId2='tmp_'+Date.now();
-      const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
-      setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
-      r=await api.post('/api/tasks',{...p,project:project.id});
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p,_pending:true}:t)}));
+      api.put('/api/tasks/'+p.id,p).then(r=>{
+        if(r&&!r.error)setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...r,_localTs:Date.now()}:t)}));
+      }).catch(()=>{onReload&&onReload();});
+      return {...p,_pending:true};
+    }
+    const tempId2='tmp_'+Date.now();
+    const tempT2={...p,project:project.id,id:tempId2,created:new Date().toISOString(),_localTs:Date.now(),_pending:true};
+    setData&&setData(prev=>({...prev,tasks:[tempT2,...(prev.tasks||[])]}));
+    api.post('/api/tasks',{...p,project:project.id},{quiet:true}).then(r=>{
       if(r&&r.id){
         setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...r,_localTs:Date.now()}:t)}));
-      } else {
+      }else{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempId2)}));
       }
-    }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>onReload(),2000);
-    return r;
+    }).catch(()=>{
+      setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempId2?{...t,_pending:false,_failed:true}:t)}));
+    });
+    return tempT2;
   };
   const delTask=async id=>{
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
@@ -2461,14 +2469,14 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     // Push clean URL with project id
     try{
       const slug=detail.id;
-      history.pushState(null,'','/projects/'+slug);
+      history.pushState(null,'',workspaceBasePath(cu)+'projects/'+slug);
       document.title='Project Tracker — '+detail.name+' | Projects';
     }catch(e){}
   } else {
     // Back to /projects when detail closes
     try{
-      if(window.location.pathname.startsWith('/projects/')){
-        history.pushState(null,'','/projects');
+      if(routeViewFromPath(['projects'])==='projects'){
+        history.pushState(null,'',workspaceBasePath(cu)+'projects');
         document.title='Project Tracker — Projects | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -2532,7 +2540,7 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
       if(!Array.isArray(realProj.members)){try{realProj.members=parseIdList(realProj.members);}catch{realProj.members=[];}}
       setData&&setData(prev=>({...prev,projects:prev.projects.map(p=>p.id===tempId?realProj:p)}));
       // Background cache-warm reload (non-blocking, uses injected cache — NOT bust=1)
-      setTimeout(()=>reload(),2000);
+      // SSE triggers reload — no extra delay needed
     }catch(e){
       setData&&setData(prev=>({...prev,projects:prev.projects.filter(p=>!p._pending)}));
       setErr('Error creating project: '+(e.message||'Unknown error'));
@@ -2792,23 +2800,35 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   },[]);
 
   useEffect(()=>{
+    if(!initialTaskId)return;
+    let cancelled=false;
+    const openTask=(t)=>{
+      if(!t||cancelled)return;
+      setEditT(t);
+      if(t.project)setPid(t.project);
+      setShowResolved(true);
+      onClearInitialTask&&onClearInitialTask();
+      try{history.replaceState(null,'',workspaceBasePath(cu)+'tasks');}catch(e){}
+    };
+    const existing=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
+    if(existing){openTask(existing);return;}
+    // Deep links from email can arrive before app-data has this task.
+    // Fetch the exact task by ID, inject it into state, then open the modal.
+    api.get('/api/tasks/'+encodeURIComponent(initialTaskId),{quiet:true}).then(t=>{
+      if(t&&t.id&&!cancelled){
+        setData&&setData(prev=>({ ...prev, tasks:[t,...safe(prev.tasks).filter(x=>String(x.id)!==String(t.id))] }));
+        openTask(t);
+      }
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[initialTaskId,tasks]);
+
+  useEffect(()=>{
     if(initialStage){setStageF(initialStage);setShowFilters(true);}
     if(initialStage==='completed'){setShowResolved(true);}
     if(initialPriority){setPriF(initialPriority);setShowFilters(true);}
     if(initialAssignee==='me'&&cu){setAssF(cu.id);setShowFilters(true);}
   },[initialStage,initialPriority,initialAssignee,cu]);
-
-  useEffect(()=>{
-    if(!initialTaskId||!safe(tasks).length)return;
-    const t=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
-    if(t){
-      setShowResolved(true);
-      setPid('all');setTeamF('all');setPriF('all');setStageF('all');setAssF('all');setDueF('all');setSearch('');
-      setEditT(t);
-      onClearInitialTask&&onClearInitialTask();
-      try{history.replaceState(null,'','/tasks');}catch(e){}
-    }
-  },[initialTaskId,tasks,onClearInitialTask]);
 
   const RESOLVED_STAGES=new Set(['completed']);
 
@@ -2891,23 +2911,25 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         _localTs:Date.now(),_pending:true
       };
       setData&&setData(prev=>({...prev,tasks:[tempTask,...(prev.tasks||[])]}));
-      // API call in background
-      r=await api.post('/api/tasks',p);
-      if(r&&r.id){
-        // Replace temp with real task from server
-        setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...r,_localTs:Date.now()}:t)}));
-      } else {
-        // Rollback temp task on error
+      // API call in background. Do not block the modal/button on email/push side effects.
+      api.post('/api/tasks',p,{quiet:true}).then(real=>{
+        if(real&&real.id){
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tempTaskId?{...real,_localTs:Date.now()}:t)}));
+          // SSE triggers reload — no extra delay needed
+        } else {
+          setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
+        }
+      }).catch(()=>{
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
-      }
+      });
+      r=tempTask;
     }
     // Trigger celebration if task just completed
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
       triggerTaskCelebration(tTitle,p.project);
     }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>reload(),2000);
+    // SSE (task_updated) already triggers load() — no extra reload needed
     return r;
   };
   const delT=async id=>{
@@ -4022,20 +4044,6 @@ function ptCallStoreSet(callId,status){try{if(!callId)return;const all=JSON.pars
 function ptSetActiveCallUsers(ids){try{localStorage.setItem('ptActiveCallUsers:v1',JSON.stringify(Array.from(ids||[]).filter(Boolean)));window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:Array.from(ids||[]).filter(Boolean)}}));}catch{}}
 function ptGetActiveCallUsers(){try{return new Set(JSON.parse(localStorage.getItem('ptActiveCallUsers:v1')||'[]')||[]);}catch{return new Set();}}
 function ptClearActiveCallUsers(){try{localStorage.removeItem('ptActiveCallUsers:v1');window.dispatchEvent(new CustomEvent('pt_active_call_users',{detail:{users:[]}}));}catch{}}
-/** Open a new tab with a friendly loading page instead of about:blank.
- *  Must be called synchronously inside a user-gesture handler so the
- *  browser doesn't block the popup.  Once the Meet URL is ready, set
- *  win.location.href to navigate the tab to the real meeting. */
-function openMeetLoadingWindow(){
-  const win=null;
-  if(!win)return null;
-  try{
-    win.document.open();
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Connecting to Google Meet…</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:20px}svg{animation:spin 1.2s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}h1{font-size:20px;font-weight:600;color:#f1f5f9}p{font-size:14px;color:#94a3b8}</style></head><body><svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="20" stroke="#334155" stroke-width="4"/><path d="M24 4a20 20 0 0 1 20 20" stroke="#3b82f6" stroke-width="4" stroke-linecap="round"/></svg><h1>Connecting to Google Meet…</h1><p>Please wait while your meeting room is being created.</p></body></html>`);
-    win.document.close();
-  }catch(e){}
-  return win;
-}
 function renderChatContent(text){
   const raw=String(text||'');
   const safe=escapeHtml(raw);
@@ -4069,7 +4077,7 @@ function renderChatContent(text){
       actions=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button data-pt-call-action="popup" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#22c55e;color:white;cursor:pointer">Accept</button><button data-pt-call-action="reject" data-pt-call-id="${escapeHtml(callId)}" data-pt-call-meet="${escapeHtml(meetUrl)}" data-pt-call-from="${escapeHtml(from)}" data-pt-call-peer="${escapeHtml(callerId)}" style="border:0;border-radius:999px;padding:8px 10px;font-size:12px;font-weight:900;background:#475569;color:white;cursor:pointer">Dismiss</button></div>`;
     }
     const title=isEnded?'📞 Call ended':(isOngoing?'Call in progress':'Video call');
-    const body=isEnded?'Call ended':(isOngoing?'This call is already active.':(escapeHtml(from)+' is calling.'));
+    const body=isEnded?'Call ended':(isOngoing?'Both users joined this call.':(escapeHtml(from)+' is calling you.'));
     return `<div style="min-width:230px;max-width:320px;border:1px solid rgba(59,130,246,.28);border-radius:16px;padding:11px 13px;background:linear-gradient(135deg,rgba(37,99,235,.16),rgba(14,165,233,.08))"><div style="display:flex;align-items:center;gap:9px;font-weight:900"><span style="width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:${isEnded?'#64748b':'#2563eb'};color:white">📞</span><span>${title}</span></div><div style="font-size:12px;opacity:.82;margin-top:6px;line-height:1.4">${body}</div>${actions}</div>`;
   }
   const meetMatch=raw.match(/https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:\?[^\s<]*)?/i);
@@ -4088,12 +4096,6 @@ function renderChatContent(text){
   }
   if(fileUrl&&isImg){
     return safe.replace(/(^|\s)(\/api\/files\/[A-Za-z0-9_-]+)/g,'$1<a href="$2" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:800">Open image</a>').replace(/\n/g,'<br>');
-  }
-  const meetMatch2=raw.match(/https:\/\/meet\.google\.com\/[A-Za-z0-9-]+/i);
-  if(meetMatch2){
-    const url=meetMatch2[0];
-    const code=(raw.match(/Code:\s*([A-Za-z0-9-]+)/i)||[])[1]||url.split('/').pop();
-    return `<div style="min-width:240px;display:grid;gap:8px"><div style="display:flex;align-items:center;gap:8px;font-weight:900"><span style="width:30px;height:30px;border-radius:999px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center">📹</span><span>Google Meet call</span></div><div style="font-size:11px;opacity:.82;font-family:monospace">Invite code: ${escapeHtml(code)}</div><a href="${url}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:12px;padding:9px 12px;background:#2563eb;color:#fff;text-decoration:none;font-weight:900">Join Google Meet ↗</a></div>`;
   }
   return safe
     .replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:700">$1</a>')
@@ -4176,10 +4178,7 @@ function MessagesView({projects,users,cu,tasks}){
   const pidRef=useRef('');
   useEffect(()=>{pidRef.current=pid;},[pid]);
   const [msgs,setMsgs]=useState([]);const [txt,setTxt]=useState('');const ref=useRef(null);
-  const _chanCacheKey='pfChannelMessageCache:v2';
-  const _loadChanCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_chanCacheKey)||'{}')));}catch{return new Map();}};
-  const _saveChanCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_chanCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_chanCacheKey,JSON.stringify(raw));}catch{}};
-  const msgCacheRef=useRef(_loadChanCache());
+  const msgCacheRef=useRef((()=>{try{const raw=JSON.parse(localStorage.getItem('ptChannelMsgCache')||'{}');return new Map(Object.entries(raw).map(([k,v])=>[k,Array.isArray(v)?v:[]]));}catch{return new Map();}})());
   const msgReqSeq=useRef(0);
   const [loadingChannel,setLoadingChannel]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
@@ -4212,9 +4211,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(seq!==msgReqSeq.current||id!==pidRef.current)return;
     if(Array.isArray(d)){
       msgCacheRef.current.set(id,d);
-      _saveChanCache(id,d);
+      try{const obj={};msgCacheRef.current.forEach((v,k)=>{obj[k]=(Array.isArray(v)?v:[]).slice(-250);});localStorage.setItem('ptChannelMsgCache',JSON.stringify(obj));}catch{}
       setMsgs(d);
       setLoadingChannel('');
+      // Mark channel as read — store the latest message ts
       if(d.length>0){
         const latestTs=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
         lastSeenMsgRef.current[id]=latestTs;
@@ -4243,7 +4243,6 @@ function MessagesView({projects,users,cu,tasks}){
     if(!pid){setMsgs([]);setLoadingChannel('');return;}
     const cached=msgCacheRef.current.get(pid);
     if(cached){setMsgs(cached);setLoadingChannel('');}
-    else {setMsgs([]);setLoadingChannel(pid);}
     loadMsgs(pid,'switch');
   },[pid,loadMsgs]);
 
@@ -4252,12 +4251,10 @@ function MessagesView({projects,users,cu,tasks}){
     const id=setInterval(()=>{
       api.get('/api/messages?project='+pid).then(d=>{
         if(Array.isArray(d)){
-          msgCacheRef.current.set(pid,d);
-          _saveChanCache(pid,d);
-          setLoadingChannel('');
           setMsgs(prev=>{
             if(d.length>prev.length){
-              playSound('notif');
+              const newMsgs=d.slice(prev.length);
+              if(newMsgs.some(m=>m.sender!==cu.id))playSound('notif');
               if(d.length>0){
                 const latest=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
                 setLastMsgTs(prev2=>({...prev2,[pid]:latest}));
@@ -4290,10 +4287,10 @@ function MessagesView({projects,users,cu,tasks}){
     if(!body||!pid)return;
     if(textOverride===undefined)setTxt('');
     const temp={id:'tmpmsg'+Date.now(),project:pid,sender:cu.id,content:body,ts:new Date().toISOString(),_pending:true};
-    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
+    setMsgs(prev=>{const next=[...prev,temp];msgCacheRef.current.set(pid,next);return next;});
     const m=await api.post('/api/messages',{project:pid,content:body},{quiet:true});
     if(m&&m.id){
-      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);_saveChanCache(pid,next);return next;});
+      setMsgs(prev=>{const next=prev.map(x=>x.id===temp.id?m:x);msgCacheRef.current.set(pid,next);return next;});
       setLastMsgTs(prev=>({...prev,[pid]:m.ts||new Date().toISOString()}));
     }
   };
@@ -4359,20 +4356,6 @@ function MessagesView({projects,users,cu,tasks}){
     return rows;
   },[allProjects,chanSearch,newMsgProjects]);
 
-  useEffect(()=>{
-    if(!incomingCall){ stopRingtone(); return; }
-    startRingtone();
-    callTimeoutRef.current=setTimeout(() => {
-      const call=incomingCall;
-      if(!call)return;
-      dismissedCallIds.current.add(call.callId);
-      setIncomingCall(null);
-      stopRingtone();
-      api.post('/api/calls/respond',{callId:call.callId,action:'missed',peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true}).catch(()=>{});
-    },20000);
-    return()=>{clearTimeout(callTimeoutRef.current);stopRingtone();};
-  },[incomingCall,startRingtone,stopRingtone]);
-
   const trackDmMeetWindow=(win,call)=>{
     if(!win||!call)return;
     dmMeetWindowRef.current=win;
@@ -4410,19 +4393,21 @@ function MessagesView({projects,users,cu,tasks}){
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'&&((r&&r.meetUrl)||call.meetUrl)){
-        if(acceptWin){acceptWin.location.href=(r&&r.meetUrl)||call.meetUrl;trackDmMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
-      }
-      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Call accepted':'Call rejected',action==='accept'?'success':'info');
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[DM] call response failed',e);
-      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackDmMeetWindow==='function')trackDmMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      // Wait for server call_status=in_call before showing In a call.
+      // Wait for server call_status=in_call before storing active call state.
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{
+        if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setActiveCallUsers&&setActiveCallUsers(ids);}catch(_){ }try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}
+        if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
+        if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+      })
+      .catch(e=>{console.warn('[DM] call response failed',e);if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');});
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
@@ -4644,30 +4629,6 @@ const playSound=(type='notif')=>{
     }
   }catch(e){}
 };
-const dmDateKey=(v)=>{const d=new Date(v||Date.now());return isNaN(d)?'':d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
-const dmDateLabel=(v)=>{
-  const d=new Date(v||Date.now()); if(isNaN(d))return '';
-  const today=new Date(); const y=new Date(); y.setDate(today.getDate()-1);
-  if(dmDateKey(d)===dmDateKey(today))return 'Today';
-  if(dmDateKey(d)===dmDateKey(y))return 'Yesterday';
-  return d.toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'});
-};
-const dmTimeLabel=(v)=>{const d=new Date(v||Date.now());return isNaN(d)?'':d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
-const dmStatusInfo=(m,isMe)=>{
-  if(!isMe)return {text:dmTimeLabel(m.ts||m.created_at),icon:null,title:''};
-  if(m._failed)return {text:'Failed — retry',icon:null,title:'Message failed'};
-  if(m._pending)return {text:'Sending…',icon:null,title:'Sending'};
-  if(m.seen_at||m.read_at||Number(m.read||0)===1||m.status==='seen')return {text:'Seen',icon:'eye',title:'Seen '+(dmTimeLabel(m.seen_at||m.read_at)||'')};
-  if(m.delivered_at||m.status==='delivered')return {text:'Delivered',icon:'check',title:'Delivered '+(dmTimeLabel(m.delivered_at)||'')};
-  return {text:'Sent',icon:'tick',title:'Sent'};
-};
-const dmContextLabel=(m)=>{
-  const t=String(m.context_type||'').toLowerCase(); const id=String(m.context_id||'').trim();
-  if(!t||!id)return '';
-  const nice={task:'Task',project:'Project',ticket:'Ticket'}[t]||t;
-  return nice+' #'+id;
-};
-
 function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set()}){
   const isAdminOrManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   if(!dmEnabled&&!isAdminOrManager) return html`
@@ -4682,7 +4643,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
-  const [dmContext,setDmContext]=useState(()=>{try{const q=new URLSearchParams(location.search);const t=(q.get('context_type')||q.get('ctx')||'').toLowerCase();const id=q.get('context_id')||q.get('task')||q.get('project')||q.get('ticket')||'';return ['task','project','ticket'].includes(t)&&id?{type:t,id}:null;}catch{return null;}});
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
@@ -4717,7 +4677,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reqSeq=useRef(0);
   const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
-  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-300):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
+  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
   const dmSeenIdsRef=useRef(new Set());
   const dmRecentSendRef=useRef({key:'',at:0});
@@ -4729,8 +4689,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     for(const raw of arr){
       if(!raw)continue;
       const m={...raw};
-      if(!m.date_label)m.date_label=dmDateLabel(m.ts||m.created_at);
-      if(!m.time_label)m.time_label=dmTimeLabel(m.ts||m.created_at);
       const id=String(m.id||'');
       if(id&&byId.has(id)){
         Object.assign(byId.get(id),m,{_pending:byId.get(id)._pending&&m._pending});
@@ -4841,18 +4799,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       return m;
     });
     const serverIds=new Set(merged.map(m=>m.id));
-    // Never let background polling/SSE temporarily erase local messages that haven't been
-    // confirmed by the server yet (pending/failed/temp) OR that were confirmed very recently
-    // (within 30 s) and may have been missed by an incremental fetch due to same-second
-    // timestamp precision or a race with the network round-trip.
-    const recentCutoff=Date.now()-30000;
+    // Never let background polling/SSE temporarily erase optimistic local messages.
     localList.forEach(m=>{
-      if(!serverIds.has(m.id)){
-        const isPendingOrTemp=m._pending||m._failed||String(m.id||'').startsWith('tmpdm');
-        const isRecentConfirmed=!m._pending&&!m._failed&&!String(m.id||'').startsWith('tmpdm')&&(Date.parse(m.ts||'')||0)>recentCutoff;
-        if(isPendingOrTemp||isRecentConfirmed){
-          merged.push(m);
-        }
+      if(!serverIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm'))){
+        merged.push(m);
       }
     });
     merged.sort((a,b)=>new Date(a.ts||0)-new Date(b.ts||0));
@@ -4865,11 +4815,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
     const cached=threadCache.current.get(id);
     if(cached){
-      const readCached=normalizeDmList(cached.map(m=>m.sender===id?{...m,read:1}:m));
-      threadCache.current.set(id,readCached);
-      _saveDmCache(id,readCached);
       setMsgThreadId(id);
-      setMsgs(readCached);
+      setMsgs(cached);
       setLoadingThread('');
     }else{
       setMsgThreadId('');
@@ -4877,7 +4824,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList]);
+  },[]);
   useEffect(()=>{
     if(initialUserId){
       const u=safe(users).find(u=>u.id===initialUserId);
@@ -4893,9 +4840,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     else setLoadingThread(id);
     console.debug('[DM] load start', {id,reason,seq,cached:existing.length});
     const lastMsg=existing.length?existing[existing.length-1]:null;
-    // Subtract 1 s so messages at the exact same second as the last known message
-    // are not excluded by the strict ts > ? comparison on the server.
-    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+(new Date(lastMsg.ts).getTime()-1000):'';
+    const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
     const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
@@ -4908,15 +4853,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const seen=new Set(existing.map(m=>m.id));
         merged=mergePendingReactionState(id,[...existing,...d.filter(m=>!seen.has(m.id))]);
       }else merged=mergePendingReactionState(id,d);
-      // Opening a DM means the user has seen this thread now. Mark local incoming
-      // messages as read immediately so the stale "New messages" divider disappears
-      // without waiting for the next poll/render. The server is already marking them
-      // read inside GET /api/dm/<user>.
-      merged=normalizeDmList(merged.map(m=>m.sender===id?{...m,read:1}:m));
       setThreadMessages(id,merged,true);
       setLoadingThread('');
       onDmRead(id);
-      api.post('/api/dm/'+id+'/seen',{}, {quiet:true}).catch(()=>{});
       // Clear global incoming cache — full network fetch has now merged all messages.
       try{if(window._pfDmIncoming&&window._pfDmIncoming[id])delete window._pfDmIncoming[id];}catch(_){}
       console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
@@ -4955,19 +4894,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       dmPollBusy=true;
       try{
         const requestedTo=toId;
-        // Capture sinceParam from current cache before the network call.
+        // Read cache BEFORE await for sinceParam, but re-read AFTER await for merging
+        // to avoid stale snapshots causing confirmed messages to vanish.
         const cachedAtStart=threadCache.current.get(requestedTo)||[];
         const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
-        // Subtract 1s so same-second messages are not excluded by strict > on the server.
         const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
         const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
         if(requestedTo!==activeToRef.current)return;
         if(Array.isArray(d)){
           if(sinceParam&&d.length===0)return;
-          // Re-read threadCache AFTER the await so we always merge onto the freshest local state.
-          // Using the stale pre-await snapshot was the root cause of confirmed messages vanishing:
-          // messages confirmed during the ~6s network round-trip were absent from the snapshot
-          // and not re-added by mergePendingReactionState (which only preserves _pending/_failed/tmpdm).
+          // Use freshCached (post-await) so confirmed messages written during network roundtrip are included
           const freshCached=threadCache.current.get(requestedTo)||[];
           const seen=new Set(freshCached.map(m=>m.id));
           const merged=sinceParam?mergePendingReactionState(requestedTo,[...freshCached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
@@ -4975,8 +4911,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setThreadMessages(requestedTo,merged,false);
           setLoadingThread('');
           setMsgs(prev=>{
-            // Also preserve any _pending/_failed/tmpdm from current React state not yet in merged
-            // (e.g. optimistic messages added after threadCache was read above).
+            // Preserve any _pending/_failed/tmpdm from React state not yet in merged
             const prevArr=Array.isArray(prev)?prev:[];
             const mergedIds=new Set(merged.map(m=>m.id));
             const extraPending=prevArr.filter(m=>!mergedIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm')));
@@ -4988,7 +4923,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             return final;
           });
           onDmRead(requestedTo);
-          api.post('/api/dm/'+requestedTo+'/seen',{}, {quiet:true}).catch(()=>{});
         }
       }finally{dmPollBusy=false;}
     },3000);
@@ -5044,11 +4978,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         return;
       }
       if(msg&&msg.type==='dm_created'&&data&&data.message){
-        let m=data.message;
+        const m=data.message;
         const peer=(m.sender===cu.id)?m.recipient:m.sender;
         const belongs=peer===toId || data.sender===toId || data.recipient===toId;
         if(belongs){
-          if(m.sender!==cu.id)m={...m,read:1};
           setMsgThreadId(toId);
           setLoadingThread('');
           setMsgs(prev=>{
@@ -5068,11 +5001,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(String(x.id||'').startsWith('srvtmp')&&x.content===m.content&&x.sender===m.sender));
             const next=mergePendingReactionState(toId,[...withoutTmp,{...m,_pending:false}]);
             setThreadMessages(toId,next,false);
-            if(m.sender!==cu.id)playSound('notif');
+            if(m.sender!==cu.id&&!msg.soundPlayed)playSound('notif');
             return normalizeDmList(next);
           });
           onDmRead(toId);
-          if(m.sender!==cu.id)api.post('/api/dm/'+toId+'/seen',{}, {quiet:true}).catch(()=>{});
           return;
         }
       }
@@ -5106,7 +5038,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     };
     (async()=>{
       const q=[...ids];
-      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
+      const workers=Array.from({length:Math.min(4,q.length)},async()=>{
         while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
       });
       await Promise.all(workers);
@@ -5142,7 +5074,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dmRecentSendRef.current={key:sendKey,at:Date.now()};
     const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||'',_pending:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true,_instant:true};
     setTxt('');setReplyTo(null);
     setSending(true);
     setMsgThreadId(recipient);
@@ -5154,7 +5086,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:optimistic.context_type,context_id:optimistic.context_id},{timeoutMs:20000});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:20000});
       if(m&&m.ok===false) throw new Error(m.error||'DM send failed');
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
@@ -5162,7 +5094,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         setMsgs(prev=>{
           const base=Array.isArray(prev)?prev:[];
           const replaced=base.some(x=>x.id===tempId||x.id===m.id||(x.client_msg_id&&x.client_msg_id===clientMsgId));
-          const list=replaced?base.map(x=>(x.id===tempId||x.id===m.id||(x.client_msg_id&&x.client_msg_id===clientMsgId))?confirmed:x):[...base,confirmed];
+          const list=replaced?base.map(x=>x.id===tempId||x.client_msg_id===clientMsgId?confirmed:x):[...base,confirmed];
           const next=normalizeDmList(list);
           threadCache.current.set(recipient,next);
           _saveDmCache(recipient,next);
@@ -5214,8 +5146,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const peer=toUser&&toUser.name?toUser.name:'teammate';
     const recipient=toId;
     setStartingMeet(true);
-    let hostWin=null;
-    // Do not open an intermediate blank/loading tab. Open Meet directly only after URL is ready.
+    // No intermediate about:blank tab. Open only the final Google Meet URL.
     try{
       const r=await api.post('/api/calls/google-meet',{type:'dm',targetId:recipient,title:`Call with ${peer}`},{quiet:true});
       if(!r||!r.ok||!r.meetUrl){
@@ -5233,8 +5164,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       }
       // Caller initiated the meeting from a direct click, so open Meet immediately in a new tab.
       const call={callId:r.callId,peer,peerId:recipient,meetUrl:r.meetUrl};
-      hostWin=window.open(r.meetUrl,'_blank','noopener,noreferrer');
-      if(hostWin){trackDmMeetWindow(hostWin,call);} else if(typeof window.showToast==='function') window.showToast('Meeting invite sent. Allow popups or use the Join button in chat.','success');
+      if(hostWin){hostWin.location.href=r.meetUrl;trackDmMeetWindow(hostWin,call);} else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker and click the call button again.','error');
       if(typeof setOutgoingMeetCall==='function')setOutgoingMeetCall(null);
       ptCallStoreSet(r.callId,'ringing');
       if(typeof window.showToast==='function') window.showToast('Calling '+peer+'… waiting for them to accept','success');
@@ -5269,7 +5199,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const body=(file.type||'').startsWith('image/')?'🖼️ '+uploaded.name+'\n/api/files/'+uploaded.id:'📎 '+uploaded.name+'\n/api/files/'+uploaded.id;
         const recipient=toId;
         const tempId='tmpdm'+Date.now();
-        const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false};
+        const optimistic={id:tempId,sender:cu.id,recipient,content:body,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
         setReplyTo(null);setMsgThreadId(recipient);
         setMsgs(prevMsgs=>{const next=[...prevMsgs,optimistic];threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;});
         const m=await api.post('/api/dm',{recipient,content:body,reply_to:optimistic.reply_to});
@@ -5365,22 +5295,21 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dismissedCallIds.current.add(call.callId);
     stopRingtone();
     setIncomingCall(null);
-    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'){
-        // Wait for server call_status=in_call before showing In a call.
-        // Wait for server call_status=in_call before storing active call state.
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        if(acceptWin){acceptWin.location.href=joinUrl;trackDmMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
-      }
-      if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[DM] call response failed',e);
-      if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackDmMeetWindow==='function')trackDmMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      // Wait for server call_status=in_call before showing In a call.
+      // Wait for server call_status=in_call before storing active call state.
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{
+        if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setActiveCallUsers&&setActiveCallUsers(ids);}catch(_){ }try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}
+        if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}
+        if(typeof window.showToast==='function') window.showToast(action==='accept'?'Joining call…':'Call rejected',action==='accept'?'success':'info');
+      })
+      .catch(e=>{console.warn('[DM] call response failed',e);if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error');});
   };
   const joinOutgoingMeet=()=>{
     if(!outgoingMeetCall||!outgoingMeetCall.meetUrl)return;
@@ -5423,8 +5352,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
-              <div style=${{fontSize:13,fontWeight:700,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
-              ${(()=>{const lm=(threadCache.current.get(u.id)||[]).slice(-1)[0];return lm?html`<div style=${{display:'flex',gap:6,alignItems:'center',minWidth:0}}><span style=${{fontSize:10,color:'var(--tx3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:104}}>${lm.sender===cu.id?'You: ':''}${String(lm.content||'').replace(/\n/g,' ').slice(0,34)}</span><span style=${{fontSize:9,color:'var(--tx3)',marginLeft:'auto'}}>${dmTimeLabel(lm.ts)}</span></div>`:null;})()}
+              <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
             </div>
             ${unr>0?html`<span style=${{background:'var(--ac)',color:'#fff',borderRadius:10,fontSize:10,padding:'2px 6px',fontFamily:'monospace',fontWeight:700}}>${unr}</span>`:null}
           </button>`;})}
@@ -5443,16 +5371,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
-      ${dmContext?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(99,102,241,.09)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>🔗 Routed context</b><span>${dmContext.type} #${dmContext.id}</span><button class="btn" style=${{marginLeft:'auto',fontSize:10,padding:'3px 7px'}} onClick=${()=>setDmContext(null)}>Clear</button></div>`:null}
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
-        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);const prev=displayMsgs[i-1];const showDate=!prev||dmDateKey(prev.ts)!==dmDateKey(m.ts);const st=dmStatusInfo(m,isMe);const ctxLabel=dmContextLabel(m);return html`${showDate?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--tx3)',fontSize:11,fontWeight:900,margin:'8px 0 2px'}}><span style=${{height:1,background:'var(--bd)',flex:1}}></span><span style=${{padding:'4px 10px',border:'1px solid var(--bd)',borderRadius:999,background:'var(--sf)',letterSpacing:'.02em'}}>${m.date_label||dmDateLabel(m.ts)}</span><span style=${{height:1,background:'var(--bd)',flex:1}}></span></div>`:null}${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
+        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.client_msg_id||m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
-                ${ctxLabel?html`<div style=${{fontSize:10,maxWidth:'100%',padding:'3px 7px',marginBottom:4,borderRadius:999,background:'rgba(99,102,241,.13)',color:'var(--ac)',border:'1px solid rgba(99,102,241,.22)',fontWeight:800}}>🔗 ${ctxLabel}</div>`:null}${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
+                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
                 ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'linear-gradient(135deg, rgba(15,23,42,.94), rgba(30,41,59,.90))',backdropFilter:'blur(16px)',borderRadius:22,boxShadow:'0 20px 50px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:20,animation:'dmPickerPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
@@ -5467,7 +5394,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<div title=${st.title||''} style=${{display:'flex',alignItems:'center',gap:4,margin:'0 2px',justifyContent:isMe?'flex-end':'flex-start'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${isMe?st.text:(m.time_label||dmTimeLabel(m.ts))}${m.edited?' · edited':''}</span>${isMe&&st.icon==='eye'?html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.95}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:isMe&&st.icon==='check'?html`<span title="Delivered" style=${{fontSize:10,color:'var(--tx3)',fontWeight:900}}>✓</span>`:null}</div>`:null}
+              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:3,margin:'0 2px'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe&&m._pending?' · Sending…':'')+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed&&m.read?html`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.85}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:null}</div>`:null}
             </div>
           </div>`;})}
       </div>
@@ -5486,7 +5413,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(34,197,94,.18)':'linear-gradient(135deg,#16a34a,#22c55e)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
-        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0,opacity:sending?0.65:1}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
+        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
       </div>
     </div>
   </div>`;
@@ -5499,6 +5426,7 @@ function NotifsView({notifs,reload,setData,onNavigate}){
   const unread=safe(notifs).filter(n=>!n.read).length;
   const handleClick=async(n)=>{
     if(!n.read) await api.put('/api/notifications/'+n.id+'/read',{});
+    const T=NT[n.type]||NT.comment;
     if(onNavigate){onNavigate(n);}
     reload();
   };
@@ -6076,10 +6004,31 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
 
   const saveTicket=async()=>{
     if(!nTitle.trim())return;
-    setSaving(true);
     const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    try{ if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);} else {await api.post('/api/tickets',payload);} }
-    finally{setSaving(false);setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');load();}
+    if(editTicket){
+      // EDIT: optimistic update
+      setSaving(true);
+      setTickets(prev=>prev.map(t=>t.id===editTicket.id?{...t,...payload}:t));
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{await api.put('/api/tickets/'+editTicket.id,payload);}
+      finally{setSaving(false);load();}
+    } else {
+      // CREATE: optimistic — show ticket immediately, close modal, save in background
+      const tempId='tmptkt_'+Date.now();
+      const tempTicket={...payload,id:tempId,reporter:cu.id,created:new Date().toISOString(),updated:new Date().toISOString(),tags:'[]',_pending:true};
+      setTickets(prev=>[tempTicket,...prev]);
+      setShowNew(false);setEditTicket(null);setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
+      try{
+        const result=await api.post('/api/tickets',payload);
+        if(result&&result.id){
+          setTickets(prev=>prev.map(t=>t.id===tempId?{...result}:t));
+        } else {
+          setTickets(prev=>prev.filter(t=>t.id!==tempId));
+        }
+      }catch(e){
+        setTickets(prev=>prev.filter(t=>t.id!==tempId));
+      }
+    }
   };
   const openEdit=(t)=>{setEditTicket(t);setNTitle(t.title||'');setNDesc(t.description||'');setNType(t.type||'bug');setNPriority(t.priority||'medium');setNAssignee(t.assignee||'');setNProject(t.project||'');setNStatus(t.status||'open');setShowNew(true);};
   const openDetail=async(t)=>{setDetailTicket(t);setCopilotOpen(true);try{const c=await api.get('/api/tickets/'+t.id+'/comments');setComments(Array.isArray(c)?c:[]);}catch(e){setComments([]);}};
@@ -6356,7 +6305,7 @@ function WorkspaceSettings({cu,onReload}){
     if(smtpPassword&&!smtpPassword.startsWith('•'))payload.smtp_password=smtpPassword;
     await api.put('/api/workspace',payload);
     setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),2000);
-    await onReload();
+    onReload();
   };
 
   const sendTestEmail=async()=>{
@@ -6550,7 +6499,7 @@ function WorkspaceSettings({cu,onReload}){
 
 /* ─── AiDocsView — Chat-first AI Documentation Studio ─────────────────────── */
 
-/* ─── NotesView — Professional notes command workspace ───────────────────── */
+/* ─── NotesView — OneNote-inspired quick notes workspace ───────────────────── */
 function NotesView({cu}){
   const [notes,setNotes]=useState([]);
   const [activeId,setActiveId]=useState(null);
@@ -6560,15 +6509,12 @@ function NotesView({cu}){
   const [tagInput,setTagInput]=useState('');
   const [toolsOpen,setToolsOpen]=useState(false);
   const [viewMode,setViewMode]=useState('focus');
-  const [creating,setCreating]=useState(false);
-  const [deleting,setDeleting]=useState(false);
   const editorRef=useRef(null);
   const saveTimer=useRef(null);
   const colors=['#facc15','#60a5fa','#34d399','#f472b6','#fb923c','#a78bfa','#f87171','#22d3ee','#ffffff','#111827'];
   const toTags=(v)=>Array.isArray(v)?v:(typeof v==='string'?v.split(',').map(x=>x.trim()).filter(Boolean):[]);
   const stripHtml=(html='')=>{const d=document.createElement('div');d.innerHTML=html||'';return (d.textContent||d.innerText||'').trim();};
-  const uid=()=> ((window.crypto&&window.crypto.randomUUID)?window.crypto.randomUUID():('tmp_'+Date.now()+'_'+Math.random().toString(16).slice(2)));
-  const normalizeNote=(n)=>({...n,tags:toTags(n&&n.tags),title:(n&&n.title)||'Untitled note',body:(n&&n.body)||'',plain_text:(n&&n.plain_text)||stripHtml((n&&n.body)||''),notebook:(n&&n.notebook)||'Quick Notes',section:(n&&n.section)||'General',color:(n&&n.color)||'#60a5fa'});
+  const normalizeNote=(n)=>({...n,tags:toTags(n&&n.tags),title:(n&&n.title)||'Untitled note',body:(n&&n.body)||'',plain_text:(n&&n.plain_text)||stripHtml((n&&n.body)||''),notebook:(n&&n.notebook)||'Quick Notes',section:(n&&n.section)||'General',color:(n&&n.color)||'#facc15'});
   const loadNotes=useCallback(async()=>{
     const d=await api.get('/api/notes'+(archived?'?archived=1':''),{quiet:true,timeoutMs:10000});
     if(Array.isArray(d)){
@@ -6579,41 +6525,43 @@ function NotesView({cu}){
   },[archived]);
   useEffect(()=>{loadNotes();return()=>clearTimeout(saveTimer.current);},[loadNotes]);
   const active=notes.find(n=>n.id===activeId)||notes[0]||null;
-  useEffect(()=>{if(active&&editorRef.current&&editorRef.current.innerHTML!==active.body){editorRef.current.innerHTML=active.body||'';}},[active&&active.id,active&&active.body]);
-  const filtered=notes.filter(n=>{const hay=((n.title||'')+' '+(n.plain_text||'')+' '+(n.notebook||'')+' '+(n.section||'')+' '+toTags(n.tags).join(' ')).toLowerCase();return !q||hay.includes(q.toLowerCase());});
+  useEffect(()=>{
+    if(active&&editorRef.current&&editorRef.current.innerHTML!==active.body){
+      editorRef.current.innerHTML=active.body||'';
+    }
+  },[active&&active.id,active&&active.body]);
+  const filtered=notes.filter(n=>{
+    const hay=((n.title||'')+' '+(n.plain_text||'')+' '+(n.notebook||'')+' '+(n.section||'')+' '+toTags(n.tags).join(' ')).toLowerCase();
+    return !q||hay.includes(q.toLowerCase());
+  });
   const notebooks=[...new Set(notes.map(n=>n.notebook||'Quick Notes'))];
   const sections=[...new Set(notes.map(n=>n.section||'General'))];
   const updateLocal=(id,patch)=>setNotes(prev=>prev.map(n=>n.id===id?normalizeNote({...n,...patch,updated:new Date().toISOString()}):n));
   const savePatch=(id,patch,instant=false)=>{
-    if(!id||String(id).startsWith('tmp_'))return;
-    updateLocal(id,patch); clearTimeout(saveTimer.current);
-    const run=async()=>{try{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:8000});}finally{setSaving(false);}};
-    if(instant)run();else saveTimer.current=setTimeout(run,300);
+    if(!id)return;
+    updateLocal(id,patch);
+    clearTimeout(saveTimer.current);
+    const run=async()=>{try{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:10000});}finally{setSaving(false);}};
+    if(instant)run();else saveTimer.current=setTimeout(run,450);
   };
-  const templateData=(template='blank')=>{
+  const createNote=async(template='blank')=>{
     const templates={
-      blank:'<p></p>',
+      blank:'',
       meeting:'<h2>Meeting notes</h2><p><b>Agenda</b></p><ul><li></li></ul><p><b>Decisions</b></p><ul><li></li></ul><p><b>Action items</b></p><ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> Follow up</label></li></ul>',
       daily:'<h2>Daily plan</h2><ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> Top priority</label></li><li><label><input type="checkbox" class="note-check"> Blocker</label></li></ul><p><b>Notes</b></p><p></p>',
       idea:'<h2>Idea</h2><p><b>Problem:</b></p><p><b>Solution:</b></p><p><b>Next step:</b></p>'
     };
-    const palette={blank:'#60a5fa',meeting:'#a78bfa',daily:'#34d399',idea:'#facc15'};
-    return {title:template==='blank'?'Untitled note':template[0].toUpperCase()+template.slice(1)+' note',body:templates[template]||'',plain_text:stripHtml(templates[template]||''),notebook:'Quick Notes',section:'General',color:palette[template]||'#60a5fa',tags:template==='blank'?[]:[template]};
+    const d=await api.post('/api/notes',{title:template==='blank'?'Untitled note':template[0].toUpperCase()+template.slice(1)+' note',body:templates[template]||'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});
+    await loadNotes();
+    if(d&&d.id)setActiveId(d.id);
   };
-  const createNote=async(template='blank')=>{
-    if(creating)return; setCreating(true);
-    const draft=normalizeNote({...templateData(template),id:'tmp_'+uid(),created:new Date().toISOString(),updated:new Date().toISOString()});
-    setNotes(prev=>[draft,...prev]); setActiveId(draft.id);
-    try{const d=await api.post('/api/notes',draft,{quiet:true,timeoutMs:8000});
-      if(d&&d.id){setNotes(prev=>prev.map(n=>n.id===draft.id?normalizeNote({...draft,...d,id:d.id}):n));setActiveId(d.id);}else await loadNotes();
-    }catch(e){setNotes(prev=>prev.filter(n=>n.id!==draft.id));setActiveId(notes[0]&&notes[0].id||null);}finally{setCreating(false);}
-  };
-  const duplicateActive=async()=>{if(!active||creating)return;const d=await api.post('/api/notes',{title:(active.title||'Untitled note')+' copy',body:active.body||'',notebook:active.notebook,section:active.section,color:active.color,tags:toTags(active.tags)},{quiet:true,timeoutMs:8000});if(d&&d.id){setNotes(prev=>[normalizeNote(d),...prev]);setActiveId(d.id);}else loadNotes();};
-  const deleteActive=async()=>{if(!active||deleting)return;if(!confirm('Delete this note permanently?'))return;const old=notes;const next=notes.find(n=>n.id!==active.id);setDeleting(true);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(next?next.id:null);try{await api.del('/api/notes/'+active.id,{quiet:true,timeoutMs:8000});}catch(e){setNotes(old);setActiveId(active.id);}finally{setDeleting(false);}};
+  const duplicateActive=async()=>{if(!active)return;const d=await api.post('/api/notes',{title:(active.title||'Untitled note')+' copy',body:active.body||'',notebook:active.notebook,section:active.section,color:active.color,tags:toTags(active.tags)},{quiet:true});await loadNotes();if(d&&d.id)setActiveId(d.id);};
+  const deleteActive=async()=>{if(!active)return;if(!confirm('Delete this note permanently?'))return;await api.del('/api/notes/'+active.id,{quiet:true});const next=notes.find(n=>n.id!==active.id);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(next?next.id:null);};
   const focusEditor=()=>{if(editorRef.current)editorRef.current.focus();};
-  const saveEditorNow=()=>{if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML,plain_text:stripHtml(editorRef.current.innerHTML)},true);};
+  const saveEditorNow=()=>{if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML,plain_text:stripHtml(editorRef.current.innerHTML)});};
   const cmd=(c,v=null)=>{focusEditor();document.execCommand(c,false,v);saveEditorNow();};
-  const applyTextColor=(c)=>cmd('foreColor',c); const applyHighlight=(c)=>cmd('backColor',c);
+  const applyTextColor=(c)=>cmd('foreColor',c);
+  const applyHighlight=(c)=>cmd('backColor',c);
   const addTag=()=>{if(!active||!tagInput.trim())return;const tags=[...new Set([...toTags(active.tags),tagInput.trim().replace(/^#/,'')])];setTagInput('');savePatch(active.id,{tags},true);};
   const insertChecklist=()=>cmd('insertHTML','<ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> New task</label></li></ul>');
   const insertCallout=()=>cmd('insertHTML','<blockquote class="note-callout">💡 Important note</blockquote>');
@@ -6623,30 +6571,27 @@ function NotesView({cu}){
   const words=(active&&stripHtml(active.body||active.plain_text||'')||'').trim()?(stripHtml(active.body||active.plain_text||'')).trim().split(/\s+/).length:0;
   const doneCount=active&&editorRef.current?editorRef.current.querySelectorAll('.note-check:checked').length:0;
   const taskCount=active&&editorRef.current?editorRef.current.querySelectorAll('.note-check').length:0;
-  return html`<div class=${'notes-page pro '+(viewMode==='wide'?'wide':'focus')+' '+(toolsOpen?'tools-open':'') }>
+  return html`<div class=${'notes-page '+(viewMode==='wide'?'wide':'focus')}>
     <style>${`
-      .notes-page.pro{height:100%;display:grid;grid-template-columns:300px minmax(0,1fr);background:radial-gradient(circle at 75% 8%,rgba(96,165,250,.14),transparent 28%),radial-gradient(circle at 16% 88%,rgba(168,85,247,.16),transparent 34%),#05070d;overflow:hidden;color:#eef3ff}.notes-page.pro.wide{grid-template-columns:230px minmax(0,1fr)}
-      .notes-sidebar{border-right:1px solid rgba(148,163,184,.18);background:linear-gradient(180deg,rgba(15,23,42,.95),rgba(2,6,23,.92));display:flex;flex-direction:column;min-width:0;box-shadow:10px 0 30px rgba(0,0,0,.22)}
-      .notes-head{padding:16px;border-bottom:1px solid rgba(148,163,184,.16)}.notes-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.notes-title{font-size:20px;font-weight:950;color:#fff;letter-spacing:-.03em}.notes-sub{font-size:10px;color:#94a3b8}.notes-count{font-size:10px;color:#bfdbfe;background:rgba(37,99,235,.18);border:1px solid rgba(96,165,250,.28);border-radius:999px;padding:4px 8px}
-      .notes-quick{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.notes-tabs{display:flex;gap:8px;margin-top:10px}.notes-mini{height:32px!important;font-size:11px!important;padding:0 12px!important;border-radius:999px!important}.notes-quick .notes-mini:nth-child(1){background:linear-gradient(135deg,#8b5cf6,#6366f1)!important;color:#fff!important}.notes-quick .notes-mini:nth-child(2){background:linear-gradient(135deg,#10b981,#059669)!important;color:#fff!important}.notes-quick .notes-mini:nth-child(3){background:linear-gradient(135deg,#f59e0b,#f97316)!important;color:#111827!important}.notes-quick .notes-mini:nth-child(4){background:rgba(255,255,255,.08)!important;color:#e5e7eb!important;border:1px solid rgba(255,255,255,.14)!important}
-      .notes-list{padding:12px;overflow:auto;display:flex;flex-direction:column;gap:10px}.notes-card{text-align:left;border:1px solid rgba(148,163,184,.14);background:linear-gradient(135deg,rgba(15,23,42,.95),rgba(30,41,59,.66));border-radius:18px;padding:12px;cursor:pointer;color:#e5e7eb;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}.notes-card:hover{transform:translateY(-2px);border-color:var(--note-color,#60a5fa);box-shadow:0 12px 30px rgba(0,0,0,.24)}.notes-card.active{border-color:var(--note-color,#60a5fa);background:linear-gradient(135deg,rgba(37,99,235,.22),rgba(15,23,42,.94));box-shadow:0 0 0 1px color-mix(in srgb,var(--note-color,#60a5fa) 40%,transparent)}.notes-card.pinned{box-shadow:inset 3px 0 0 var(--note-color,#60a5fa)}
-      .notes-card-top{display:flex;gap:9px;align-items:center}.notes-dot{width:10px;height:10px;border-radius:99px;background:var(--note-color,#60a5fa);box-shadow:0 0 16px var(--note-color,#60a5fa);flex-shrink:0}.notes-card-title{font-size:13px;font-weight:950;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notes-card-text{font-size:11px;color:#94a3b8;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.notes-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.notes-tag{font-size:9px;padding:2px 7px;border-radius:999px;background:rgba(255,255,255,.07);color:#cbd5e1;border:1px solid rgba(255,255,255,.1)}
-      .notes-main{min-width:0;display:grid;grid-template-rows:auto 1fr;overflow:hidden}.notes-topbar{min-height:62px;padding:10px 18px;border-bottom:1px solid rgba(148,163,184,.16);background:linear-gradient(180deg,rgba(15,23,42,.92),rgba(15,23,42,.72));display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:10px;align-items:center;backdrop-filter:blur(14px)}.notes-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.notes-saved{font-size:10px;color:#94a3b8}.notes-title-input{font-size:20px!important;font-weight:950!important;height:40px!important;border-radius:13px!important;background:rgba(255,255,255,.08)!important;color:#fff!important;border-color:rgba(255,255,255,.14)!important}.notes-tools{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px;border:1px solid rgba(148,163,184,.16);border-radius:18px;background:rgba(2,6,23,.6)}
-      .notes-color{width:20px;height:20px;border-radius:99px;border:1px solid rgba(255,255,255,.22);cursor:pointer;background:var(--note-color,#60a5fa)}.notes-color.active{outline:2px solid #fff;outline-offset:2px}.notes-tool-group{display:flex;gap:6px;align-items:center;padding:5px 8px;border:1px solid rgba(148,163,184,.14);border-radius:999px;background:rgba(255,255,255,.06)}.notes-tool-label{font-size:10px;color:#94a3b8}
-      .notes-workspace{min-height:0;display:grid;grid-template-columns:1fr;overflow:hidden}.notes-page.pro.tools-open .notes-workspace{grid-template-columns:minmax(0,1fr) 260px}.notes-panel{border-left:1px solid rgba(148,163,184,.16);background:rgba(15,23,42,.76);padding:14px;overflow:auto}.notes-panel h4{margin:9px 0 7px;font-size:10px;color:#93c5fd;text-transform:uppercase;letter-spacing:.12em}.notes-tagbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-      .notes-editor-wrap{overflow:auto;padding:18px 26px 24px;background:radial-gradient(circle at top right,rgba(124,58,237,.16),transparent 35%),linear-gradient(180deg,rgba(2,6,23,.8),#020617)}.notes-editor{min-height:calc(100% - 8px);width:min(1180px,96%);margin:0 auto;padding:38px;border-radius:26px;background:linear-gradient(180deg,rgba(24,24,27,.98),rgba(15,23,42,.96));border:1px solid rgba(148,163,184,.22);box-shadow:0 22px 70px rgba(0,0,0,.32);color:#f8fafc;font-size:15px;line-height:1.85;outline:none}.notes-page.pro.wide .notes-editor{width:min(1360px,98%)}.notes-editor:focus{border-color:#60a5fa;box-shadow:0 0 0 4px rgba(96,165,250,.12),0 22px 70px rgba(0,0,0,.32)}.notes-editor h1,.notes-editor h2,.notes-editor h3{line-height:1.25;color:#fff}.notes-editor blockquote,.note-callout{border-left:4px solid #60a5fa;background:rgba(96,165,250,.12);padding:12px 14px;border-radius:14px;margin:12px 0}.notes-editor input[type=checkbox]{width:16px;height:16px;vertical-align:middle;margin-right:8px;accent-color:#60a5fa}.notes-empty{height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8}.notes-empty-list{padding:28px;text-align:center;color:#94a3b8}
-      .notes-page.pro .inp{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.14)}.notes-page.pro .btn:disabled{opacity:.55;cursor:not-allowed}.notes-page.pro .danger{background:rgba(239,68,68,.12)!important;color:#fecaca!important;border-color:rgba(239,68,68,.28)!important}
-      @media(max-width:980px){.notes-page.pro{grid-template-columns:1fr}.notes-sidebar{max-height:250px}.notes-page.pro.tools-open .notes-workspace{grid-template-columns:1fr}.notes-panel{display:none}.notes-topbar{grid-template-columns:1fr}.notes-actions{justify-content:flex-start}.notes-editor{width:100%;padding:24px}.notes-editor-wrap{padding:12px}}
+      .notes-page{height:100%;display:grid;grid-template-columns:268px 1fr;background:var(--bg);overflow:hidden;color:var(--tx)}
+      .notes-page.wide{grid-template-columns:220px 1fr}.notes-sidebar{border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--sf),rgba(255,255,255,.02));display:flex;flex-direction:column;min-width:0}
+      .notes-head{padding:12px;border-bottom:1px solid var(--bd)}.notes-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.notes-title{font-size:18px;font-weight:950;color:var(--tx)}.notes-sub{font-size:10px;color:var(--tx3)}
+      .notes-quick{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.notes-tabs{display:flex;gap:6px;margin-top:8px}.notes-list{padding:8px;overflow:auto;display:flex;flex-direction:column;gap:7px}.notes-card{text-align:left;border:1px solid var(--bd);background:var(--sf2);border-radius:14px;padding:10px;cursor:pointer;color:var(--tx);transition:.15s}.notes-card:hover{transform:translateY(-1px);border-color:var(--ac)}.notes-card.active{border-color:var(--ac);background:var(--ac3)}.notes-card.pinned{box-shadow:0 0 0 1px var(--note-color,#facc15)}
+      .notes-card-top{display:flex;gap:7px;align-items:center}.notes-dot{width:9px;height:9px;border-radius:99px;background:var(--note-color,#facc15);flex-shrink:0}.notes-card-title{font-size:12px;font-weight:900;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notes-card-text{font-size:10px;color:var(--tx3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.notes-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}.notes-tag{font-size:9px;padding:1px 6px;border-radius:99px;background:var(--sf);color:var(--tx2);border:1px solid var(--bd)}
+      .notes-main{min-width:0;display:grid;grid-template-rows:auto 1fr;overflow:hidden}.notes-topbar{height:auto;min-height:54px;padding:8px 14px;border-bottom:1px solid var(--bd);background:var(--sf);display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:8px;align-items:center}.notes-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.notes-saved{font-size:10px;color:var(--tx3)}.notes-title-input{font-size:19px!important;font-weight:950!important;height:38px!important}.notes-mini{height:30px!important;font-size:11px!important;padding:0 10px!important}.notes-tools{grid-column:1/-1;display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--bd)}
+      .notes-color{width:19px;height:19px;border-radius:99px;border:1px solid var(--bd);cursor:pointer;background:var(--note-color,#facc15)}.notes-color.active{border:2px solid var(--tx)}.notes-tool-group{display:flex;gap:5px;align-items:center;padding:3px 6px;border:1px solid var(--bd);border-radius:999px;background:var(--bg)}.notes-tool-label{font-size:10px;color:var(--tx3)}
+      .notes-workspace{min-height:0;display:grid;grid-template-columns:1fr 240px;overflow:hidden}.notes-page.wide .notes-workspace{grid-template-columns:1fr 190px}.notes-panel{border-left:1px solid var(--bd);background:var(--sf);padding:10px;overflow:auto}.notes-panel h4{margin:8px 0 6px;font-size:11px;color:var(--tx3);text-transform:uppercase;letter-spacing:.08em}.notes-tagbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.notes-editor-wrap{overflow:auto;padding:18px;background:radial-gradient(circle at top right,rgba(124,58,237,.12),transparent 35%),linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))}.notes-editor{min-height:calc(100% - 12px);max-width:900px;margin:0 auto;padding:30px;border-radius:22px;background:var(--sf);border:1px solid var(--bd);box-shadow:0 18px 60px rgba(0,0,0,.18);color:var(--tx);font-size:15px;line-height:1.8;outline:none}.notes-editor:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac3),0 18px 60px rgba(0,0,0,.18)}.notes-editor h1,.notes-editor h2,.notes-editor h3{line-height:1.25}.notes-editor blockquote,.note-callout{border-left:4px solid var(--ac);background:var(--ac3);padding:10px 12px;border-radius:12px;margin:10px 0}.notes-editor input[type=checkbox]{width:16px;height:16px;vertical-align:middle;margin-right:8px;accent-color:var(--ac)}.notes-empty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--tx3)}.notes-empty-list{padding:24px;text-align:center;color:var(--tx3)}
+      @media(max-width:980px){.notes-page{grid-template-columns:1fr}.notes-sidebar{max-height:240px}.notes-workspace{grid-template-columns:1fr}.notes-panel{display:none}.notes-topbar{grid-template-columns:1fr}.notes-actions{justify-content:flex-start}}
     `}</style>
     <aside class="notes-sidebar">
       <div class="notes-head">
-        <div class="notes-title-row"><div><div class="notes-title">Notes Studio</div><div class="notes-sub">Fast capture · rich canvas · autosave</div></div><button class="btn bp" disabled=${creating} onClick=${()=>createNote('blank')}>＋</button></div>
+        <div class="notes-title-row"><div><div class="notes-title">Notes</div><div class="notes-sub">Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${()=>createNote('blank')}>＋</button></div>
         <input class="inp notes-mini" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." />
-        <div class="notes-quick"><button class="btn notes-mini" disabled=${creating} onClick=${()=>createNote('meeting')}>Meeting</button><button class="btn notes-mini" disabled=${creating} onClick=${()=>createNote('daily')}>Daily</button><button class="btn notes-mini" disabled=${creating} onClick=${()=>createNote('idea')}>Idea</button><button class="btn notes-mini" onClick=${()=>setViewMode(viewMode==='wide'?'focus':'wide')}>${viewMode==='wide'?'Focus':'Wide'}</button></div>
-        <div class="notes-tabs"><button class=${'btn notes-mini '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn notes-mini '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button><span class="notes-count">${filtered.length} notes</span></div>
+        <div class="notes-quick"><button class="btn notes-mini" onClick=${()=>createNote('meeting')}>Meeting</button><button class="btn notes-mini" onClick=${()=>createNote('daily')}>Daily</button><button class="btn notes-mini" onClick=${()=>createNote('idea')}>Idea</button><button class="btn notes-mini" onClick=${()=>setViewMode(viewMode==='wide'?'focus':'wide')}>${viewMode==='wide'?'Focus':'Compact'}</button></div>
+        <div class="notes-tabs"><button class=${'btn notes-mini '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn notes-mini '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
       </div>
       <div class="notes-list">
-        ${filtered.length?filtered.map(n=>html`<button key=${n.id} class=${'notes-card '+((active&&active.id===n.id)?'active ':'')+(n.pinned?'pinned':'')} style=${{'--note-color':n.color||'#60a5fa'}} onClick=${()=>setActiveId(n.id)}>
+        ${filtered.length?filtered.map(n=>html`<button key=${n.id} class=${'notes-card '+((active&&active.id===n.id)?'active ':'')+(n.pinned?'pinned':'')} style=${{'--note-color':n.color||'#facc15'}} onClick=${()=>setActiveId(n.id)}>
           <div class="notes-card-top"><span class="notes-dot"></span><div class="notes-card-title">${n.pinned?'📌 ':''}${n.favorite?'★ ':''}${n.title||'Untitled note'}</div></div>
           <div class="notes-card-text">${stripHtml(n.body||n.plain_text||'')||'No content yet'}</div>
           <div class="notes-tags">${toTags(n.tags).slice(0,3).map(t=>html`<span class="notes-tag">#${t}</span>`)}</div>
@@ -6657,7 +6602,7 @@ function NotesView({cu}){
       ${active?html`<div class="notes-topbar">
         <input class="inp notes-title-input" value=${active.title||''} onInput=${e=>savePatch(active.id,{title:e.target.value})} placeholder="Note title" />
         <div class="notes-actions">
-          <button class="btn notes-mini" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌':'📍'} Pin</button><button class="btn notes-mini" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★':'☆'}</button><button class="btn notes-mini" onClick=${()=>setToolsOpen(!toolsOpen)}>${toolsOpen?'Hide tools':'Tools'}</button><button class="btn notes-mini danger" disabled=${deleting} onClick=${deleteActive}>${deleting?'Deleting…':'Delete'}</button><span class="notes-saved">${saving?'Saving…':'Saved'} · ${words} words${taskCount?' · '+doneCount+'/'+taskCount+' done':''}</span>
+          <button class="btn notes-mini" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌':'📍'} Pin</button><button class="btn notes-mini" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★':'☆'}</button><button class="btn notes-mini" onClick=${()=>setToolsOpen(!toolsOpen)}>${toolsOpen?'Hide tools':'Tools'}</button><button class="btn notes-mini danger" onClick=${deleteActive}>Delete</button><span class="notes-saved">${saving?'Saving…':'Saved'} · ${words} words${taskCount?' · '+doneCount+'/'+taskCount+' done':''}</span>
         </div>
         ${toolsOpen?html`<div class="notes-tools">
           <div class="notes-tool-group"><button class="btn notes-mini" onClick=${()=>cmd('bold')}>B</button><button class="btn notes-mini" onClick=${()=>cmd('italic')}>I</button><button class="btn notes-mini" onClick=${()=>cmd('underline')}>U</button><button class="btn notes-mini" onClick=${()=>cmd('formatBlock','h2')}>H2</button><button class="btn notes-mini" onClick=${()=>cmd('insertUnorderedList')}>•</button><button class="btn notes-mini" onClick=${()=>cmd('insertOrderedList')}>1.</button><button class="btn notes-mini" onClick=${insertChecklist}>☑</button><button class="btn notes-mini" onClick=${insertCallout}>Callout</button></div>
@@ -6669,14 +6614,14 @@ function NotesView({cu}){
       </div>
       <div class="notes-workspace">
         <div class="notes-editor-wrap"><div ref=${editorRef} class="notes-editor" contentEditable=${true} suppressContentEditableWarning=${true} onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML,plain_text:stripHtml(e.currentTarget.innerHTML)})} onClick=${onEditorClick} onKeyDown=${onEditorKeyDown}></div></div>
-        ${toolsOpen?html`<aside class="notes-panel">
+        <aside class="notes-panel">
           <h4>Notebook</h4><input class="inp notes-mini" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} list="note-books" placeholder="Notebook"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}></option>` )}</datalist>
           <h4>Section</h4><input class="inp notes-mini" value=${active.section||''} onInput=${e=>savePatch(active.id,{section:e.target.value})} list="note-sections" placeholder="Section"/><datalist id="note-sections">${sections.map(x=>html`<option value=${x}></option>` )}</datalist>
           <h4>Tags</h4><div class="notes-tagbar">${toTags(active.tags).map(t=>html`<button class="btn notes-mini" onClick=${()=>savePatch(active.id,{tags:toTags(active.tags).filter(x=>x!==t)},true)}>#${t} ×</button>`)}</div><div style=${{display:'flex',gap:'6px',marginTop:'6px'}}><input class="inp notes-mini" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag"/><button class="btn notes-mini" onClick=${addTag}>Add</button></div>
           <h4>Quick insert</h4><button class="btn notes-mini" onClick=${insertChecklist}>Checklist</button> <button class="btn notes-mini" onClick=${insertCallout}>Callout</button> <button class="btn notes-mini" onClick=${()=>cmd('insertHorizontalRule')}>Divider</button>
           <h4>Shortcuts</h4><div class="notes-sub">Ctrl+S save · Ctrl+B bold · Ctrl+I italic · checkbox clicks are saved</div>
-        </aside>`:null}
-      </div>`:html`<div class="notes-empty"><button class="btn bp" disabled=${creating} onClick=${()=>createNote('blank')}>Create your first note</button></div>`}
+        </aside>
+      </div>`:html`<div class="notes-empty"><button class="btn bp" onClick=${()=>createNote('blank')}>Create your first note</button></div>`}
     </main>
   </div>`;
 }
@@ -7235,39 +7180,6 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
-
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
@@ -9380,6 +9292,44 @@ function VaultView({cu}){
 
 
 
+
+function workspaceSlugFromUser(u){
+  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
+}
+function workspaceBasePath(u){return '/'+workspaceSlugFromUser(u)+'/';}
+function pathParts(){try{return window.location.pathname.split('/').filter(Boolean);}catch(e){return [];}}
+function routeViewFromPath(validViews){
+  try{
+    const parts=pathParts();
+    if(!parts.length)return '';
+    if(validViews.includes(parts[0]))return parts[0];
+    if(parts.length>=2&&validViews.includes(parts[1]))return parts[1];
+  }catch(e){}
+  return '';
+}
+function projectIdFromPath(){
+  try{
+    const parts=pathParts();
+    if(parts[0]==='projects'&&parts[1])return parts[1];
+    if(parts.length>=3&&parts[1]==='projects')return parts[2];
+  }catch(e){}
+  return '';
+}
+
+function deepLinkFromSearch(){
+  try{
+    const sp=new URLSearchParams(window.location.search);
+    const action=(sp.get('action')||'').toLowerCase();
+    const id=sp.get('id')||sp.get('task_id')||sp.get('ticket_id')||sp.get('project_id')||'';
+    if(action==='task')return {view:'tasks',taskId:id};
+    if(action==='ticket')return {view:'tickets',ticketId:id};
+    if(action==='project')return {view:'projects',projectId:id};
+    if(action==='dm')return {view:'dm',dmUser:sp.get('user')||sp.get('sender')||sp.get('id')||''};
+    if(['dashboard','ops','projects','tasks','tickets','reminders','messages','dm','settings','team','timeline','productivity','timesheet'].includes(action))return {view:action,dmUser:sp.get('user')||sp.get('sender')||''};
+  }catch(e){}
+  return {};
+}
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -9388,42 +9338,43 @@ function App(){
   // Read initial view from URL path or ?page= param
   const VALID_VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault'];
   // Also treat /projects/<id> as valid
+  const [initialProjectId,setInitialProjectId]=useState(()=>deepLinkFromSearch().projectId||null);
+  const [initialTaskId,setInitialTaskId]=useState(()=>deepLinkFromSearch().taskId||null);
+  const [initialTicketId,setInitialTicketId]=useState(()=>deepLinkFromSearch().ticketId||null);
   useEffect(()=>{
     try{
       const p=window.location.pathname;
-      if(p.startsWith('/projects/')&&p.length>10){
-        const pid=p.split('/')[2];
-        if(pid)setInitialProjectId(pid);
-        setView('projects');
-      }
+      const dl=deepLinkFromSearch();
+      if(dl.view)setView(dl.view);
+      if(dl.taskId)setInitialTaskId(dl.taskId);
+      if(dl.ticketId)setInitialTicketId(dl.ticketId);
+      if(dl.projectId)setInitialProjectId(dl.projectId);
+      if(dl.dmUser)setDmTargetUser(String(dl.dmUser));
+      const pid=projectIdFromPath();
+      if(pid){setInitialProjectId(pid);setView('projects');}
     }catch(e){}
   },[]);
   // Set initial page title based on current URL path
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
       const VIEW_T={dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',messages:'Channels',dm:'Direct Messages',tickets:'Tickets',ops:'Ops Center',timeline:'Timeline Tracker',reminders:'Reminders',settings:'Settings',team:'Team Management',productivity:'Dev Productivity'};
+      const p=routeViewFromPath(Object.keys(VIEW_T));
       if(p&&VIEW_T[p]) document.title='Project Tracker — '+VIEW_T[p]+' | AI-Powered Team Collaboration';
       else document.title='Project Tracker — AI-Powered Team Collaboration Platform';
     }catch(e){}
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
+      const dl=deepLinkFromSearch();
+      if(dl.view&&VALID_VIEWS.includes(dl.view)) return dl.view;
+      const p=routeViewFromPath(VALID_VIEWS);
       if(p&&VALID_VIEWS.includes(p)) return p;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
     return 'dashboard';
   });
-  // Production hard-sync: the browser URL is the source of truth on first paint.
-  // This prevents /tasks or /dashboard from staying stuck on the previous Ops view after cache/hydration.
-  useEffect(()=>{
-    try{
-      const p=window.location.pathname.replace(/^\//,'').split('/')[0].trim();
-      if(p&&VALID_VIEWS.includes(p)&&p!==view) setView(p);
-    }catch(e){}
-  },[]);
+  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
@@ -9437,28 +9388,11 @@ function App(){
     try{
       const base=v.split(':')[0];
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        history.pushState(null,'',workspaceBasePath(cu)+base);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
   },[]);
-  // Handle browser back/forward
-  useEffect(()=>{
-    const onPop=()=>{
-      try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
-        if(p&&VALID_VIEWS.includes(p)) setView(p);
-        else setView('dashboard');
-      }catch(e){}
-    };
-    window.addEventListener('popstate',onPop);
-    return()=>window.removeEventListener('popstate',onPop);
-  },[]);
-  const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
-  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
-  const [initialProjectId,setInitialProjectId]=useState(null);
-  const [initialTaskId,setInitialTaskId]=useState(null);
-  const [initialTicketId,setInitialTicketId]=useState(null);
   const routeToNotification=useCallback((n={})=>{
     // Deep notification router: handles DB notifications, web-push URLs, older rows
     // that do not yet have entity_id/entity_type, and duplicate frontend bundles.
@@ -9515,7 +9449,7 @@ function App(){
     if(!ticketId&&['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)) ticketId=rawEntityId;
     if(!ticketId){const tk=byName(tickets,['title','subject','name']); if(tk)ticketId=String(tk.id);}
     if(entityType==='ticket'||ticketId||['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)||contentLow.includes('ticket')||content.startsWith('🎫')){
-      if(ticketId)setInitialTicketId(String(ticketId));
+      if(ticketId){try{setInitialTicketId(String(ticketId));}catch(_){}}
       _setView('tickets');
       return;
     }
@@ -9528,19 +9462,19 @@ function App(){
     }
     _setView('notifs');
   },[_setView,data,cu]);
-
+  // Handle browser back/forward
   useEffect(()=>{
-    try{
-      const q=new URLSearchParams(window.location.search);
-      const action=String(q.get('action')||'').toLowerCase();
-      const id=q.get('id')||q.get('entity_id')||'';
-      const user=q.get('user')||q.get('sender')||'';
-      if(action==='task'&&id){setInitialTaskId(String(id));_setView('tasks');}
-      else if(action==='project'&&id){setInitialProjectId(String(id));_setView('projects');}
-      else if(action==='ticket'&&id){setInitialTicketId(String(id));_setView('tickets');}
-      else if((action==='dm'||window.location.pathname.replace(/^\//,'').split('/')[0]==='dm')&&user){setDmTargetUser(String(user));_setView('dm');}
-    }catch(e){}
-  },[_setView]);
+    const onPop=()=>{
+      try{
+        const p=routeViewFromPath(VALID_VIEWS);
+        if(p&&VALID_VIEWS.includes(p)) setView(p);
+        else setView('dashboard');
+      }catch(e){}
+    };
+    window.addEventListener('popstate',onPop);
+    return()=>window.removeEventListener('popstate',onPop);
+  },[]);
+  const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -9671,16 +9605,15 @@ function App(){
       globalDismissedCallIds.current.add(call.callId);
       stopGlobalRingtone();
       setGlobalIncomingCall(null);
-      const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
-      try{
-        const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-        if(action==='accept'){
-          // Wait for server call_status=in_call before storing active call state.
-          const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-          if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
-          else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Accept again.','error');
-        }
-      }catch(e){ try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{} if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); }
+      let meetWin=null;
+      if(action==='accept'&&call.meetUrl){
+        meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+        if(meetWin)trackGlobalMeetWindow(meetWin,call);
+        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Accept again.','error');
+      }
+      api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+        .then(r=>{if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+        .catch(e=>{ if(typeof window.showToast==='function') window.showToast('Unable to update call status.','error'); });
     };
     document.addEventListener('click',h,true);
     return()=>document.removeEventListener('click',h,true);
@@ -9692,20 +9625,16 @@ function App(){
     globalDismissedCallIds.current.add(call.callId);
     stopGlobalRingtone();
     setGlobalIncomingCall(null);
-    const acceptWin = action==='accept' ? openMeetLoadingWindow() : null;
-    try{
-      const r=await api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true});
-      if(action==='accept'){
-          // Wait for server call_status=in_call before storing active call state.
-        const joinUrl=(r&&r.meetUrl)||call.meetUrl;
-        if(acceptWin){acceptWin.location.href=joinUrl;trackGlobalMeetWindow(acceptWin,call);}
-        else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups for ProjectTracker, then click Connect again.','error');
-      }
-    }catch(e){
-      try{if(acceptWin&&!acceptWin.closed)acceptWin.close();}catch{}
-      console.warn('[Call] response failed',e);
-      if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');
+    let meetWin=null;
+    if(action==='accept'&&call.meetUrl){
+      meetWin=window.open(call.meetUrl,'_blank','noopener,noreferrer');
+      if(meetWin&&typeof trackGlobalMeetWindow==='function')trackGlobalMeetWindow(meetWin,call);
+      else if(typeof window.showToast==='function') window.showToast('Popup blocked. Please allow popups and click Connect again.','error');
+      // Wait for server call_status=in_call before storing active call state.
     }
+    api.post('/api/calls/respond',{callId:call.callId,action,peerId:call.peerId,meetUrl:call.meetUrl},{quiet:true,timeoutMs:6000})
+      .then(r=>{if(action==='accept'){const ids=new Set(((r&&r.users)||[cu&&cu.id,call.peerId]).filter(Boolean));ptSetActiveCallUsers(ids);try{setGlobalActiveCallUsers&&setGlobalActiveCallUsers(ids);}catch(_){ }window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'call_status',data:{callId:call.callId,status:'in_call',users:Array.from(ids),sender:call.peerId,recipient:cu&&cu.id,meetUrl:call.meetUrl}}}));}if(action==='accept'&&r&&r.meetUrl&&r.meetUrl!==call.meetUrl&&meetWin&&!meetWin.closed){try{meetWin.location.href=r.meetUrl;}catch{}}})
+      .catch(e=>{console.warn('[Call] response failed',e);if(window._pfToast)window._pfToast('error','Unable to update call status','Please try again.');});
   },[globalIncomingCall,cu,stopGlobalRingtone,_setView,trackGlobalMeetWindow]);
 
   useEffect(()=>{
@@ -9734,7 +9663,7 @@ function App(){
     let stopped=false;
     const check=async()=>{
       try{
-        const res=await api.get('/api/calls/incoming',{quiet:true,timeoutMs:30000});
+        const res=await api.get('/api/calls/incoming',{quiet:true});
         const calls=(res&&Array.isArray(res.calls))?res.calls:[];
         if(stopped||!calls.length)return;
         const c=calls.find(x=>x&&x.callId&&!globalDismissedCallIds.current.has(x.callId));
@@ -9746,7 +9675,7 @@ function App(){
       }catch(e){}
     };
     const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
-    const id=setInterval(check,15000);
+    const id=setInterval(()=>{if(!document.hidden)check();},15000);
     return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
@@ -9764,10 +9693,8 @@ function App(){
           try{
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
-            if(['task_updated','project_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-              // Bust cache and reload — the server has already bust its own cache
-              load(teamCtx);
-            }
+            window.dispatchEvent(new CustomEvent('pt:realtime',{detail:msg}));
+            // pt:realtime listener (below) handles debounced reload — no double-fire here
             if(msg.type==='notification'||msg.type==='notification_updated'){
               triggerPollRef.current&&triggerPollRef.current();
             }
@@ -9778,14 +9705,11 @@ function App(){
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
-              if(msg.type!=='dm_typing'&&msg.type!=='dm_seen'){
-                api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread))setDmUnread(d.dm_unread);if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
-              }
-              if(msg.type==='dm_created'){
-                try{
-                  const m=(msg.data&&msg.data.message)||{};
-                  if(m&&m.id&&window.__ptSeenDmIds&&window.__ptSeenDmIds.has(m.id)){
-                    // Cache incoming DM messages globally so DirectMessages can pre-populate instantly
+              // Use /api/poll (served from cache) to refresh both DM unread and notifications at once
+              if(msg.type!=='dm_typing'&&msg.type!=='dm_seen')api.get('/api/poll').then(r=>{
+                if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
+              }).catch(()=>{});
+              // Cache incoming DM messages globally so DirectMessages can pre-populate instantly
               // on mount without waiting for the loadMsgs network call to complete.
               try{
                 if(msg.type==='dm_created'){
@@ -9800,19 +9724,6 @@ function App(){
                   }
                 }
               }catch(_){}
-              window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
-                    return;
-                  }
-                  window.__ptSeenDmIds=window.__ptSeenDmIds||new Set();
-                  if(m&&m.id)window.__ptSeenDmIds.add(m.id);
-                  if(String(m.recipient||'')===String(cu.id)&&String(m.sender||'')!==String(cu.id)){
-                    const sender=(data.users||[]).find(u=>String(u.id)===String(m.sender))||{};
-                    const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90);
-                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); try{setDmTargetUser&&setDmTargetUser(m.sender);}catch(_){} _setView&&_setView('dm');}, {tag:'dm-'+(m.id||Date.now())});
-                  }
-                }catch(e){}
-              }
-              // Notify the active DM panel to refresh messages/call state immediately.
               window.dispatchEvent(new CustomEvent('dm_refresh',{detail:msg}));
               // Show incoming DM browser/toast notification directly from SSE.
               // This avoids waiting for the 2s poll and keeps notifications immediate.
@@ -9969,8 +9880,6 @@ function App(){
       const d=await api.get(appDataUrl,{timeoutMs:15000}); // cold-start safe but not 30s-stalling
       if(!d||d.error){
         const st=Number(d&&d.status)||0;
-        // Only a real auth failure should send the user back to login.
-        // 404/500/timeout from app-data or unrelated file requests must not clear the session.
         if(st===401||st===403){
           console.warn('[Load] Authentication expired, clearing session');
           try{localStorage.removeItem('pf_had_session');}catch{}
@@ -9979,10 +9888,6 @@ function App(){
           return;
         }
         console.warn('[Load] App data failed, keeping current session/state:', d);
-        // Suppress toast for timeouts/network errors (499, 408, 0) — server may be cold-starting
-        if(st!==0&&st!==408){
-          try{window._pfToast&&window._pfToast('error','Data refresh failed',String(d.error||'Server error'));}catch{}
-        }
         return;
       }
       const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
@@ -10074,7 +9979,7 @@ function App(){
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
   // NOTE: The 30s projects+tasks interval has been removed.
-  // /api/app-data (called by load()) already fetches both on every poll.
+  // /api/dashboard/bootstrap (called by load()) already fetches both on every poll.
   // Additionally, the SSE stream now triggers load() immediately on any
   // task/project mutation — so this extra interval was both redundant and
   // doubling DB load (2 extra queries every 30s per connected user).
@@ -10096,24 +10001,33 @@ function App(){
 
   const prevDmsRef=useRef([]);
   const notifiedDmIdsRef=useRef(new Set());
+  const prevNotifIdsRef=useRef(null); // null = not yet seeded
+  const NTITLES={
+    task_assigned:'✅ Task assigned to you', status_change:'🔄 Task status changed', comment:'💬 New comment on task', deadline:'⏰ Deadline approaching', dm:'📨 New direct message', project_added:'📁 Added to a project', reminder:'⏰ Reminder', call:'📞 Huddle call', message:'#️⃣ New channel message', };
+  const NNAV={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
+
+  // Unified poll: dm_unread + notifications in ONE request instead of two.
+  // Saves a full DB connection per polling cycle per user.
   useEffect(()=>{
     if(!cu)return;
-    api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread)){prevDmsRef.current=d.dm_unread;setDmUnread(d.dm_unread);}if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
-    let latestBusy=false;
-    const pullLatest=async()=>{
-      if(latestBusy)return;
-      latestBusy=true;
-      try{
-        const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:30000});
-        if(Array.isArray(latest)){
+
+    const pollOnce=()=>{
+      api.get('/api/poll').then(result=>{
+        if(!result||result.error)return;
+
+        // ── DM unread ──────────────────────────────────────────────
+        const dms=result.dm_unread;
+        if(Array.isArray(dms)){
+          prevDmsRef.current=dms;
+          setDmUnread(dms);
+        }
+        // Poll the actual latest unread DM messages, not just counters. This
+        // prevents delayed/fake alerts that open before the message is visible.
+        api.get('/api/dm/latest-unread',{quiet:true}).then(latest=>{
+          if(!Array.isArray(latest))return;
           latest.slice().reverse().forEach(m=>{
             if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
-            window.__ptSeenDmIds=window.__ptSeenDmIds||new Set();
-            if(window.__ptSeenDmIds.has(m.id)){ notifiedDmIdsRef.current.add(m.id); return; }
             notifiedDmIdsRef.current.add(m.id);
-            window.__ptSeenDmIds.add(m.id);
-            // Inject the real message immediately into the DM panel. This avoids
-            // fake alerts that open before the message is visible.
             // Cache latest-unread messages globally so DirectMessages can pre-populate instantly
             // even when the component was not mounted when the fallback poll fired.
             try{
@@ -10135,37 +10049,21 @@ function App(){
               playSound('notif');
             }
           });
-        }
-        const poll=await api.get('/api/poll',{quiet:true,timeoutMs:30000});
-        const d=poll&&Array.isArray(poll.dm_unread)?poll.dm_unread:[];
-        if(Array.isArray(d)){prevDmsRef.current=d;setDmUnread(d);}
-      }catch(e){}
-      finally{latestBusy=false;}
-    };
-    const pullStartId=setTimeout(()=>pullLatest(),5000); // delay avoids cold-start stampede
-    const id=setInterval(pullLatest,30000); // fallback only; SSE handles instant delivery
-    return()=>{clearTimeout(pullStartId);clearInterval(id);};
-  },[cu,data.users]);
+        }).catch(()=>{});
 
-  const prevNotifIdsRef=useRef(null); // null = not yet seeded
-  const NTITLES={
-    task_assigned:'✅ Task assigned to you', status_change:'🔄 Task status changed', comment:'💬 New comment on task', deadline:'⏰ Deadline approaching', dm:'📨 New direct message', project_added:'📁 Added to a project', reminder:'⏰ Reminder', call:'📞 Huddle call', message:'#️⃣ New channel message', };
-  const NNAV={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
-  useEffect(()=>{
-    if(!cu)return;
-
-    const pollOnce=()=>{
-      api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(poll=>{
-        const d=(poll&&Array.isArray(poll.notifications))?poll.notifications:[];
-        if(!Array.isArray(d))return;
+        // ── Notifications ──────────────────────────────────────────
+        const notifs=result.notifications;
+        if(!Array.isArray(notifs))return;
         if(prevNotifIdsRef.current===null){
-          prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-          setData(prev=>({...prev,notifs:d}));
+          prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+          setData(prev=>({...prev,notifs}));
+          const unread=notifs.filter(n=>!n.read).length;
+          const dmTotal=(result.dm_unread||[]).reduce((a,x)=>a+(x.cnt||0),0);
+          updateBadge(unread+dmTotal);
           return;
         }
-        const brandNew=d.filter(n=>!prevNotifIdsRef.current.has(n.id));
+        const brandNew=notifs.filter(n=>!prevNotifIdsRef.current.has(n.id));
         brandNew.forEach(n=>{
-          if(n.type==='dm')return; // DMs handled by separate poll
           if(n.type==='call') return;
           const title=NTITLES[n.type]||'Project Tracker';
           const nav=NNAV[n.type]||'notifs';
@@ -10176,29 +10074,21 @@ function App(){
           },{tag:'notif-'+n.id});
           playSound('notif');
         });
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        const dmTotal=dmUnread.reduce((a,x)=>a+(x.cnt||0),0);
+        prevNotifIdsRef.current=new Set(notifs.map(n=>n.id));
+        setData(prev=>({...prev,notifs}));
+        const unread=notifs.filter(n=>!n.read).length;
+        const dmTotal=(Array.isArray(dms)?dms:dmUnread).reduce((a,x)=>a+(x.cnt||0),0);
         updateBadge(unread+dmTotal);
       });
     };
 
-    api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(poll=>{
-        const d=(poll&&Array.isArray(poll.notifications))?poll.notifications:[];
-      if(Array.isArray(d)){
-        prevNotifIdsRef.current=new Set(d.map(n=>n.id));
-        setData(prev=>({...prev,notifs:d}));
-        const unread=d.filter(n=>!n.read).length;
-        updateBadge(unread+dmUnread.reduce((a,x)=>a+(x.cnt||0),0));
-      }
-    });
-
+    // Startup jitter: 5–13 s delay so poll doesn't collide with bootstrap on mount
+    const startDelay=5000; // stagger away from cold-start stampede
+    const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-
-    const id=setInterval(()=>{if(!document.hidden)pollOnce();}, 30000); // fallback only — SSE is primary
-    return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
-  },[cu,addToast]);
+    const id=setInterval(pollOnce,10000); // SSE is primary; poll is a fallback only
+    return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
+  },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 
   const onDmRead=useCallback(sid=>{
     setDmUnread(prev=>prev.filter(x=>x.sender!==sid));
@@ -10255,16 +10145,20 @@ function App(){
 
   useEffect(()=>{
     if(!cu)return;
-    const onRefresh=()=>load(undefined,{bust:true});
+    // Server already clears its cache on write — no client-side bust needed for SSE reloads
+    const onRefresh=()=>load(undefined,false);
+    let _realtimeDebounceTimer=null;
     const onRealtime=(e)=>{
       const msg=e.detail||{};
       if(['project_updated','task_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-        onRefresh();
+        // Debounce: batch rapid SSE events (e.g. bulk task updates) into one reload
+        clearTimeout(_realtimeDebounceTimer);
+        _realtimeDebounceTimer=setTimeout(()=>onRefresh(),800);
       }
     };
     window.addEventListener('pt:refresh', onRefresh);
     window.addEventListener('pt:realtime', onRealtime);
-    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+    return()=>{clearTimeout(_realtimeDebounceTimer);window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
   },[cu,load]);
 
   useEffect(()=>{
@@ -10312,9 +10206,11 @@ function App(){
         setUpcomingReminders(rems.filter(r=>!r.fired&&new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));
       }
     };
-    checkDue();
+    // Startup jitter: delay 10–20 s so reminders/due doesn't fire at t=0 with bootstrap
+    const remStartDelay=10000+Math.random()*10000;
+    const remStartTimer=setTimeout(()=>checkDue(),remStartDelay);
     const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
-    return()=>clearInterval(id);
+    return()=>{clearTimeout(remStartTimer);clearInterval(id);};
   },[cu,addToast]);
 
   const isDevRole=cu&&cu.role!=='Admin'&&cu.role!=='Manager';
@@ -10403,11 +10299,12 @@ function App(){
           notifs=${data.notifs}
           activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}
           onNotifClick=${async n=>{
-            // Mark read + DELETE from panel immediately (natural notification behaviour)
+            // Mark read + DELETE from panel immediately
             api.put('/api/notifications/'+n.id+'/read',{}).catch(()=>{});
             api.del('/api/notifications/'+n.id).catch(()=>{});
-            // Remove from local state instantly — panel clears without waiting for reload
+            // Remove from local state instantly
             setData(prev=>({...prev,notifs:prev.notifs.filter(x=>x.id!==n.id)}));
+            // Use deep notification router — handles all types with entity deep-linking
             routeToNotification(n);
           }}
           onMarkAllRead=${async()=>{setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));await api.put('/api/notifications/read-all',{});load();}}
@@ -10436,7 +10333,9 @@ function App(){
               onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
-            ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
+            <div style=${{display:baseView==='dm'?'flex':'none',flex:1,overflow:'hidden',flexDirection:'column',height:'100%'}}>
+              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>
+            </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
@@ -10605,3 +10504,4 @@ if(window._vwHideBoot)window._vwHideBoot();
 };
 waitForLibs(window._pfStartApp);
 })();
+

@@ -2439,11 +2439,7 @@ def init_db():
             "ALTER TABLE direct_messages ADD COLUMN seen_at TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN reply_to TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN client_msg_id TEXT DEFAULT ''",
-            "ALTER TABLE direct_messages ADD COLUMN context_type TEXT DEFAULT ''",
-            "ALTER TABLE direct_messages ADD COLUMN context_id TEXT DEFAULT ''",
-            "ALTER TABLE direct_messages ADD COLUMN read_at TEXT DEFAULT ''",
             "CREATE INDEX IF NOT EXISTS idx_dm_client_msg ON direct_messages(workspace_id, sender, recipient, client_msg_id)",
-            "CREATE INDEX IF NOT EXISTS idx_dm_context ON direct_messages(workspace_id, context_type, context_id)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
@@ -5541,86 +5537,6 @@ def _attach_dm_reactions(db, ws_id, messages):
         m["reactions"]=list(grouped.get(m.get("id"), {}).values())
     return out
 
-
-def _dm_dt(value):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-    except Exception:
-        try:
-            return datetime.strptime(str(value)[:19], '%Y-%m-%dT%H:%M:%S')
-        except Exception:
-            return None
-
-
-def _dm_date_label(value):
-    dt = _dm_dt(value)
-    if not dt:
-        return ''
-    today = now_ist().date()
-    d = dt.date()
-    if d == today:
-        return 'Today'
-    if (today - d).days == 1:
-        return 'Yesterday'
-    return dt.strftime('%d %b %Y')
-
-
-def _dm_time_label(value):
-    dt = _dm_dt(value)
-    return dt.strftime('%I:%M %p').lstrip('0') if dt else ''
-
-
-def _decorate_dm_messages(rows, current_user_id=None):
-    out=[]
-    for raw in rows or []:
-        m=dict(raw)
-        stamp=m.get('ts') or m.get('created') or ''
-        m['date_label']=_dm_date_label(stamp)
-        m['time_label']=_dm_time_label(stamp)
-        is_mine = bool(current_user_id and str(m.get('sender')) == str(current_user_id))
-        if m.get('seen_at') or m.get('read_at') or int(m.get('read') or 0):
-            status='seen'
-        elif m.get('delivered_at'):
-            status='delivered'
-        elif is_mine:
-            status='sent'
-        else:
-            status='received'
-        m['status']=status if is_mine else 'received'
-        out.append(m)
-    return out
-
-
-def _mark_dm_seen(ws_id, reader_id, other_id):
-    seen_time=ts()
-    with get_db(autocommit=True) as db:
-        unread_count = db.execute(
-            "SELECT COUNT(*) FROM direct_messages WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-            (ws_id, other_id, reader_id)
-        ).fetchone()[0]
-        if unread_count:
-            try:
-                db.execute(
-                    "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?), read_at=COALESCE(NULLIF(read_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                    (seen_time, seen_time, ws_id, other_id, reader_id)
-                )
-            except Exception:
-                db.execute(
-                    "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                    (seen_time, ws_id, other_id, reader_id)
-                )
-    if unread_count:
-        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        _bust_dm_thread(ws_id, reader_id, other_id)
-        try:
-            _sse_publish(ws_id, "dm_seen", {"reader": reader_id, "sender": other_id, "seen_at": seen_time, "count": unread_count})
-        except Exception as e:
-            log.warning("[DM] seen SSE failed: %s", e)
-    return unread_count, seen_time
-
-
 @app.route("/api/dm/<other_id>")
 @login_required
 def get_dm(other_id):
@@ -5645,10 +5561,6 @@ def get_dm(other_id):
         dm_cache_key = f"dm_thread:{ws_id}:{me}:{other_id}"
         cached_thread = _cache_get(dm_cache_key)
         if cached_thread is not None:
-            unread_count, seen_time = _mark_dm_seen(ws_id, me, other_id)
-            if unread_count:
-                cached_thread=[{**m, "read": 1, "seen_at": (m.get("seen_at") or seen_time), "read_at": (m.get("read_at") or seen_time)} if str(m.get("sender"))==str(other_id) and str(m.get("recipient"))==str(me) else m for m in cached_thread]
-                _cache_set(dm_cache_key, cached_thread)
             return jsonify(cached_thread)
     with get_db(autocommit=True) as db:
         if since:
@@ -5685,22 +5597,32 @@ def get_dm(other_id):
                 (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
-        data=_decorate_dm_messages(_attach_dm_reactions(db, ws_id, rows), me)
-    unread_count, _seen_time = _mark_dm_seen(ws_id, me, other_id)
+        # Mark incoming messages as read — only if there are unread ones (avoids needless cache bust)
+        unread_count = db.execute(
+            "SELECT COUNT(*) FROM direct_messages "
+            "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+            (ws_id, other_id, me)
+        ).fetchone()[0]
+        if unread_count:
+            db.execute(
+                "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) "
+                "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+                (ts(), ws_id, other_id, me)
+            )
+        data=_attach_dm_reactions(db, ws_id, rows)
+    # Only bust caches if we actually just marked messages as read
     if unread_count:
-        data=[{**m, "read": 1, "seen_at": (m.get("seen_at") or _seen_time), "read_at": (m.get("read_at") or _seen_time)} if str(m.get("sender"))==str(other_id) and str(m.get("recipient"))==str(me) else m for m in data]
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        try:
+            # Notify the sender immediately so their outgoing messages change from
+            # delivered single-tick to read double-tick without waiting for a reload.
+            _sse_publish(ws_id, "dm_seen", {"reader": me, "sender": other_id, "seen_at": ts(), "count": unread_count})
+        except Exception as e:
+            log.warning("[DM] seen SSE failed: %s", e)
     # Cache the full conversation so page refreshes and re-opens are instant
     if not since:
         _cache_set(f"dm_thread:{ws_id}:{me}:{other_id}", data)
     return jsonify(data)
-
-
-@app.route("/api/dm/<other_id>/seen", methods=["POST"])
-@login_required
-def seen_dm(other_id):
-    ws_id=wid(); me=session["user_id"]
-    count, seen_time = _mark_dm_seen(ws_id, me, other_id)
-    return jsonify({"ok": True, "count": count, "seen_at": seen_time})
 
 
 
@@ -6172,10 +6094,6 @@ def send_dm():
     recipient=(d.get("recipient") or "").strip()
     reply_to=(d.get("reply_to") or "").strip()
     client_msg_id=(d.get("client_msg_id") or "").strip()
-    context_type=(d.get("context_type") or "").strip().lower()
-    context_id=(d.get("context_id") or "").strip()
-    if context_type not in ("", "task", "project", "ticket"):
-        return jsonify({"error":"Invalid DM context"}),400
     if not content:
         return jsonify({"error":"Empty"}),400
     if not recipient:
@@ -6219,9 +6137,9 @@ def send_dm():
             try:
                 result=db.execute("""INSERT INTO direct_messages(
                                id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id,context_type,context_id,read_at
-                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
-                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,context_type,context_id,""))
+                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
+                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
                 r=result.fetchone()
                 if r:
                     row=dict(r)
@@ -6230,9 +6148,9 @@ def send_dm():
                 try:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id,context_type,context_id,read_at
-                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,context_type,context_id,""))
+                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
                 except Exception:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
@@ -6241,19 +6159,14 @@ def send_dm():
                                (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0))
                 row={"id":mid,"workspace_id":ws_id,"sender":me,"recipient":recipient,
                      "content":content,"read":0,"ts":now,"reply_to":reply_to or "",
-                     "delivered_at":now,"seen_at":"","read_at":"","edited":0,"deleted":0,"pinned":0,
-                     "client_msg_id":client_msg_id,"context_type":context_type,"context_id":context_id}
+                     "delivered_at":now,"seen_at":"","edited":0,"deleted":0,"pinned":0,
+                     "client_msg_id":client_msg_id}
 
     if not row:
         return jsonify({"error":"Failed to send message"}),500
 
     if client_msg_id and not row.get("client_msg_id"):
         row["client_msg_id"]=client_msg_id
-    if context_type and not row.get("context_type"):
-        row["context_type"]=context_type
-    if context_id and not row.get("context_id"):
-        row["context_id"]=context_id
-    row=_decorate_dm_messages([row], me)[0]
 
     # ── Round-trip 3: notification insert — run in background ─────────────────
     def _insert_notif():

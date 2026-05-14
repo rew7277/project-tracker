@@ -4524,30 +4524,6 @@ const playSound=(type='notif')=>{
     }
   }catch(e){}
 };
-const dmDateKey=(v)=>{const d=new Date(v||Date.now());return isNaN(d)?'':d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
-const dmDateLabel=(v)=>{
-  const d=new Date(v||Date.now()); if(isNaN(d))return '';
-  const today=new Date(); const y=new Date(); y.setDate(today.getDate()-1);
-  if(dmDateKey(d)===dmDateKey(today))return 'Today';
-  if(dmDateKey(d)===dmDateKey(y))return 'Yesterday';
-  return d.toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'});
-};
-const dmTimeLabel=(v)=>{const d=new Date(v||Date.now());return isNaN(d)?'':d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
-const dmStatusInfo=(m,isMe)=>{
-  if(!isMe)return {text:dmTimeLabel(m.ts||m.created_at),icon:null,title:''};
-  if(m._failed)return {text:'Failed — retry',icon:null,title:'Message failed'};
-  if(m._pending)return {text:'Sending…',icon:null,title:'Sending'};
-  if(m.seen_at||m.read_at||Number(m.read||0)===1||m.status==='seen')return {text:'Seen',icon:'eye',title:'Seen '+(dmTimeLabel(m.seen_at||m.read_at)||'')};
-  if(m.delivered_at||m.status==='delivered')return {text:'Delivered',icon:'check',title:'Delivered '+(dmTimeLabel(m.delivered_at)||'')};
-  return {text:'Sent',icon:'tick',title:'Sent'};
-};
-const dmContextLabel=(m)=>{
-  const t=String(m.context_type||'').toLowerCase(); const id=String(m.context_id||'').trim();
-  if(!t||!id)return '';
-  const nice={task:'Task',project:'Project',ticket:'Ticket'}[t]||t;
-  return nice+' #'+id;
-};
-
 function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set()}){
   const isAdminOrManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   if(!dmEnabled&&!isAdminOrManager) return html`
@@ -4562,7 +4538,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
-  const [dmContext,setDmContext]=useState(()=>{try{const q=new URLSearchParams(location.search);const t=(q.get('context_type')||q.get('ctx')||'').toLowerCase();const id=q.get('context_id')||q.get('task')||q.get('project')||q.get('ticket')||'';return ['task','project','ticket'].includes(t)&&id?{type:t,id}:null;}catch{return null;}});
   const [sending,setSending]=useState(false);
   const [loadingThread,setLoadingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
@@ -4609,8 +4584,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     for(const raw of arr){
       if(!raw)continue;
       const m={...raw};
-      if(!m.date_label)m.date_label=dmDateLabel(m.ts||m.created_at);
-      if(!m.time_label)m.time_label=dmTimeLabel(m.ts||m.created_at);
       const id=String(m.id||'');
       if(id&&byId.has(id)){
         Object.assign(byId.get(id),m,{_pending:byId.get(id)._pending&&m._pending});
@@ -4796,7 +4769,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setThreadMessages(id,merged,true);
       setLoadingThread('');
       onDmRead(id);
-      api.post('/api/dm/'+id+'/seen',{}, {quiet:true}).catch(()=>{});
       // Clear global incoming cache — full network fetch has now merged all messages.
       try{if(window._pfDmIncoming&&window._pfDmIncoming[id])delete window._pfDmIncoming[id];}catch(_){}
       console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
@@ -4868,7 +4840,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             return final;
           });
           onDmRead(requestedTo);
-          api.post('/api/dm/'+requestedTo+'/seen',{}, {quiet:true}).catch(()=>{});
         }
       }finally{dmPollBusy=false;}
     },3000);
@@ -4952,7 +4923,6 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             return normalizeDmList(next);
           });
           onDmRead(toId);
-          if(m.sender!==cu.id)api.post('/api/dm/'+toId+'/seen',{}, {quiet:true}).catch(()=>{});
           return;
         }
       }
@@ -5022,7 +4992,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dmRecentSendRef.current={key:sendKey,at:Date.now()};
     const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||'',_pending:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
     setTxt('');setReplyTo(null);
     setSending(true);
     setMsgThreadId(recipient);
@@ -5034,7 +5004,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:optimistic.context_type,context_id:optimistic.context_id},{timeoutMs:20000});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:20000});
       if(m&&m.ok===false) throw new Error(m.error||'DM send failed');
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
@@ -5303,8 +5273,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
-              <div style=${{fontSize:13,fontWeight:700,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
-              ${(()=>{const lm=(threadCache.current.get(u.id)||[]).slice(-1)[0];return lm?html`<div style=${{display:'flex',gap:6,alignItems:'center',minWidth:0}}><span style=${{fontSize:10,color:'var(--tx3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:104}}>${lm.sender===cu.id?'You: ':''}${String(lm.content||'').replace(/\n/g,' ').slice(0,34)}</span><span style=${{fontSize:9,color:'var(--tx3)',marginLeft:'auto'}}>${dmTimeLabel(lm.ts)}</span></div>`:null;})()}
+              <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
             </div>
             ${unr>0?html`<span style=${{background:'var(--ac)',color:'#fff',borderRadius:10,fontSize:10,padding:'2px 6px',fontFamily:'monospace',fontWeight:700}}>${unr}</span>`:null}
           </button>`;})}
@@ -5323,16 +5292,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
-      ${dmContext?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(99,102,241,.09)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>🔗 Routed context</b><span>${dmContext.type} #${dmContext.id}</span><button class="btn" style=${{marginLeft:'auto',fontSize:10,padding:'3px 7px'}} onClick=${()=>setDmContext(null)}>Clear</button></div>`:null}
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
       <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
-        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);const prev=displayMsgs[i-1];const showDate=!prev||dmDateKey(prev.ts)!==dmDateKey(m.ts);const st=dmStatusInfo(m,isMe);const ctxLabel=dmContextLabel(m);return html`${showDate?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--tx3)',fontSize:11,fontWeight:900,margin:'8px 0 2px'}}><span style=${{height:1,background:'var(--bd)',flex:1}}></span><span style=${{padding:'4px 10px',border:'1px solid var(--bd)',borderRadius:999,background:'var(--sf)',letterSpacing:'.02em'}}>${m.date_label||dmDateLabel(m.ts)}</span><span style=${{height:1,background:'var(--bd)',flex:1}}></span></div>`:null}${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
+        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.client_msg_id||m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
               <div style=${{position:'relative',display:'flex',flexDirection:'column',alignItems:isMe?'flex-end':'flex-start'}}>
-                ${ctxLabel?html`<div style=${{fontSize:10,maxWidth:'100%',padding:'3px 7px',marginBottom:4,borderRadius:999,background:'rgba(99,102,241,.13)',color:'var(--ac)',border:'1px solid rgba(99,102,241,.22)',fontWeight:800}}>🔗 ${ctxLabel}</div>`:null}${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
+                ${replied?html`<div style=${{fontSize:11,maxWidth:'100%',borderLeft:'3px solid var(--ac)',padding:'4px 7px',marginBottom:4,borderRadius:6,background:'rgba(99,102,241,.10)',color:'var(--tx2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>↩ ${replied.content}</div>`:null}<div onClick=${ev=>{ev.stopPropagation();if(!m._pending&&!m._failed&&!m.deleted)setReactionPickerFor(v=>v===m.id?'':m.id);}} onDblClick=${ev=>{ev.stopPropagation();if(isImageAttachment(m.content))setPreviewImage((String(m.content).match(/\/api\/files\/[A-Za-z0-9_-]+/)||[''])[0]);}} style=${{padding:'9px 13px',borderRadius:14,fontSize:13,lineHeight:1.55,wordBreak:'break-word',background:m.deleted?'var(--sf2)':(isMe?'var(--ac)':'var(--sf2)'),color:m.deleted?'var(--tx3)':(isMe?'var(--ac-tx)':'var(--tx)'),border:isMe?'none':'1px solid var(--bd)',borderBottomRightRadius:isMe?3:14,borderBottomLeftRadius:isMe?14:3,opacity:m._pending?0.65:1,fontStyle:m.deleted?'italic':'normal',outline:m._failed?'1px solid var(--rd)':'none',cursor:m._pending||m._failed||m.deleted?'default':'pointer'}} dangerouslySetInnerHTML=${{__html:renderChatContent(m.deleted?'This message was deleted':m.content)}}></div>
                 ${!m._pending&&!m._failed&&reactionPickerFor===m.id?html`<div class="dm-react-picker" onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'100%',[isMe?'right':'left']:0,marginBottom:6,display:'flex',gap:5,padding:'6px 8px',border:'1px solid var(--bd)',background:'linear-gradient(135deg, rgba(15,23,42,.94), rgba(30,41,59,.90))',backdropFilter:'blur(16px)',borderRadius:22,boxShadow:'0 20px 50px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.08)',zIndex:20,animation:'dmPickerPop .16s cubic-bezier(.2,.9,.25,1.25)'}}>
                   ${reactionEmojis.map(e=>html`<button title=${'React '+e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,e);}} style=${{border:'none',background:'transparent',borderRadius:12,fontSize:16,lineHeight:1,padding:'5px 6px',cursor:'pointer',filter:'saturate(1.05)',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
                 </div>`:null}
@@ -5347,7 +5315,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<div title=${st.title||''} style=${{display:'flex',alignItems:'center',gap:4,margin:'0 2px',justifyContent:isMe?'flex-end':'flex-start'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${isMe?st.text:(m.time_label||dmTimeLabel(m.ts))}${m.edited?' · edited':''}</span>${isMe&&st.icon==='eye'?html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.95}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:isMe&&st.icon==='check'?html`<span title="Delivered" style=${{fontSize:10,color:'var(--tx3)',fontWeight:900}}>✓</span>`:null}</div>`:null}
+              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:3,margin:'0 2px'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe&&m._pending?' · Sending…':'')+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed&&m.read?html`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.85}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:null}</div>`:null}
             </div>
           </div>`;})}
       </div>
