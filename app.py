@@ -5613,6 +5613,12 @@ def get_dm(other_id):
     # Only bust caches if we actually just marked messages as read
     if unread_count:
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        try:
+            # Notify the sender immediately so their outgoing messages change from
+            # delivered single-tick to read double-tick without waiting for a reload.
+            _sse_publish(ws_id, "dm_seen", {"reader": me, "sender": other_id, "seen_at": ts(), "count": unread_count})
+        except Exception as e:
+            log.warning("[DM] seen SSE failed: %s", e)
     # Cache the full conversation so page refreshes and re-opens are instant
     if not since:
         _cache_set(f"dm_thread:{ws_id}:{me}:{other_id}", data)

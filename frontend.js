@@ -4860,8 +4860,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         return;
       }
       // Call popups are driven only by live call_status SSE events, not by DM history/messages.
-      if(msg&&msg.type==='dm_typing'&&data){if(data.sender===toId){setRemoteTyping(!!data.typing);if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);}return;}
-      if(msg&&['dm_updated','dm_deleted','dm_pinned','dm_seen'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
+      if(msg&&msg.type==='dm_typing'&&data){
+        const from=String(data.sender||'');
+        const to=String(data.recipient||'');
+        if(from===String(activeToRef.current)&&to===String(cu.id)){
+          setRemoteTyping(!!data.typing);
+          if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);
+        }
+        return;
+      }
+      if(msg&&msg.type==='dm_seen'&&data){
+        const peer=String(data.reader||data.sender||'');
+        const seenAt=data.seen_at||new Date().toISOString();
+        const markSeen=list=>(Array.isArray(list)?list:[]).map(x=>String(x.sender)===String(cu.id)&&String(x.recipient)===peer?{...x,read:1,seen_at:x.seen_at||seenAt}:x);
+        if(peer){
+          const patched=markSeen(threadCache.current.get(peer)||[]);
+          threadCache.current.set(peer,patched);_saveDmCache(peer,patched);
+          if(peer===String(activeToRef.current))setMsgs(prev=>markSeen(prev));
+        }
+        return;
+      }
+      if(msg&&['dm_updated','dm_deleted','dm_pinned'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
       if(msg&&msg.type==='dm_reaction'&&data){
         if(data.message){applyReactionMessage(data.message);return;}
         if(data.sender===toId||data.recipient===toId)loadMsgs(toId,'reaction');
@@ -5288,7 +5307,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…')):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
@@ -9281,12 +9300,14 @@ function App(){
   const [initialTicketId,setInitialTicketId]=useState(null);
   const routeToNotification=useCallback((n={})=>{
     const type=String(n.type||'').toLowerCase();
-    const entityType=String(n.entity_type||'').toLowerCase();
-    const entityId=n.entity_id||n.task_id||n.project_id||n.ticket_id||n.id_ref||'';
-    const senderId=n.sender_id||n.sender||n.from_user_id||'';
+    const entityType=String(n.entity_type||n.kind||'').toLowerCase();
+    const entityId=n.entity_id||n.task_id||n.project_id||n.ticket_id||n.id_ref||n.target_id||'';
+    const senderId=n.sender_id||n.sender||n.from_user_id||n.user_id||'';
+    const dmPeer=n.peer_id||n.dm_user_id||senderId;
     // Direct message / call notifications must open the exact sender thread.
-    if(type==='dm'||type==='message'||type==='call'||entityType==='dm'){
-      if(senderId)setDmTargetUser(String(senderId));
+    // Do not treat generic `message` as DM; channel/project messages also use that type.
+    if(type==='dm'||type==='direct_message'||type==='call'||entityType==='dm'||entityType==='direct_message'){
+      if(dmPeer)setDmTargetUser(String(dmPeer));
       _setView('dm');
       return;
     }
@@ -9309,7 +9330,8 @@ function App(){
       return;
     }
     // Project/channel messages should route to Channels; project id is kept in URL for future deep-linking.
-    if(entityType==='message'||type==='channel_message'||type==='project_message'){
+    if(entityType==='message'||entityType==='channel'||type==='message'||type==='channel_message'||type==='project_message'){
+      if(entityId)try{setActiveProject&&setActiveProject(String(entityId));}catch(_e){}
       _setView('messages');
       return;
     }
@@ -9565,8 +9587,10 @@ function App(){
                 showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now())});
               }
             }
-            if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'||msg.type==='call_status'){
-              api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread))setDmUnread(d.dm_unread);if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
+            if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
+              if(msg.type!=='dm_typing'&&msg.type!=='dm_seen'){
+                api.get('/api/poll',{quiet:true,timeoutMs:30000}).then(d=>{if(d&&Array.isArray(d.dm_unread))setDmUnread(d.dm_unread);if(d&&Array.isArray(d.notifications))setData(prev=>({...prev,notifs:d.notifications}));}).catch(()=>{});
+              }
               if(msg.type==='dm_created'){
                 try{
                   const m=(msg.data&&msg.data.message)||{};
@@ -9851,7 +9875,11 @@ function App(){
     if(prevTeamCtxRef.current===teamCtx)return; // skip initial mount
     prevTeamCtxRef.current=teamCtx;
     setTeamLoading(true);
-    setView('dashboard'); // always go to dashboard on team switch
+    // Do not redirect users away from the page while they are typing in chat/notes/forms.
+    // Team-context reloads can happen from storage/SSE; keep the current view unless it is empty.
+    const ae=document.activeElement;
+    const isTyping=ae&&(['INPUT','TEXTAREA','SELECT'].includes(ae.tagName)||ae.isContentEditable);
+    if(!isTyping && !view)setView('dashboard');
     setData(prev=>({...prev,projects:[],tasks:[]}));
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);

@@ -4933,8 +4933,27 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         return;
       }
       // Call popups are driven only by live call_status SSE events, not by DM history/messages.
-      if(msg&&msg.type==='dm_typing'&&data){if(data.sender===toId){setRemoteTyping(!!data.typing);if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);}return;}
-      if(msg&&['dm_updated','dm_deleted','dm_pinned','dm_seen'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
+      if(msg&&msg.type==='dm_typing'&&data){
+        const from=String(data.sender||'');
+        const to=String(data.recipient||'');
+        if(from===String(activeToRef.current)&&to===String(cu.id)){
+          setRemoteTyping(!!data.typing);
+          if(data.typing)setTimeout(()=>setRemoteTyping(false),1800);
+        }
+        return;
+      }
+      if(msg&&msg.type==='dm_seen'&&data){
+        const peer=String(data.reader||data.sender||'');
+        const seenAt=data.seen_at||new Date().toISOString();
+        const markSeen=list=>(Array.isArray(list)?list:[]).map(x=>String(x.sender)===String(cu.id)&&String(x.recipient)===peer?{...x,read:1,seen_at:x.seen_at||seenAt}:x);
+        if(peer){
+          const patched=markSeen(threadCache.current.get(peer)||[]);
+          threadCache.current.set(peer,patched);_saveDmCache(peer,patched);
+          if(peer===String(activeToRef.current))setMsgs(prev=>markSeen(prev));
+        }
+        return;
+      }
+      if(msg&&['dm_updated','dm_deleted','dm_pinned'].includes(msg.type)&&data&&data.message){applyDmPatch(data.message);return;}
       if(msg&&msg.type==='dm_reaction'&&data){
         if(data.message){applyReactionMessage(data.message);return;}
         if(data.sender===toId||data.recipient===toId)loadMsgs(toId,'reaction');
@@ -5357,7 +5376,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Seen ✓✓':' · Sent ✓'):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…')):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
@@ -5390,7 +5409,7 @@ function NotifsView({notifs,reload,setData,onNavigate}){
   const handleClick=async(n)=>{
     if(!n.read) await api.put('/api/notifications/'+n.id+'/read',{});
     const T=NT[n.type]||NT.comment;
-    if(T.nav&&onNavigate){onNavigate(T.nav);}
+    if(onNavigate){onNavigate(n);}
     reload();
   };
   const clearAll=async()=>{
@@ -9353,6 +9372,38 @@ function App(){
       }
     }catch(e){}
   },[]);
+  const routeToNotification=useCallback((n={})=>{
+    const type=String(n.type||'').toLowerCase();
+    const entityType=String(n.entity_type||n.kind||'').toLowerCase();
+    const entityId=n.entity_id||n.task_id||n.project_id||n.ticket_id||n.id_ref||n.target_id||'';
+    const senderId=n.sender_id||n.sender||n.from_user_id||n.user_id||'';
+    const dmPeer=n.peer_id||n.dm_user_id||senderId;
+    if(type==='dm'||type==='direct_message'||type==='call'||entityType==='dm'||entityType==='direct_message'){
+      if(dmPeer)setDmTargetUser(String(dmPeer));
+      _setView('dm');
+      return;
+    }
+    if(entityType==='task'||['task_assigned','status_change','comment','deadline','reminder'].includes(type)){
+      if(entityId)setInitialTaskId(String(entityId));
+      _setView('tasks');
+      return;
+    }
+    if(entityType==='ticket'||type==='ticket'||type==='ticket_assigned'||String(n.content||'').trim().startsWith('🎫')){
+      if(entityId)setInitialTicketId(String(entityId));
+      _setView('tickets');
+      return;
+    }
+    if(entityType==='project'||type==='project_added'||type==='project_updated'){
+      if(entityId)setInitialProjectId(String(entityId));
+      _setView('projects');
+      return;
+    }
+    if(entityType==='message'||entityType==='channel'||type==='message'||type==='channel_message'||type==='project_message'){
+      _setView('messages');
+      return;
+    }
+    _setView('notifs');
+  },[_setView]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
@@ -9596,9 +9647,9 @@ function App(){
                 showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now())});
               }
             }
-            if(msg.type==='dm'||msg.type==='dm_created'||msg.type==='dm_reaction'){
+            if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
               // Use /api/poll (served from cache) to refresh both DM unread and notifications at once
-              api.get('/api/poll').then(r=>{
+              if(msg.type!=='dm_typing'&&msg.type!=='dm_seen')api.get('/api/poll').then(r=>{
                 if(r&&Array.isArray(r.dm_unread))setDmUnread(r.dm_unread);
               }).catch(()=>{});
               // Cache incoming DM messages globally so DirectMessages can pre-populate instantly
@@ -9862,7 +9913,11 @@ function App(){
     if(prevTeamCtxRef.current===teamCtx)return; // skip initial mount
     prevTeamCtxRef.current=teamCtx;
     setTeamLoading(true);
-    setView('dashboard'); // always go to dashboard on team switch
+    // Do not redirect users away from the page while they are typing in chat/notes/forms.
+    // Team-context reloads can happen from storage/SSE; keep the current view unless it is empty.
+    const ae=document.activeElement;
+    const isTyping=ae&&(['INPUT','TEXTAREA','SELECT'].includes(ae.tagName)||ae.isContentEditable);
+    if(!isTyping && !view)setView('dashboard');
     setData(prev=>({...prev,projects:[],tasks:[]}));
     load(teamCtx).finally(()=>setTeamLoading(false));
   },[teamCtx,cu]);
@@ -10262,7 +10317,7 @@ function App(){
               <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>
             </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
-            ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${setView}/>`:null}
+            ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
