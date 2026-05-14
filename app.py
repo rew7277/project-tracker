@@ -18,7 +18,6 @@ import re, struct, traceback, hmac, math, zlib, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import datetime, timedelta
 from functools import wraps
-import notification_engine as _ne
 
 # ── Structured logging ────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1925,32 +1924,6 @@ def send_ticket_status_email(user_email, user_name, ticket_title, new_status, ch
     send_email(user_email, subject, html, workspace_id)
 
 
-
-def send_sla_breach_email(user_email, user_name, ticket_title, ticket_id, priority, workspace_id):
-    subject = f"🚨 SLA breach risk: {ticket_title}"
-    body_html = f"""
-    <div style="font-family:Inter,Arial,sans-serif;background:#0f172a;color:#e5e7eb;padding:24px;border-radius:14px">
-      <h2 style="margin:0 0 10px;color:#f87171">SLA breach risk</h2>
-      <p>Hi {user_name or 'there'},</p>
-      <p>The ticket <b>{ticket_title}</b> is still unresolved and is marked <b>{priority}</b>.</p>
-      <p style="color:#94a3b8">Ticket ID: {ticket_id}</p>
-      <p>Please review and escalate if needed.</p>
-    </div>
-    """
-    return send_email(user_email, subject, body_html, workspace_id)
-
-def send_approval_request_email(user_email, user_name, approval_title, requester_name, approval_id, workspace_id):
-    subject = f"Approval needed: {approval_title}"
-    body_html = f"""
-    <div style="font-family:Inter,Arial,sans-serif;background:#0f172a;color:#e5e7eb;padding:24px;border-radius:14px">
-      <h2 style="margin:0 0 10px;color:#60a5fa">Approval needed</h2>
-      <p>Hi {user_name or 'there'},</p>
-      <p><b>{requester_name}</b> requested your approval for <b>{approval_title}</b>.</p>
-      <p style="color:#94a3b8">Approval ID: {approval_id}</p>
-    </div>
-    """
-    return send_email(user_email, subject, body_html, workspace_id)
-
 def send_mention_email(user_email, user_name, mentioner_name, context_title, comment_text, workspace_id):
     """Futuristic @mention notification email."""
     accent   = "#a78bfa"
@@ -2343,16 +2316,6 @@ def init_db():
                 user_id TEXT, read INTEGER DEFAULT 0, ts TEXT,
                 sender_id TEXT DEFAULT '', entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '',
                 followup_sent INTEGER DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS notification_prefs (
-                user_id TEXT PRIMARY KEY, workspace_id TEXT,
-                enable_in_app INTEGER DEFAULT 1, enable_desktop INTEGER DEFAULT 1,
-                enable_email INTEGER DEFAULT 1, mute_after_hours INTEGER DEFAULT 0,
-                office_start TEXT DEFAULT '09:00', office_end TEXT DEFAULT '18:00',
-                priority_only INTEGER DEFAULT 0, digest_frequency TEXT DEFAULT 'daily',
-                task_assigned INTEGER DEFAULT 1, ticket_updated INTEGER DEFAULT 1,
-                mention_comment INTEGER DEFAULT 1, approval_needed INTEGER DEFAULT 1,
-                deadline_approaching INTEGER DEFAULT 1, daily_summary INTEGER DEFAULT 1,
-                updated TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS reminders (
                 id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT,
                 task_id TEXT, task_title TEXT, remind_at TEXT,
@@ -2448,8 +2411,6 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(workspace_id, assignee)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(workspace_id, stage)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_user ON notifications(workspace_id, user_id, read)",
-            "CREATE TABLE IF NOT EXISTS notification_prefs (user_id TEXT PRIMARY KEY, workspace_id TEXT, enable_in_app INTEGER DEFAULT 1, enable_desktop INTEGER DEFAULT 1, enable_email INTEGER DEFAULT 1, mute_after_hours INTEGER DEFAULT 0, office_start TEXT DEFAULT '09:00', office_end TEXT DEFAULT '18:00', priority_only INTEGER DEFAULT 0, digest_frequency TEXT DEFAULT 'daily', task_assigned INTEGER DEFAULT 1, ticket_updated INTEGER DEFAULT 1, mention_comment INTEGER DEFAULT 1, approval_needed INTEGER DEFAULT 1, deadline_approaching INTEGER DEFAULT 1, daily_summary INTEGER DEFAULT 1, updated TEXT DEFAULT '')",
-            "CREATE INDEX IF NOT EXISTS idx_notification_prefs_ws ON notification_prefs(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_timelogs_user ON time_logs(workspace_id, user_id)",
             "CREATE INDEX IF NOT EXISTS idx_timelogs_date ON time_logs(workspace_id, date)",
             "CREATE TABLE IF NOT EXISTS task_events (id TEXT PRIMARY KEY, workspace_id TEXT, task_id TEXT, user_id TEXT, event_type TEXT, old_val TEXT DEFAULT \'\', new_val TEXT DEFAULT \'\', ts TEXT)",
@@ -2478,7 +2439,11 @@ def init_db():
             "ALTER TABLE direct_messages ADD COLUMN seen_at TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN reply_to TEXT DEFAULT ''",
             "ALTER TABLE direct_messages ADD COLUMN client_msg_id TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN context_type TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN context_id TEXT DEFAULT ''",
+            "ALTER TABLE direct_messages ADD COLUMN read_at TEXT DEFAULT ''",
             "CREATE INDEX IF NOT EXISTS idx_dm_client_msg ON direct_messages(workspace_id, sender, recipient, client_msg_id)",
+            "CREATE INDEX IF NOT EXISTS idx_dm_context ON direct_messages(workspace_id, context_type, context_id)",
             "CREATE INDEX IF NOT EXISTS idx_notifs_ts ON notifications(workspace_id, user_id, ts)",
             "CREATE INDEX IF NOT EXISTS idx_reminders_remind ON reminders(workspace_id, user_id, remind_at, fired)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks(workspace_id, deleted_at, created)",
@@ -5124,29 +5089,34 @@ def create_task():
             if proj:
                 try: proj_members=json.loads(proj["members"] or "[]")
                 except: proj_members=[]
-        # Preference-aware hybrid notifications: in-app, urgent desktop push, email.
+        # Build ALL notification rows first, then batch-insert in ONE query
+        notif_rows=[]
+        if assignee_user:
+            notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
+                               f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts(),tid,'task'))
+        for i,uid in enumerate(proj_members):
+            if uid==session["user_id"] or uid==d.get("assignee"): continue
+            proj_name=proj["name"] if proj else ""
+            notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
+                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts(),tid,'task'))
+        if notif_rows:
+            placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
+            flat=[v for row in notif_rows for v in row]
+            db.execute(f"INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES {placeholders}",flat)
+        # Send emails + push notifications in background threads (non-blocking)
         _task_url=f"/?action=task&id={tid}"
         if assignee_user:
-            email_fn = send_task_assigned_email if assignee_user["email"] else None
-            email_args = (assignee_user["email"], assignee_user["name"], d["title"], cname, tid, wid()) if email_fn else ()
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=d["assignee"],
-                notif_type="task_assigned", title=f"✅ New task assigned: {d['title']}",
-                body=f"{cname} assigned you to '{d['title']}'", priority=d.get("priority","medium"),
-                entity_id=tid, entity_type="task", sender_id=session["user_id"], url=_task_url,
-                email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=ts())
+            if assignee_user["email"]:
+                threading.Thread(target=send_task_assigned_email,
+                    args=(assignee_user["email"],assignee_user["name"],d["title"],cname,tid,wid()),
+                    daemon=True).start()
+            _enqueue_push(push_notification_to_user, db, d["assignee"],
+                f"✅ New task assigned: {d['title']}",
+                f"{cname} assigned you this task [{d.get('priority','medium')}]", _task_url)
         for uid in proj_members:
             if uid==session["user_id"] or uid==d.get("assignee"): continue
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid,
-                notif_type="task_created", title=f"📋 New task in {proj['name'] if proj else ''}",
-                body=f"{cname} created task '{d['title']}' in {proj['name'] if proj else ''}",
-                priority=d.get("priority","medium"), entity_id=tid, entity_type="task",
-                sender_id=session["user_id"], url=_task_url, push_fn=push_notification_to_user, now=ts())
-        for uid in _ne.team_lead_targets(db, wid(), d.get("team_id","")):
-            if uid in {session["user_id"], d.get("assignee","")}: continue
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="team_summary",
-                title=f"Team task created: {d['title']}", body=f"{cname} created a team task: {d['title']}",
-                priority=d.get("priority","medium"), entity_id=tid, entity_type="task",
-                sender_id=session["user_id"], url=_task_url, push_fn=push_notification_to_user, now=ts())
+            _enqueue_push(push_notification_to_user, *(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
+                      f"{cname} created '{d['title']}'",_task_url))
         # Use RETURNING * result if available; fall back to SELECT only if needed
         if t is None:
             t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
@@ -5571,6 +5541,86 @@ def _attach_dm_reactions(db, ws_id, messages):
         m["reactions"]=list(grouped.get(m.get("id"), {}).values())
     return out
 
+
+def _dm_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        try:
+            return datetime.strptime(str(value)[:19], '%Y-%m-%dT%H:%M:%S')
+        except Exception:
+            return None
+
+
+def _dm_date_label(value):
+    dt = _dm_dt(value)
+    if not dt:
+        return ''
+    today = now_ist().date()
+    d = dt.date()
+    if d == today:
+        return 'Today'
+    if (today - d).days == 1:
+        return 'Yesterday'
+    return dt.strftime('%d %b %Y')
+
+
+def _dm_time_label(value):
+    dt = _dm_dt(value)
+    return dt.strftime('%I:%M %p').lstrip('0') if dt else ''
+
+
+def _decorate_dm_messages(rows, current_user_id=None):
+    out=[]
+    for raw in rows or []:
+        m=dict(raw)
+        stamp=m.get('ts') or m.get('created') or ''
+        m['date_label']=_dm_date_label(stamp)
+        m['time_label']=_dm_time_label(stamp)
+        is_mine = bool(current_user_id and str(m.get('sender')) == str(current_user_id))
+        if m.get('seen_at') or m.get('read_at') or int(m.get('read') or 0):
+            status='seen'
+        elif m.get('delivered_at'):
+            status='delivered'
+        elif is_mine:
+            status='sent'
+        else:
+            status='received'
+        m['status']=status if is_mine else 'received'
+        out.append(m)
+    return out
+
+
+def _mark_dm_seen(ws_id, reader_id, other_id):
+    seen_time=ts()
+    with get_db(autocommit=True) as db:
+        unread_count = db.execute(
+            "SELECT COUNT(*) FROM direct_messages WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+            (ws_id, other_id, reader_id)
+        ).fetchone()[0]
+        if unread_count:
+            try:
+                db.execute(
+                    "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?), read_at=COALESCE(NULLIF(read_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+                    (seen_time, seen_time, ws_id, other_id, reader_id)
+                )
+            except Exception:
+                db.execute(
+                    "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
+                    (seen_time, ws_id, other_id, reader_id)
+                )
+    if unread_count:
+        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+        _bust_dm_thread(ws_id, reader_id, other_id)
+        try:
+            _sse_publish(ws_id, "dm_seen", {"reader": reader_id, "sender": other_id, "seen_at": seen_time, "count": unread_count})
+        except Exception as e:
+            log.warning("[DM] seen SSE failed: %s", e)
+    return unread_count, seen_time
+
+
 @app.route("/api/dm/<other_id>")
 @login_required
 def get_dm(other_id):
@@ -5595,6 +5645,10 @@ def get_dm(other_id):
         dm_cache_key = f"dm_thread:{ws_id}:{me}:{other_id}"
         cached_thread = _cache_get(dm_cache_key)
         if cached_thread is not None:
+            unread_count, seen_time = _mark_dm_seen(ws_id, me, other_id)
+            if unread_count:
+                cached_thread=[{**m, "read": 1, "seen_at": (m.get("seen_at") or seen_time), "read_at": (m.get("read_at") or seen_time)} if str(m.get("sender"))==str(other_id) and str(m.get("recipient"))==str(me) else m for m in cached_thread]
+                _cache_set(dm_cache_key, cached_thread)
             return jsonify(cached_thread)
     with get_db(autocommit=True) as db:
         if since:
@@ -5631,32 +5685,22 @@ def get_dm(other_id):
                 (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
-        # Mark incoming messages as read — only if there are unread ones (avoids needless cache bust)
-        unread_count = db.execute(
-            "SELECT COUNT(*) FROM direct_messages "
-            "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-            (ws_id, other_id, me)
-        ).fetchone()[0]
-        if unread_count:
-            db.execute(
-                "UPDATE direct_messages SET read=1, seen_at=COALESCE(NULLIF(seen_at,''), ?) "
-                "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
-                (ts(), ws_id, other_id, me)
-            )
-        data=_attach_dm_reactions(db, ws_id, rows)
-    # Only bust caches if we actually just marked messages as read
+        data=_decorate_dm_messages(_attach_dm_reactions(db, ws_id, rows), me)
+    unread_count, _seen_time = _mark_dm_seen(ws_id, me, other_id)
     if unread_count:
-        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        try:
-            # Notify the sender immediately so their outgoing messages change from
-            # delivered single-tick to read double-tick without waiting for a reload.
-            _sse_publish(ws_id, "dm_seen", {"reader": me, "sender": other_id, "seen_at": ts(), "count": unread_count})
-        except Exception as e:
-            log.warning("[DM] seen SSE failed: %s", e)
+        data=[{**m, "read": 1, "seen_at": (m.get("seen_at") or _seen_time), "read_at": (m.get("read_at") or _seen_time)} if str(m.get("sender"))==str(other_id) and str(m.get("recipient"))==str(me) else m for m in data]
     # Cache the full conversation so page refreshes and re-opens are instant
     if not since:
         _cache_set(f"dm_thread:{ws_id}:{me}:{other_id}", data)
     return jsonify(data)
+
+
+@app.route("/api/dm/<other_id>/seen", methods=["POST"])
+@login_required
+def seen_dm(other_id):
+    ws_id=wid(); me=session["user_id"]
+    count, seen_time = _mark_dm_seen(ws_id, me, other_id)
+    return jsonify({"ok": True, "count": count, "seen_at": seen_time})
 
 
 
@@ -6128,6 +6172,10 @@ def send_dm():
     recipient=(d.get("recipient") or "").strip()
     reply_to=(d.get("reply_to") or "").strip()
     client_msg_id=(d.get("client_msg_id") or "").strip()
+    context_type=(d.get("context_type") or "").strip().lower()
+    context_id=(d.get("context_id") or "").strip()
+    if context_type not in ("", "task", "project", "ticket"):
+        return jsonify({"error":"Invalid DM context"}),400
     if not content:
         return jsonify({"error":"Empty"}),400
     if not recipient:
@@ -6171,9 +6219,9 @@ def send_dm():
             try:
                 result=db.execute("""INSERT INTO direct_messages(
                                id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id
-                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
-                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
+                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id,context_type,context_id,read_at
+                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
+                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,context_type,context_id,""))
                 r=result.fetchone()
                 if r:
                     row=dict(r)
@@ -6182,9 +6230,9 @@ def send_dm():
                 try:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id
-                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
+                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id,context_type,context_id,read_at
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,context_type,context_id,""))
                 except Exception:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
@@ -6193,14 +6241,19 @@ def send_dm():
                                (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0))
                 row={"id":mid,"workspace_id":ws_id,"sender":me,"recipient":recipient,
                      "content":content,"read":0,"ts":now,"reply_to":reply_to or "",
-                     "delivered_at":now,"seen_at":"","edited":0,"deleted":0,"pinned":0,
-                     "client_msg_id":client_msg_id}
+                     "delivered_at":now,"seen_at":"","read_at":"","edited":0,"deleted":0,"pinned":0,
+                     "client_msg_id":client_msg_id,"context_type":context_type,"context_id":context_id}
 
     if not row:
         return jsonify({"error":"Failed to send message"}),500
 
     if client_msg_id and not row.get("client_msg_id"):
         row["client_msg_id"]=client_msg_id
+    if context_type and not row.get("context_type"):
+        row["context_type"]=context_type
+    if context_id and not row.get("context_id"):
+        row["context_id"]=context_id
+    row=_decorate_dm_messages([row], me)[0]
 
     # ── Round-trip 3: notification insert — run in background ─────────────────
     def _insert_notif():
@@ -6543,32 +6596,25 @@ def create_ticket():
                     d.get("priority","medium"),d.get("status","open"),d.get("assignee",""),
                     session["user_id"],d.get("project",""),json.dumps(d.get("tags",[])),now,now,
                     d.get("team_id","")))
-        reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-        rname=reporter["name"] if reporter else "Someone"
         if d.get("assignee"):
+            nid=f"n{int(datetime.now().timestamp()*1000)}"
+            reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+            rname=reporter["name"] if reporter else "Someone"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
+            # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
-            email_fn = send_ticket_assigned_email if assignee_tkt and assignee_tkt["email"] else None
-            email_args = (assignee_tkt["email"],assignee_tkt["name"],d["title"],rname,tid,d.get("priority","medium"),wid()) if email_fn else ()
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=d["assignee"],
-                notif_type="ticket_assigned", title=f"🎫 Ticket assigned: {d['title']}",
-                body=f"🎫 {rname} assigned ticket: {d['title']}", priority=d.get("priority","medium"),
-                entity_id=tid, entity_type="ticket", sender_id=session["user_id"], url=f"/?view=tickets&id={tid}",
-                email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
-        if d.get("priority","medium").lower() in ("high","critical","urgent"):
-            for uid in set(_ne.team_lead_targets(db, wid(), d.get("team_id","")) + _ne.role_targets(db, wid(), ("Manager","Admin"))):
-                if uid == session["user_id"] or uid == d.get("assignee",""): continue
-                _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="ticket_updated",
-                    title=f"🚨 Priority ticket created: {d['title']}", body=f"{rname} created {d.get('priority','high')} priority ticket: {d['title']}",
-                    priority=d.get("priority","high"), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
-                    url=f"/?view=tickets&id={tid}", push_fn=push_notification_to_user, now=now)
+            if assignee_tkt and assignee_tkt["email"]:
+                threading.Thread(target=send_ticket_assigned_email,
+                    args=(assignee_tkt["email"],assignee_tkt["name"],d["title"],
+                          rname,tid,d.get("priority","medium"),wid()),
+                    daemon=True).start()
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     # Targeted bust: only tickets + appdata. Avoids wiping user/project/task caches.
     _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
-
-@app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
 def update_ticket(tid):
     d=request.json or {}
@@ -6600,25 +6646,15 @@ def update_ticket(tid):
                     continue
                 _tkt_notified.add(_tkt_uid)
                 _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
-                email_fn = send_ticket_status_email if _tkt_user and _tkt_user["email"] else None
-                email_args = (_tkt_user["email"], _tkt_user["name"], t["title"], d["status"], _tkt_changer_name, tid, wid()) if email_fn else ()
-                _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=_tkt_uid, notif_type="ticket_updated",
-                    title=f"🎫 Ticket updated: {t['title']}", body=f"{_tkt_changer_name} changed ticket status to {d['status']}: {t['title']}",
-                    priority=d.get("priority", t["priority"]), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
-                    url=f"/?view=tickets&id={tid}", email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
-            if d.get("priority", t["priority"]).lower() in ("high","critical","urgent"):
-                for uid in set(_ne.team_lead_targets(db, wid(), d.get("team_id",cur_team_id)) + _ne.role_targets(db, wid(), ("Manager","Admin"))):
-                    if uid in _tkt_notified or uid == session["user_id"]: continue
-                    _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="ticket_updated",
-                        title=f"🚨 Priority ticket updated: {t['title']}", body=f"{_tkt_changer_name} updated priority ticket: {t['title']}",
-                        priority=d.get("priority", t["priority"]), entity_id=tid, entity_type="ticket", sender_id=session["user_id"],
-                        url=f"/?view=tickets&id={tid}", push_fn=push_notification_to_user, now=now)
-    _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
+                if _tkt_user and _tkt_user["email"]:
+                    threading.Thread(target=send_ticket_status_email,
+                        args=(_tkt_user["email"], _tkt_user["name"], t["title"],
+                              d["status"], _tkt_changer_name, tid, wid()),
+                        daemon=True).start()
+    _cache_bust(wid(), "tickets", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
     return jsonify(result)
-
-@app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
 def delete_ticket(tid):
     with get_db() as db:
@@ -7042,21 +7078,6 @@ def delete_note(nid):
     return jsonify({'ok': True})
 
 # ── Notifications ─────────────────────────────────────────────────────────────
-
-@app.route("/api/notification-prefs", methods=["GET"])
-@login_required
-def get_notification_prefs():
-    with get_db() as db:
-        prefs = _ne.get_user_prefs(db, wid(), session["user_id"])
-        return jsonify(prefs)
-
-@app.route("/api/notification-prefs", methods=["PUT"])
-@login_required
-def update_notification_prefs():
-    with get_db() as db:
-        prefs = _ne.update_user_prefs(db, wid(), session["user_id"], request.json or {})
-    _cache_bust(wid(), "notifications", "notifs", "appdata")
-    return jsonify(prefs)
 
 @app.route("/api/notifications")
 @login_required
@@ -8744,9 +8765,6 @@ try:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
-    with get_db() as _db_ne:
-        _ne.ensure_notification_prefs_schema(_db_ne)
-    _ne.start_background_workers(sys.modules[__name__])
     ensure_timelog_schema()   # always run — adds any missing time_log columns
     _ensure_logout_column()    # add logged_out_at if upgrading from older deploy
     _close_ddl_conn()         # release shared DDL connection after all migrations
@@ -9747,21 +9765,10 @@ def create_approval():
          json.dumps(approvers), json.dumps([]), "", "", now, now, d.get("expires_at", ""))
     )
     with get_db() as db:
-        requester = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
-        requester_name = requester["name"] if requester else "Someone"
         for approver_id in approvers:
-            user = db.execute("SELECT name,email FROM users WHERE id=?", (approver_id,)).fetchone()
-            email_fn = send_approval_request_email if user and user["email"] else None
-            email_args = (user["email"], user["name"], d["title"], requester_name, aid, wid()) if email_fn else ()
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=approver_id, notif_type="approval_requested",
-                title=f"Approval needed: {d['title']}", body=f"Your approval needed: {d['title']}",
-                priority=d.get("priority","high"), entity_id=aid, entity_type="approval", sender_id=session["user_id"],
-                url=f"/?view=approvals&id={aid}", email_fn=email_fn, email_args=email_args, push_fn=push_notification_to_user, now=now)
-        for uid in _ne.role_targets(db, wid(), ("Manager","Admin")):
-            if uid in approvers or uid == session["user_id"]: continue
-            _ne.dispatch_notification(db=db, workspace_id=wid(), user_id=uid, notif_type="manager_summary",
-                title=f"Approval pending: {d['title']}", body=f"Approval requested by {requester_name}: {d['title']}",
-                priority="medium", entity_id=aid, entity_type="approval", sender_id=session["user_id"], now=now)
+            nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                       (nid, wid(), "approval_requested", f"Your approval needed: {d['title']}", approver_id, 0, now))
         return jsonify(dict(db.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()))
 
 @app.route("/api/approvals/<aid>/approve", methods=["POST"])
