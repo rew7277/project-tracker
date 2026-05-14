@@ -1261,7 +1261,7 @@ function PersonalTwoFAToggle({cu,setCu}){
     const r=await api.post('/api/auth/totp/setup',{});
     if(r.error){setMsg(r.error);return;}
     setTotpData(r);setShowSetup(true);setVerifyToken('');
-    queueMicrotask(() => {if(inpRef.current)inpRef.current.focus();},400);
+    setTimeout(() => {if(inpRef.current)inpRef.current.focus();},400);
   };
 
   const confirmSetup=async()=>{
@@ -4251,7 +4251,8 @@ function MessagesView({projects,users,cu,tasks}){
         if(Array.isArray(d)){
           setMsgs(prev=>{
             if(d.length>prev.length){
-              playSound('notif');
+              const newMsgs=d.slice(prev.length);
+              if(newMsgs.some(m=>m.sender!==cu.id))playSound('notif');
               if(d.length>0){
                 const latest=d.reduce((mx,m)=>m.ts>mx?m.ts:mx,'');
                 setLastMsgTs(prev2=>({...prev2,[pid]:latest}));
@@ -4748,7 +4749,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           if(!ringtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain);
           osc.start(); osc.stop(ctx.currentTime+0.18);
-          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
+          setTimeout(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.18);}catch{}},240);
         };
         ringtoneCtxRef.current=ctx; tick(); ringtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1200)};
         const oldStop=stopRingtone;
@@ -4878,7 +4879,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           setThreadMessages(requestedTo,merged,false);
           setLoadingThread('');
           setMsgs(prev=>{
-            if(merged.length>prev.length){playSound('notif');}
+            if(merged.length>prev.length){
+              const added=merged.slice(prev.length);
+              if(added.some(m=>m.sender!==cu.id))playSound('notif');
+            }
             return merged;
           });
           onDmRead(requestedTo);
@@ -4941,7 +4945,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(String(x.id||'').startsWith('srvtmp')&&x.content===m.content&&x.sender===m.sender));
             const next=mergePendingReactionState(toId,[...withoutTmp,{...m,_pending:false}]);
             setThreadMessages(toId,next,false);
-            if(m.sender!==cu.id)playSound('notif');
+            if(m.sender!==cu.id&&!msg.soundPlayed)playSound('notif');
             return normalizeDmList(next);
           });
           onDmRead(toId);
@@ -5218,7 +5222,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     if(!incomingCall){ stopRingtone(); return; }
     startRingtone();
-    callTimeoutRef.current=queueMicrotask(() => {
+    callTimeoutRef.current=setTimeout(() => {
       const call=incomingCall;
       if(!call||dismissedCallIds.current.has(call.callId))return;
       dismissedCallIds.current.add(call.callId);
@@ -5227,7 +5231,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       // Local timeout only hides the popup; server updates the original call card.
       // Do not write a local missed state that can leak into DM history.
     },20000);
-    return()=>stopRingtone();
+    return()=>{clearTimeout(callTimeoutRef.current);stopRingtone();};
   },[incomingCall,startRingtone,stopRingtone]);
   const respondIncomingCall=async(action)=>{
     const call=incomingCall;
@@ -5445,7 +5449,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     if(r.error){setTotpMsg(r.error);return;}
     setTotpMsg('✓ Google Authenticator configured!');
     setShowTotpSetup(false);setTotpData(null);
-    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1500);
+    setTimeout(() => {setTotpMsg('');reload&&reload();},1500);
   };
 
   const resetTotp=async()=>{
@@ -5455,7 +5459,7 @@ function MemberRow({u,cu,i,total,reload,ROLE_COLORS}){
     setTwoFaLoading(false);
     if(r.error){alert(r.error);return;}
     setTotpMsg('✓ 2FA reset');
-    queueMicrotask(() => {setTotpMsg('');reload&&reload();},1200);
+    setTimeout(() => {setTotpMsg('');reload&&reload();},1200);
   };
 
   const toggleEmailOtp=async()=>{
@@ -6499,7 +6503,7 @@ function AiDocsView({cu,projects,tasks,users}){
     setInput('');
   };
 
-  const scrollToBottom=()=>{ queueMicrotask(() => { if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
+  const scrollToBottom=()=>{ setTimeout(() => { if(bottomRef.current) bottomRef.current.scrollIntoView({behavior:'smooth'}); },80); };
 
   const fmtRecent=(iso)=>{
     try{
@@ -9272,7 +9276,7 @@ function App(){
         const tick=()=>{
           if(!globalRingtoneCtxRef.current)return;
           const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=880; osc.connect(gain); osc.start(); osc.stop(ctx.currentTime+0.20);
-          queueMicrotask(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
+          setTimeout(() => {try{const osc2=ctx.createOscillator();osc2.type='sine';osc2.frequency.value=660;osc2.connect(gain);osc2.start();osc2.stop(ctx.currentTime+0.20);}catch{}},260);
         };
         globalRingtoneCtxRef.current=ctx; tick(); globalRingtoneRef.current={pause:()=>{},currentTime:0,_id:setInterval(tick,1250)};
         return;
@@ -9382,7 +9386,7 @@ function App(){
     if(!globalIncomingCall){stopGlobalRingtone();return;}
     startGlobalRingtone();
     const remaining=globalIncomingCall.expiresAt ? Math.max(0, Number(globalIncomingCall.expiresAt)-Date.now()) : 20000;
-    globalCallTimeoutRef.current=queueMicrotask(() => {
+    globalCallTimeoutRef.current=setTimeout(() => {
       const call=globalIncomingCall;
       if(!call||globalDismissedCallIds.current.has(call.callId))return;
       globalDismissedCallIds.current.add(call.callId);
@@ -9660,7 +9664,7 @@ function App(){
   useEffect(()=>{
     const q=(globalSearch||'').trim();
     if(!q||q.length<2){setSearchSubtasks([]);return;}
-    const t=queueMicrotask(() => {
+    const t=setTimeout(() => {
       api.get('/api/subtasks/search?q='+encodeURIComponent(q))
         .then(d=>{if(Array.isArray(d))setSearchSubtasks(d);})
         .catch(()=>{});
@@ -9750,7 +9754,7 @@ function App(){
           latest.slice().reverse().forEach(m=>{
             if(!m||!m.id||notifiedDmIdsRef.current.has(m.id))return;
             notifiedDmIdsRef.current.add(m.id);
-            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
+            window.dispatchEvent(new CustomEvent('dm_refresh',{detail:{type:'dm_created',soundPlayed:true,data:{id:m.id,sender:m.sender,recipient:m.recipient,message:m}}}));
             const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
@@ -9787,12 +9791,12 @@ function App(){
             }
             else if(n.entity_id && n.entity_type==='task'){
               _setView('tasks');
-              queueMicrotask(() => {const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
+              setTimeout(() => {const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
             else if(n.entity_id && n.entity_type==='project'){setActiveProject(n.entity_id);_setView('projects');}
             else if(n.entity_id && n.entity_type==='ticket'){
               _setView('tickets');
-              queueMicrotask(() => {const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
+              setTimeout(() => {const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
             }
             else if(n.entity_type==='message' && n.entity_id){setActiveProject(n.entity_id);_setView('messages');}
             else{_setView(nav);}
