@@ -6464,57 +6464,110 @@ function WorkspaceSettings({cu,onReload}){
 
 /* ─── NotesView — OneNote-inspired quick notes workspace ───────────────────── */
 function NotesView({cu}){
-  const [notes,setNotes]=useState([]),[activeId,setActiveId]=useState(null),[q,setQ]=useState(''),[saving,setSaving]=useState(false),[archived,setArchived]=useState(false),[tagInput,setTagInput]=useState(''),[viewMode,setViewMode]=useState('edit');
-  const editorRef=useRef(null); const saveTimer=useRef(null);
+  const [notes,setNotes]=useState([]);
+  const [activeId,setActiveId]=useState(null);
+  const [q,setQ]=useState('');
+  const [saving,setSaving]=useState(false);
+  const [archived,setArchived]=useState(false);
+  const [tagInput,setTagInput]=useState('');
+  const editorRef=useRef(null);
+  const saveTimer=useRef(null);
   const colors=['#facc15','#60a5fa','#34d399','#f472b6','#fb923c','#a78bfa','#f87171','#22d3ee'];
-  const loadNotes=useCallback(async()=>{const d=await api.get('/api/notes'+(archived?'?archived=1':''),{quiet:true,timeoutMs:10000});if(Array.isArray(d)){setNotes(d);if(!activeId&&d[0])setActiveId(d[0].id);}},[archived,activeId]);
-  useEffect(()=>{loadNotes();},[loadNotes]);
+  const toTags=(v)=>Array.isArray(v)?v:(typeof v==='string'?v.split(',').map(x=>x.trim()).filter(Boolean):[]);
+  const normalizeNote=(n)=>({...n,tags:toTags(n&&n.tags),title:(n&&n.title)||'Untitled note',body:(n&&n.body)||'',plain_text:(n&&n.plain_text)||'',notebook:(n&&n.notebook)||'Quick Notes',section:(n&&n.section)||'General',color:(n&&n.color)||'#facc15'});
+  const loadNotes=useCallback(async()=>{
+    const d=await api.get('/api/notes'+(archived?'?archived=1':''),{quiet:true,timeoutMs:10000});
+    if(Array.isArray(d)){
+      const list=d.map(normalizeNote);
+      setNotes(list);
+      setActiveId(prev=>prev || (list[0]&&list[0].id) || null);
+    }
+  },[archived]);
+  useEffect(()=>{loadNotes();return()=>clearTimeout(saveTimer.current);},[loadNotes]);
   const active=notes.find(n=>n.id===activeId)||notes[0]||null;
-  useEffect(()=>{if(active&&editorRef.current&&editorRef.current.innerHTML!==active.body){editorRef.current.innerHTML=active.body||'';}},[active&&active.id]);
-  const filtered=notes.filter(n=>{const hay=((n.title||'')+' '+(n.plain_text||'')+' '+(n.notebook||'')+' '+(n.section||'')+' '+((n.tags||[]).join(' '))).toLowerCase();return !q||hay.includes(q.toLowerCase());});
+  useEffect(()=>{
+    if(active&&editorRef.current&&editorRef.current.innerHTML!==active.body){
+      editorRef.current.innerHTML=active.body||'';
+    }
+  },[active&&active.id,active&&active.body]);
+  const filtered=notes.filter(n=>{
+    const hay=((n.title||'')+' '+(n.plain_text||'')+' '+(n.notebook||'')+' '+(n.section||'')+' '+toTags(n.tags).join(' ')).toLowerCase();
+    return !q||hay.includes(q.toLowerCase());
+  });
   const notebooks=[...new Set(notes.map(n=>n.notebook||'Quick Notes'))];
-  const updateLocal=(id,patch)=>setNotes(prev=>prev.map(n=>n.id===id?{...n,...patch,updated:new Date().toISOString()}:n));
-  const savePatch=(id,patch,instant=false)=>{updateLocal(id,patch);clearTimeout(saveTimer.current);const run=async()=>{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:10000});setSaving(false);}; instant?run():saveTimer.current=setTimeout(run,550);};
-  const createNote=async()=>{const d=await api.post('/api/notes',{title:'Untitled note',body:'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});await loadNotes();if(d&&d.id)setActiveId(d.id);};
+  const updateLocal=(id,patch)=>setNotes(prev=>prev.map(n=>n.id===id?normalizeNote({...n,...patch,updated:new Date().toISOString()}):n));
+  const savePatch=(id,patch,instant=false)=>{
+    updateLocal(id,patch);
+    clearTimeout(saveTimer.current);
+    const run=async()=>{try{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:10000});}finally{setSaving(false);}};
+    if(instant)run();else saveTimer.current=setTimeout(run,550);
+  };
+  const createNote=async()=>{
+    const d=await api.post('/api/notes',{title:'Untitled note',body:'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});
+    await loadNotes();
+    if(d&&d.id)setActiveId(d.id);
+  };
   const deleteActive=async()=>{if(!active)return;if(!confirm('Delete this note permanently?'))return;await api.del('/api/notes/'+active.id);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(null);};
   const cmd=(c,v=null)=>{document.execCommand(c,false,v);if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML});};
-  const addTag=()=>{if(!active||!tagInput.trim())return;const tags=[...new Set([...(active.tags||[]),tagInput.trim().replace(/^#/,'')])];setTagInput('');savePatch(active.id,{tags},true);};
+  const addTag=()=>{if(!active||!tagInput.trim())return;const tags=[...new Set([...toTags(active.tags),tagInput.trim().replace(/^#/,'')])];setTagInput('');savePatch(active.id,{tags},true);};
   const insertChecklist=()=>cmd('insertHTML','<ul data-checklist="1"><li>☐ New task</li></ul>');
   const exportNote=()=>{if(!active)return;const blob=new Blob([`${active.title}\n\n${active.plain_text||''}`],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(active.title||'note').replace(/[^a-z0-9_-]+/gi,'_')+'.txt';a.click();URL.revokeObjectURL(a.href);};
-  const words=(active?.plain_text||'').trim()?active.plain_text.trim().split(/\s+/).length:0;
-  return html`<div style=${{height:'100%',display:'grid',gridTemplateColumns:'310px 1fr',background:'var(--bg)',overflow:'hidden'}}>
-    <aside style=${{borderRight:'1px solid var(--bd)',background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))',display:'flex',flexDirection:'column',minWidth:0}}>
-      <div style=${{padding:16,borderBottom:'1px solid var(--bd)'}}>
-        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:12}}><div><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)'}}>Notes</div><div style=${{fontSize:11,color:'var(--tx3)'}}>Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${createNote}>＋</button></div>
-        <input class="inp" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." style=${{width:'100%'}}/>
-        <div style=${{display:'flex',gap:8,marginTop:10}}><button class=${'btn '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
+  const words=(active&&active.plain_text||'').trim()?(active.plain_text||'').trim().split(/\s+/).length:0;
+  return html`<div class="notes-page">
+    <style>${`
+      .notes-page{height:100%;display:grid;grid-template-columns:310px 1fr;background:var(--bg);overflow:hidden;color:var(--tx)}
+      .notes-sidebar{border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--sf),rgba(255,255,255,.02));display:flex;flex-direction:column;min-width:0}
+      .notes-head{padding:16px;border-bottom:1px solid var(--bd)}
+      .notes-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+      .notes-title{font-size:20px;font-weight:950;color:var(--tx)}
+      .notes-sub{font-size:11px;color:var(--tx3)}
+      .notes-tabs{display:flex;gap:8px;margin-top:10px}
+      .notes-list{padding:10px;overflow:auto;display:flex;flex-direction:column;gap:8px}
+      .notes-card{text-align:left;border:1px solid var(--bd);background:var(--sf2);border-radius:16px;padding:12px;cursor:pointer;color:var(--tx)}
+      .notes-card.active{border-color:var(--ac);background:var(--ac3)}
+      .notes-card.pinned{box-shadow:0 0 0 1px var(--note-color,#facc15)}
+      .notes-card-top{display:flex;gap:8px;align-items:center}.notes-dot{width:10px;height:10px;border-radius:99px;background:var(--note-color,#facc15);flex-shrink:0}
+      .notes-card-title{font-size:13px;font-weight:900;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notes-card-text{font-size:11px;color:var(--tx3);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .notes-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.notes-tag{font-size:10px;padding:2px 7px;border-radius:99px;background:var(--sf);color:var(--tx2);border:1px solid var(--bd)}
+      .notes-main{min-width:0;display:flex;flex-direction:column;overflow:hidden}.notes-toolbar{padding:14px 18px;border-bottom:1px solid var(--bd);background:var(--sf);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+      .notes-saved{margin-left:auto;font-size:11px;color:var(--tx3)}.notes-meta{padding:16px 22px;border-bottom:1px solid var(--bd);display:grid;grid-template-columns:1fr 180px 180px;gap:10px;background:var(--bg)}
+      .notes-title-input{font-size:24px!important;font-weight:950!important;height:46px!important}.notes-format{padding:10px 18px;border-bottom:1px solid var(--bd);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--sf)}
+      .notes-color{width:22px;height:22px;border-radius:99px;border:1px solid var(--bd);cursor:pointer;background:var(--note-color,#facc15)}.notes-color.active{border:2px solid var(--tx)}
+      .notes-tagbar{padding:12px 22px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--bd);flex-wrap:wrap}.notes-editor-wrap{flex:1;overflow:auto;padding:24px;background:linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))}
+      .notes-editor{min-height:100%;max-width:980px;margin:0 auto;padding:28px;border-radius:24px;background:var(--sf);border:1px solid var(--bd);box-shadow:0 18px 60px rgba(0,0,0,.16);color:var(--tx);font-size:15px;line-height:1.8;outline:none}
+      .notes-empty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--tx3)}.notes-empty-list{padding:28px;text-align:center;color:var(--tx3)}
+      @media(max-width:900px){.notes-page{grid-template-columns:1fr}.notes-sidebar{max-height:260px}.notes-meta{grid-template-columns:1fr}.notes-saved{margin-left:0}}
+    `}</style>
+    <aside class="notes-sidebar">
+      <div class="notes-head">
+        <div class="notes-title-row"><div><div class="notes-title">Notes</div><div class="notes-sub">Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${createNote}>＋</button></div>
+        <input class="inp" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." />
+        <div class="notes-tabs"><button class=${'btn '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
       </div>
-      <div style=${{padding:10,overflow:'auto',display:'flex',flexDirection:'column',gap:8}}>
-        ${filtered.length?filtered.map(n=>html`<button key=${n.id} onClick=${()=>setActiveId(n.id)} style=${{textAlign:'left',border:'1px solid '+(active&&active.id===n.id?'var(--ac)':'var(--bd)'),background:active&&active.id===n.id?'var(--ac3)':'var(--sf2)',borderRadius:16,padding:12,cursor:'pointer',boxShadow:n.pinned?'0 0 0 1px '+(n.color||'#facc15'):'none'}}>
-          <div style=${{display:'flex',gap:8,alignItems:'center'}}><span style=${{width:10,height:10,borderRadius:99,background:n.color||'#facc15',flexShrink:0}}></span><div style=${{fontSize:13,fontWeight:900,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${n.pinned?'📌 ':''}${n.title||'Untitled note'}</div></div>
-          <div style=${{fontSize:11,color:'var(--tx3)',marginTop:5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${n.plain_text||'No content yet'}</div>
-          <div style=${{display:'flex',gap:5,flexWrap:'wrap',marginTop:8}}>${(n.tags||[]).slice(0,3).map(t=>html`<span style=${{fontSize:10,padding:'2px 7px',borderRadius:99,background:'var(--sf)',color:'var(--tx2)',border:'1px solid var(--bd)'}}>#${t}</span>`)}</div>
-        </button>`):html`<div style=${{padding:28,textAlign:'center',color:'var(--tx3)'}}>No notes found.</div>`}
+      <div class="notes-list">
+        ${filtered.length?filtered.map(n=>html`<button key=${n.id} class=${'notes-card '+((active&&active.id===n.id)?'active ':'')+(n.pinned?'pinned':'')} style=${{'--note-color':n.color||'#facc15'}} onClick=${()=>setActiveId(n.id)}>
+          <div class="notes-card-top"><span class="notes-dot"></span><div class="notes-card-title">${n.pinned?'📌 ':''}${n.title||'Untitled note'}</div></div>
+          <div class="notes-card-text">${n.plain_text||'No content yet'}</div>
+          <div class="notes-tags">${toTags(n.tags).slice(0,3).map(t=>html`<span class="notes-tag">#${t}</span>`)}</div>
+        </button>`):html`<div class="notes-empty-list">No notes found.</div>`}
       </div>
     </aside>
-    <main style=${{minWidth:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
-      ${active?html`<div style=${{padding:'14px 18px',borderBottom:'1px solid var(--bd)',background:'var(--sf)',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+    <main class="notes-main">
+      ${active?html`<div class="notes-toolbar">
         <button class="btn" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌 Pinned':'📍 Pin'}</button><button class="btn" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★ Favorite':'☆ Favorite'}</button><button class="btn" onClick=${()=>savePatch(active.id,{archived:active.archived?0:1},true)}>${active.archived?'Unarchive':'Archive'}</button>
-        <button class="btn" onClick=${exportNote}>Export</button><button class="btn danger" onClick=${deleteActive}>Delete</button><span style=${{marginLeft:'auto',fontSize:11,color:'var(--tx3)'}}>${saving?'Saving…':'Saved'} · ${words} words</span>
+        <button class="btn" onClick=${exportNote}>Export</button><button class="btn danger" onClick=${deleteActive}>Delete</button><span class="notes-saved">${saving?'Saving…':'Saved'} · ${words} words</span>
       </div>
-      <div style=${{padding:'16px 22px',borderBottom:'1px solid var(--bd)',display:'grid',gridTemplateColumns:'1fr 180px 180px',gap:10,background:'var(--bg)'}}>
-        <input class="inp" value=${active.title||''} onInput=${e=>savePatch(active.id,{title:e.target.value})} placeholder="Note title" style=${{fontSize:24,fontWeight:950,height:46}}/>
-        <input class="inp" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} placeholder="Notebook" list="note-books"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}/>` )}</datalist>
+      <div class="notes-meta">
+        <input class="inp notes-title-input" value=${active.title||''} onInput=${e=>savePatch(active.id,{title:e.target.value})} placeholder="Note title" />
+        <input class="inp" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} placeholder="Notebook" list="note-books"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}></option>` )}</datalist>
         <input class="inp" value=${active.section||''} onInput=${e=>savePatch(active.id,{section:e.target.value})} placeholder="Section"/>
       </div>
-      <div style=${{padding:'10px 18px',borderBottom:'1px solid var(--bd)',display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',background:'var(--sf)'}}>
+      <div class="notes-format">
         ${['bold','italic','underline'].map(c=>html`<button class="btn" onClick=${()=>cmd(c)}>${c[0].toUpperCase()}</button>`)}<button class="btn" onClick=${()=>cmd('formatBlock','h2')}>H2</button><button class="btn" onClick=${()=>cmd('insertUnorderedList')}>• List</button><button class="btn" onClick=${()=>cmd('insertOrderedList')}>1. List</button><button class="btn" onClick=${insertChecklist}>☐ Checklist</button><button class="btn" onClick=${()=>cmd('insertHorizontalRule')}>Line</button>
-        ${colors.map(c=>html`<button title=${c} onClick=${()=>savePatch(active.id,{color:c},true)} style=${{width:22,height:22,borderRadius:99,border:active.color===c?'2px solid var(--tx)':'1px solid var(--bd)',background:c,cursor:'pointer'}}></button>`)}
+        ${colors.map(c=>html`<button title=${c} class=${'notes-color '+(active.color===c?'active':'')} style=${{'--note-color':c}} onClick=${()=>savePatch(active.id,{color:c},true)}></button>`)}
       </div>
-      <div style=${{padding:'12px 22px',display:'flex',gap:8,alignItems:'center',borderBottom:'1px solid var(--bd)'}}>${(active.tags||[]).map(t=>html`<button class="btn" onClick=${()=>savePatch(active.id,{tags:(active.tags||[]).filter(x=>x!==t)},true)}>#${t} ×</button>`)}<input class="inp" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag and press Enter" style=${{maxWidth:220}}}/><button class="btn" onClick=${addTag}>Add tag</button></div>
-      <div style=${{flex:1,overflow:'auto',padding:24,background:'linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))'}}>
-        <div ref=${editorRef} contentEditable suppressContentEditableWarning onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML})} style=${{minHeight:'100%',maxWidth:980,margin:'0 auto',padding:28,borderRadius:24,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 18px 60px rgba(0,0,0,.16)',color:'var(--tx)',fontSize:15,lineHeight:1.8,outline:'none'}}></div>
-      </div>`:html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--tx3)'}}><button class="btn bp" onClick=${createNote}>Create your first note</button></div>`}
+      <div class="notes-tagbar">${toTags(active.tags).map(t=>html`<button class="btn" onClick=${()=>savePatch(active.id,{tags:toTags(active.tags).filter(x=>x!==t)},true)}>#${t} ×</button>`)}<input class="inp" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag and press Enter"/><button class="btn" onClick=${addTag}>Add tag</button></div>
+      <div class="notes-editor-wrap"><div ref=${editorRef} class="notes-editor" contentEditable=${true} suppressContentEditableWarning=${true} onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML})}></div></div>`:html`<div class="notes-empty"><button class="btn bp" onClick=${createNote}>Create your first note</button></div>`}
     </main>
   </div>`;
 }
