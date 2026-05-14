@@ -2314,7 +2314,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, content TEXT,
                 user_id TEXT, read INTEGER DEFAULT 0, ts TEXT,
-                entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '',
+                sender_id TEXT DEFAULT '', entity_id TEXT DEFAULT '', entity_type TEXT DEFAULT '',
                 followup_sent INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS reminders (
                 id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT,
@@ -4200,8 +4200,8 @@ def meet_notify():
         msg = f"📹 {cname} is calling you — click to join the meeting"
         try:
             db.execute(
-                "INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                (nid, wid(), "call", msg, target_id, 0, ts(), session["user_id"]))
+                "INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (nid, wid(), "call", msg, target_id, 0, ts(), session["user_id"], session["user_id"], "dm"))
         except:
             db.execute(
                 "INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
@@ -5800,8 +5800,8 @@ def create_google_meet_call():
             with get_db() as db2:
                 nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
                 try:
-                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                                (nid, ws_id, "call", f"{sender_name} is calling you", target_id, 0, now, me))
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (nid, ws_id, "call", f"{sender_name} is calling you", target_id, 0, now, me, me, "dm"))
                 except Exception:
                     db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                                 (nid, ws_id, "call", f"{sender_name} is calling you", target_id, 0, now))
@@ -6174,8 +6174,8 @@ def send_dm():
         try:
             with get_db(autocommit=True) as db2:
                 try:
-                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id) VALUES (?,?,?,?,?,?,?,?)",
-                               (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me))
+                    db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                               (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me,me,"dm"))
                 except Exception:
                     db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))

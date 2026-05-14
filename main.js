@@ -5056,9 +5056,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     dmRecentSendRef.current={key:sendKey,at:Date.now()};
     const clientMsgId='cmid_'+cu.id+'_'+Date.now()+'_'+Math.random().toString(16).slice(2);
     const tempId='tmpdm'+Date.now();
-    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:false,_instant:true};
+    const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true,_instant:true};
     setTxt('');setReplyTo(null);
-    setSending(false);
+    setSending(true);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -5376,7 +5376,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…')):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m._pending?' · Sending…':(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…'))):'')+(m.edited?' · edited':''))}</span>`:null}
             </div>
           </div>`;})}
       </div>
@@ -9373,32 +9373,44 @@ function App(){
     }catch(e){}
   },[]);
   const routeToNotification=useCallback((n={})=>{
-    const type=String(n.type||'').toLowerCase();
-    const entityType=String(n.entity_type||n.kind||'').toLowerCase();
-    const entityId=n.entity_id||n.task_id||n.project_id||n.ticket_id||n.id_ref||n.target_id||'';
-    const senderId=n.sender_id||n.sender||n.from_user_id||n.user_id||'';
-    const dmPeer=n.peer_id||n.dm_user_id||senderId;
-    if(type==='dm'||type==='direct_message'||type==='call'||entityType==='dm'||entityType==='direct_message'){
+    const s=v=>String(v||'').trim();
+    const low=v=>s(v).toLowerCase();
+    const type=low(n.type);
+    const entityType=low(n.entity_type||n.kind||n.target_type||n.notification_type);
+    const content=low(n.content||n.body||n.title);
+    const rawEntityId=s(n.entity_id||n.target_id||n.id_ref||'');
+    const taskId=s(n.task_id||(entityType==='task'?rawEntityId:''));
+    const projectId=s(n.project_id||(entityType==='project'?rawEntityId:''));
+    const ticketId=s(n.ticket_id||(entityType==='ticket'?rawEntityId:''));
+    const messageProjectId=s(n.project_id||(entityType==='message'||entityType==='channel'?rawEntityId:''));
+    const dmPeer=s(n.peer_id||n.dm_user_id||n.sender_id||n.from_user_id||n.sender||(entityType==='dm'||entityType==='direct_message'||entityType==='call'?rawEntityId:''));
+    const isDm=type==='dm'||type==='direct_message'||type==='direct-message'||entityType==='dm'||entityType==='direct_message'||entityType==='direct-message'||content.includes('direct message');
+    const isCall=type==='call'||type==='video_call'||type==='meet_call'||entityType==='call'||entityType==='video_call'||content.includes('calling you')||content.includes('video call');
+    if(isDm||isCall){
       if(dmPeer)setDmTargetUser(String(dmPeer));
       _setView('dm');
       return;
     }
-    if(entityType==='task'||['task_assigned','status_change','comment','deadline','reminder'].includes(type)){
-      if(entityId)setInitialTaskId(String(entityId));
+    const finalTaskId=taskId||(['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated'].includes(type)?rawEntityId:'');
+    if(entityType==='task'||finalTaskId||['task_assigned','status_change','comment','deadline','task_updated','task.created','task.updated'].includes(type)){
+      if(finalTaskId)setInitialTaskId(String(finalTaskId));
       _setView('tasks');
       return;
     }
-    if(entityType==='ticket'||type==='ticket'||type==='ticket_assigned'||String(n.content||'').trim().startsWith('🎫')){
-      if(entityId)setInitialTicketId(String(entityId));
+    const finalTicketId=ticketId||(['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)?rawEntityId:'');
+    if(entityType==='ticket'||finalTicketId||type==='ticket'||type==='ticket_assigned'||type==='ticket_updated'||content.startsWith('🎫')){
+      if(finalTicketId)setInitialTicketId(String(finalTicketId));
       _setView('tickets');
       return;
     }
-    if(entityType==='project'||type==='project_added'||type==='project_updated'){
-      if(entityId)setInitialProjectId(String(entityId));
+    const finalProjectId=projectId||(['project_added','project_updated','project.created','project.updated'].includes(type)?rawEntityId:'');
+    if(entityType==='project'||finalProjectId||type==='project_added'||type==='project_updated'){
+      if(finalProjectId)setInitialProjectId(String(finalProjectId));
       _setView('projects');
       return;
     }
     if(entityType==='message'||entityType==='channel'||type==='message'||type==='channel_message'||type==='project_message'){
+      try{ if(messageProjectId) sessionStorage.setItem('pt_open_project_message', String(messageProjectId)); }catch(_e){}
       _setView('messages');
       return;
     }
@@ -10013,22 +10025,7 @@ function App(){
           addToast(n.type,title,n.content||'');
           showBrowserNotif(title,n.content||'',()=>{
             window.focus();
-            if(n.type==='dm'){
-              const sid=n.entity_id||n.sender_id||n.sender;
-              if(sid)setDmTargetUser(sid);
-              _setView('dm');
-            }
-            else if(n.entity_id && n.entity_type==='task'){
-              _setView('tasks');
-              setTimeout(() => {const el=document.querySelector(`[data-task-id="${n.entity_id}"]`);if(el)el.click();},100);
-            }
-            else if(n.entity_id && n.entity_type==='project'){setActiveProject(n.entity_id);_setView('projects');}
-            else if(n.entity_id && n.entity_type==='ticket'){
-              _setView('tickets');
-              setTimeout(() => {const el=document.querySelector(`[data-ticket-id="${n.entity_id}"]`);if(el)el.click();},100);
-            }
-            else if(n.entity_type==='message' && n.entity_id){setActiveProject(n.entity_id);_setView('messages');}
-            else{_setView(nav);}
+            routeToNotification(n);
           },{tag:'notif-'+n.id});
           playSound('notif');
         });
