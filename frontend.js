@@ -4596,6 +4596,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const contentKey=[m.sender,m.recipient,content,m.reply_to||''].join('|');
       const prev=contentSeen.get(contentKey);
       if(!isCall&&prev&&Math.abs(t-(Date.parse(prev.ts||'')||0))<8000){
+        // Prefer confirmed messages over pending/optimistic ones to fix stuck "Sending..." bug
+        if(prev._pending&&!m._pending&&!String(id).startsWith('tmpdm')){
+          const prevIdx=out.indexOf(prev);
+          if(prevIdx>=0){out[prevIdx]=m;}
+          contentSeen.set(contentKey,m);
+          if(prev.id)byId.delete(String(prev.id));
+          if(id)byId.set(id,m);
+        }
         continue;
       }
       contentSeen.set(contentKey,m);
@@ -5307,7 +5315,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m._pending?' · Sending…':(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…'))):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:3,margin:'0 2px'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe&&m._pending?' · Sending…':'')+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed&&m.read?html`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.85}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:null}</div>`:null}
             </div>
           </div>`;})}
       </div>

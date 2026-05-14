@@ -4701,6 +4701,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       const contentKey=[m.sender,m.recipient,content,m.reply_to||''].join('|');
       const prev=contentSeen.get(contentKey);
       if(!isCall&&prev&&Math.abs(t-(Date.parse(prev.ts||'')||0))<8000){
+        // Prefer confirmed messages over pending/optimistic ones to fix stuck "Sending..." bug
+        if(prev._pending&&!m._pending&&!String(id).startsWith('tmpdm')){
+          const prevIdx=out.indexOf(prev);
+          if(prevIdx>=0){out[prevIdx]=m;}
+          contentSeen.set(contentKey,m);
+          if(prev.id)byId.delete(String(prev.id));
+          if(id)byId.set(id,m);
+        }
         continue;
       }
       contentSeen.set(contentKey,m);
@@ -4886,24 +4894,33 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       dmPollBusy=true;
       try{
         const requestedTo=toId;
-        const cached=threadCache.current.get(requestedTo)||[];
-        const lastMsg=cached.length?cached[cached.length-1]:null;
-        const sinceParam=lastMsg&&lastMsg.ts?'?since='+new Date(lastMsg.ts).getTime():'';
+        // Read cache BEFORE await for sinceParam, but re-read AFTER await for merging
+        // to avoid stale snapshots causing confirmed messages to vanish.
+        const cachedAtStart=threadCache.current.get(requestedTo)||[];
+        const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
+        const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
         const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
         if(requestedTo!==activeToRef.current)return;
         if(Array.isArray(d)){
           if(sinceParam&&d.length===0)return;
-          const seen=new Set(cached.map(m=>m.id));
-          const merged=sinceParam?mergePendingReactionState(requestedTo,[...cached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
+          // Use freshCached (post-await) so confirmed messages written during network roundtrip are included
+          const freshCached=threadCache.current.get(requestedTo)||[];
+          const seen=new Set(freshCached.map(m=>m.id));
+          const merged=sinceParam?mergePendingReactionState(requestedTo,[...freshCached,...d.filter(m=>!seen.has(m.id))]):mergePendingReactionState(requestedTo,d);
           setMsgThreadId(requestedTo);
           setThreadMessages(requestedTo,merged,false);
           setLoadingThread('');
           setMsgs(prev=>{
-            if(merged.length>prev.length){
-              const added=merged.slice(prev.length);
-              if(added.some(m=>m.sender!==cu.id))playSound('notif');
+            // Preserve any _pending/_failed/tmpdm from React state not yet in merged
+            const prevArr=Array.isArray(prev)?prev:[];
+            const mergedIds=new Set(merged.map(m=>m.id));
+            const extraPending=prevArr.filter(m=>!mergedIds.has(m.id)&&(m._pending||m._failed||String(m.id||'').startsWith('tmpdm')));
+            const final=extraPending.length?normalizeDmList([...merged,...extraPending]):merged;
+            if(final.length>prevArr.length){
+              const added=final.slice(prevArr.length);
+              if(added.some(m=>String(m.sender)!==String(cu.id)))playSound('notif');
             }
-            return merged;
+            return final;
           });
           onDmRead(requestedTo);
         }
@@ -5377,7 +5394,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace',margin:'0 2px'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe?(m._pending?' · Sending…':(m.read?' · Read ✓✓':((m.delivered_at||!String(m.id||'').startsWith('tmpdm'))?' · Delivered ✓':' · Sending…'))):'')+(m.edited?' · edited':''))}</span>`:null}
+              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:3,margin:'0 2px'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe&&m._pending?' · Sending…':'')+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed&&m.read?html`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.85}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:null}</div>`:null}
             </div>
           </div>`;})}
       </div>
@@ -9432,7 +9449,7 @@ function App(){
     if(!ticketId&&['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)) ticketId=rawEntityId;
     if(!ticketId){const tk=byName(tickets,['title','subject','name']); if(tk)ticketId=String(tk.id);}
     if(entityType==='ticket'||ticketId||['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)||contentLow.includes('ticket')||content.startsWith('🎫')){
-      if(ticketId)setInitialTicketId(String(ticketId));
+      if(ticketId){try{setInitialTicketId(String(ticketId));}catch(_){}}
       _setView('tickets');
       return;
     }
@@ -10282,35 +10299,13 @@ function App(){
           notifs=${data.notifs}
           activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx}
           onNotifClick=${async n=>{
-            // Mark read + DELETE from panel immediately (natural notification behaviour)
+            // Mark read + DELETE from panel immediately
             api.put('/api/notifications/'+n.id+'/read',{}).catch(()=>{});
             api.del('/api/notifications/'+n.id).catch(()=>{});
-            // Remove from local state instantly — panel clears without waiting for reload
+            // Remove from local state instantly
             setData(prev=>({...prev,notifs:prev.notifs.filter(x=>x.id!==n.id)}));
-            const nav={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
-            const dest=nav[n.type]||'notifs';
-            // DM: open sender's chat thread
-            if(n.type==='dm'||n.type==='message'){
-              const senderId=n.sender_id||n.sender||null;
-              if(senderId)setDmTargetUser(senderId);
-            }
-            // Call: open Google Meet launcher directly
-            if(n.type==='call'){
-              const senderId=n.sender_id||n.sender||null;
-              if(senderId){
-                const callerUser=data.users.find(u=>u.id===senderId);
-                if(senderId)setDmTargetUser(senderId);
-              }
-            }
-            // Deep-link: route directly to the specific task or project
-            if(n.entity_id&&n.entity_type==='task'){
-              setInitialTaskId(n.entity_id);
-            } else if(n.entity_id&&n.entity_type==='project'){
-              setInitialProjectId(n.entity_id);
-            } else if(n.entity_id&&n.entity_type==='ticket'){
-              setInitialTaskId(null); // tickets view opens normally
-            }
-            setView(dest);
+            // Use deep notification router — handles all types with entity deep-linking
+            routeToNotification(n);
           }}
           onMarkAllRead=${async()=>{setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));await api.put('/api/notifications/read-all',{});load();}}
           onClearAll=${async()=>{await api.del('/api/notifications/all');load();}}
