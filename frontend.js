@@ -6359,11 +6359,14 @@ function NotesView({cu}){
   const [saving,setSaving]=useState(false);
   const [archived,setArchived]=useState(false);
   const [tagInput,setTagInput]=useState('');
+  const [toolsOpen,setToolsOpen]=useState(false);
+  const [viewMode,setViewMode]=useState('focus');
   const editorRef=useRef(null);
   const saveTimer=useRef(null);
-  const colors=['#facc15','#60a5fa','#34d399','#f472b6','#fb923c','#a78bfa','#f87171','#22d3ee'];
+  const colors=['#facc15','#60a5fa','#34d399','#f472b6','#fb923c','#a78bfa','#f87171','#22d3ee','#ffffff','#111827'];
   const toTags=(v)=>Array.isArray(v)?v:(typeof v==='string'?v.split(',').map(x=>x.trim()).filter(Boolean):[]);
-  const normalizeNote=(n)=>({...n,tags:toTags(n&&n.tags),title:(n&&n.title)||'Untitled note',body:(n&&n.body)||'',plain_text:(n&&n.plain_text)||'',notebook:(n&&n.notebook)||'Quick Notes',section:(n&&n.section)||'General',color:(n&&n.color)||'#facc15'});
+  const stripHtml=(html='')=>{const d=document.createElement('div');d.innerHTML=html||'';return (d.textContent||d.innerText||'').trim();};
+  const normalizeNote=(n)=>({...n,tags:toTags(n&&n.tags),title:(n&&n.title)||'Untitled note',body:(n&&n.body)||'',plain_text:(n&&n.plain_text)||stripHtml((n&&n.body)||''),notebook:(n&&n.notebook)||'Quick Notes',section:(n&&n.section)||'General',color:(n&&n.color)||'#facc15'});
   const loadNotes=useCallback(async()=>{
     const d=await api.get('/api/notes'+(archived?'?archived=1':''),{quiet:true,timeoutMs:10000});
     if(Array.isArray(d)){
@@ -6384,79 +6387,93 @@ function NotesView({cu}){
     return !q||hay.includes(q.toLowerCase());
   });
   const notebooks=[...new Set(notes.map(n=>n.notebook||'Quick Notes'))];
+  const sections=[...new Set(notes.map(n=>n.section||'General'))];
   const updateLocal=(id,patch)=>setNotes(prev=>prev.map(n=>n.id===id?normalizeNote({...n,...patch,updated:new Date().toISOString()}):n));
   const savePatch=(id,patch,instant=false)=>{
+    if(!id)return;
     updateLocal(id,patch);
     clearTimeout(saveTimer.current);
     const run=async()=>{try{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:10000});}finally{setSaving(false);}};
-    if(instant)run();else saveTimer.current=setTimeout(run,550);
+    if(instant)run();else saveTimer.current=setTimeout(run,450);
   };
-  const createNote=async()=>{
-    const d=await api.post('/api/notes',{title:'Untitled note',body:'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});
+  const createNote=async(template='blank')=>{
+    const templates={
+      blank:'',
+      meeting:'<h2>Meeting notes</h2><p><b>Agenda</b></p><ul><li></li></ul><p><b>Decisions</b></p><ul><li></li></ul><p><b>Action items</b></p><ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> Follow up</label></li></ul>',
+      daily:'<h2>Daily plan</h2><ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> Top priority</label></li><li><label><input type="checkbox" class="note-check"> Blocker</label></li></ul><p><b>Notes</b></p><p></p>',
+      idea:'<h2>Idea</h2><p><b>Problem:</b></p><p><b>Solution:</b></p><p><b>Next step:</b></p>'
+    };
+    const d=await api.post('/api/notes',{title:template==='blank'?'Untitled note':template[0].toUpperCase()+template.slice(1)+' note',body:templates[template]||'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});
     await loadNotes();
     if(d&&d.id)setActiveId(d.id);
   };
-  const deleteActive=async()=>{if(!active)return;if(!confirm('Delete this note permanently?'))return;await api.del('/api/notes/'+active.id);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(null);};
-  const cmd=(c,v=null)=>{document.execCommand(c,false,v);if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML});};
+  const duplicateActive=async()=>{if(!active)return;const d=await api.post('/api/notes',{title:(active.title||'Untitled note')+' copy',body:active.body||'',notebook:active.notebook,section:active.section,color:active.color,tags:toTags(active.tags)},{quiet:true});await loadNotes();if(d&&d.id)setActiveId(d.id);};
+  const deleteActive=async()=>{if(!active)return;if(!confirm('Delete this note permanently?'))return;await api.del('/api/notes/'+active.id,{quiet:true});const next=notes.find(n=>n.id!==active.id);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(next?next.id:null);};
+  const focusEditor=()=>{if(editorRef.current)editorRef.current.focus();};
+  const saveEditorNow=()=>{if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML,plain_text:stripHtml(editorRef.current.innerHTML)});};
+  const cmd=(c,v=null)=>{focusEditor();document.execCommand(c,false,v);saveEditorNow();};
+  const applyTextColor=(c)=>cmd('foreColor',c);
+  const applyHighlight=(c)=>cmd('backColor',c);
   const addTag=()=>{if(!active||!tagInput.trim())return;const tags=[...new Set([...toTags(active.tags),tagInput.trim().replace(/^#/,'')])];setTagInput('');savePatch(active.id,{tags},true);};
-  const insertChecklist=()=>cmd('insertHTML','<ul data-checklist="1"><li>☐ New task</li></ul>');
-  const exportNote=()=>{if(!active)return;const blob=new Blob([`${active.title}\n\n${active.plain_text||''}`],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(active.title||'note').replace(/[^a-z0-9_-]+/gi,'_')+'.txt';a.click();URL.revokeObjectURL(a.href);};
-  const words=(active&&active.plain_text||'').trim()?(active.plain_text||'').trim().split(/\s+/).length:0;
-  return html`<div class="notes-page">
+  const insertChecklist=()=>cmd('insertHTML','<ul data-checklist="1"><li><label><input type="checkbox" class="note-check"> New task</label></li></ul>');
+  const insertCallout=()=>cmd('insertHTML','<blockquote class="note-callout">💡 Important note</blockquote>');
+  const exportNote=()=>{if(!active)return;const blob=new Blob([`${active.title}\n\n${stripHtml(active.body||'')}`],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(active.title||'note').replace(/[^a-z0-9_-]+/gi,'_')+'.txt';a.click();URL.revokeObjectURL(a.href);};
+  const onEditorClick=(e)=>{if(e.target&&e.target.classList&&e.target.classList.contains('note-check')){setTimeout(()=>{if(e.target.checked)e.target.setAttribute('checked','checked');else e.target.removeAttribute('checked');saveEditorNow();},0);}};
+  const onEditorKeyDown=(e)=>{if(e.ctrlKey&&e.key.toLowerCase()==='s'){e.preventDefault();saveEditorNow();}if(e.ctrlKey&&e.key.toLowerCase()==='b'){e.preventDefault();cmd('bold');}if(e.ctrlKey&&e.key.toLowerCase()==='i'){e.preventDefault();cmd('italic');}};
+  const words=(active&&stripHtml(active.body||active.plain_text||'')||'').trim()?(stripHtml(active.body||active.plain_text||'')).trim().split(/\s+/).length:0;
+  const doneCount=active&&editorRef.current?editorRef.current.querySelectorAll('.note-check:checked').length:0;
+  const taskCount=active&&editorRef.current?editorRef.current.querySelectorAll('.note-check').length:0;
+  return html`<div class=${'notes-page '+(viewMode==='wide'?'wide':'focus')}>
     <style>${`
-      .notes-page{height:100%;display:grid;grid-template-columns:310px 1fr;background:var(--bg);overflow:hidden;color:var(--tx)}
-      .notes-sidebar{border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--sf),rgba(255,255,255,.02));display:flex;flex-direction:column;min-width:0}
-      .notes-head{padding:16px;border-bottom:1px solid var(--bd)}
-      .notes-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
-      .notes-title{font-size:20px;font-weight:950;color:var(--tx)}
-      .notes-sub{font-size:11px;color:var(--tx3)}
-      .notes-tabs{display:flex;gap:8px;margin-top:10px}
-      .notes-list{padding:10px;overflow:auto;display:flex;flex-direction:column;gap:8px}
-      .notes-card{text-align:left;border:1px solid var(--bd);background:var(--sf2);border-radius:16px;padding:12px;cursor:pointer;color:var(--tx)}
-      .notes-card.active{border-color:var(--ac);background:var(--ac3)}
-      .notes-card.pinned{box-shadow:0 0 0 1px var(--note-color,#facc15)}
-      .notes-card-top{display:flex;gap:8px;align-items:center}.notes-dot{width:10px;height:10px;border-radius:99px;background:var(--note-color,#facc15);flex-shrink:0}
-      .notes-card-title{font-size:13px;font-weight:900;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notes-card-text{font-size:11px;color:var(--tx3);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .notes-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.notes-tag{font-size:10px;padding:2px 7px;border-radius:99px;background:var(--sf);color:var(--tx2);border:1px solid var(--bd)}
-      .notes-main{min-width:0;display:flex;flex-direction:column;overflow:hidden}.notes-toolbar{padding:14px 18px;border-bottom:1px solid var(--bd);background:var(--sf);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-      .notes-saved{margin-left:auto;font-size:11px;color:var(--tx3)}.notes-meta{padding:16px 22px;border-bottom:1px solid var(--bd);display:grid;grid-template-columns:1fr 180px 180px;gap:10px;background:var(--bg)}
-      .notes-title-input{font-size:24px!important;font-weight:950!important;height:46px!important}.notes-format{padding:10px 18px;border-bottom:1px solid var(--bd);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--sf)}
-      .notes-color{width:22px;height:22px;border-radius:99px;border:1px solid var(--bd);cursor:pointer;background:var(--note-color,#facc15)}.notes-color.active{border:2px solid var(--tx)}
-      .notes-tagbar{padding:12px 22px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--bd);flex-wrap:wrap}.notes-editor-wrap{flex:1;overflow:auto;padding:24px;background:linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))}
-      .notes-editor{min-height:100%;max-width:980px;margin:0 auto;padding:28px;border-radius:24px;background:var(--sf);border:1px solid var(--bd);box-shadow:0 18px 60px rgba(0,0,0,.16);color:var(--tx);font-size:15px;line-height:1.8;outline:none}
-      .notes-empty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--tx3)}.notes-empty-list{padding:28px;text-align:center;color:var(--tx3)}
-      @media(max-width:900px){.notes-page{grid-template-columns:1fr}.notes-sidebar{max-height:260px}.notes-meta{grid-template-columns:1fr}.notes-saved{margin-left:0}}
+      .notes-page{height:100%;display:grid;grid-template-columns:268px 1fr;background:var(--bg);overflow:hidden;color:var(--tx)}
+      .notes-page.wide{grid-template-columns:220px 1fr}.notes-sidebar{border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--sf),rgba(255,255,255,.02));display:flex;flex-direction:column;min-width:0}
+      .notes-head{padding:12px;border-bottom:1px solid var(--bd)}.notes-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.notes-title{font-size:18px;font-weight:950;color:var(--tx)}.notes-sub{font-size:10px;color:var(--tx3)}
+      .notes-quick{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.notes-tabs{display:flex;gap:6px;margin-top:8px}.notes-list{padding:8px;overflow:auto;display:flex;flex-direction:column;gap:7px}.notes-card{text-align:left;border:1px solid var(--bd);background:var(--sf2);border-radius:14px;padding:10px;cursor:pointer;color:var(--tx);transition:.15s}.notes-card:hover{transform:translateY(-1px);border-color:var(--ac)}.notes-card.active{border-color:var(--ac);background:var(--ac3)}.notes-card.pinned{box-shadow:0 0 0 1px var(--note-color,#facc15)}
+      .notes-card-top{display:flex;gap:7px;align-items:center}.notes-dot{width:9px;height:9px;border-radius:99px;background:var(--note-color,#facc15);flex-shrink:0}.notes-card-title{font-size:12px;font-weight:900;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notes-card-text{font-size:10px;color:var(--tx3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.notes-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}.notes-tag{font-size:9px;padding:1px 6px;border-radius:99px;background:var(--sf);color:var(--tx2);border:1px solid var(--bd)}
+      .notes-main{min-width:0;display:grid;grid-template-rows:auto 1fr;overflow:hidden}.notes-topbar{height:auto;min-height:54px;padding:8px 14px;border-bottom:1px solid var(--bd);background:var(--sf);display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:8px;align-items:center}.notes-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.notes-saved{font-size:10px;color:var(--tx3)}.notes-title-input{font-size:19px!important;font-weight:950!important;height:38px!important}.notes-mini{height:30px!important;font-size:11px!important;padding:0 10px!important}.notes-tools{grid-column:1/-1;display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--bd)}
+      .notes-color{width:19px;height:19px;border-radius:99px;border:1px solid var(--bd);cursor:pointer;background:var(--note-color,#facc15)}.notes-color.active{border:2px solid var(--tx)}.notes-tool-group{display:flex;gap:5px;align-items:center;padding:3px 6px;border:1px solid var(--bd);border-radius:999px;background:var(--bg)}.notes-tool-label{font-size:10px;color:var(--tx3)}
+      .notes-workspace{min-height:0;display:grid;grid-template-columns:1fr 240px;overflow:hidden}.notes-page.wide .notes-workspace{grid-template-columns:1fr 190px}.notes-panel{border-left:1px solid var(--bd);background:var(--sf);padding:10px;overflow:auto}.notes-panel h4{margin:8px 0 6px;font-size:11px;color:var(--tx3);text-transform:uppercase;letter-spacing:.08em}.notes-tagbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.notes-editor-wrap{overflow:auto;padding:18px;background:radial-gradient(circle at top right,rgba(124,58,237,.12),transparent 35%),linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))}.notes-editor{min-height:calc(100% - 12px);max-width:900px;margin:0 auto;padding:30px;border-radius:22px;background:var(--sf);border:1px solid var(--bd);box-shadow:0 18px 60px rgba(0,0,0,.18);color:var(--tx);font-size:15px;line-height:1.8;outline:none}.notes-editor:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--ac3),0 18px 60px rgba(0,0,0,.18)}.notes-editor h1,.notes-editor h2,.notes-editor h3{line-height:1.25}.notes-editor blockquote,.note-callout{border-left:4px solid var(--ac);background:var(--ac3);padding:10px 12px;border-radius:12px;margin:10px 0}.notes-editor input[type=checkbox]{width:16px;height:16px;vertical-align:middle;margin-right:8px;accent-color:var(--ac)}.notes-empty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--tx3)}.notes-empty-list{padding:24px;text-align:center;color:var(--tx3)}
+      @media(max-width:980px){.notes-page{grid-template-columns:1fr}.notes-sidebar{max-height:240px}.notes-workspace{grid-template-columns:1fr}.notes-panel{display:none}.notes-topbar{grid-template-columns:1fr}.notes-actions{justify-content:flex-start}}
     `}</style>
     <aside class="notes-sidebar">
       <div class="notes-head">
-        <div class="notes-title-row"><div><div class="notes-title">Notes</div><div class="notes-sub">Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${createNote}>＋</button></div>
-        <input class="inp" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." />
-        <div class="notes-tabs"><button class=${'btn '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
+        <div class="notes-title-row"><div><div class="notes-title">Notes</div><div class="notes-sub">Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${()=>createNote('blank')}>＋</button></div>
+        <input class="inp notes-mini" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." />
+        <div class="notes-quick"><button class="btn notes-mini" onClick=${()=>createNote('meeting')}>Meeting</button><button class="btn notes-mini" onClick=${()=>createNote('daily')}>Daily</button><button class="btn notes-mini" onClick=${()=>createNote('idea')}>Idea</button><button class="btn notes-mini" onClick=${()=>setViewMode(viewMode==='wide'?'focus':'wide')}>${viewMode==='wide'?'Focus':'Compact'}</button></div>
+        <div class="notes-tabs"><button class=${'btn notes-mini '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn notes-mini '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
       </div>
       <div class="notes-list">
         ${filtered.length?filtered.map(n=>html`<button key=${n.id} class=${'notes-card '+((active&&active.id===n.id)?'active ':'')+(n.pinned?'pinned':'')} style=${{'--note-color':n.color||'#facc15'}} onClick=${()=>setActiveId(n.id)}>
-          <div class="notes-card-top"><span class="notes-dot"></span><div class="notes-card-title">${n.pinned?'📌 ':''}${n.title||'Untitled note'}</div></div>
-          <div class="notes-card-text">${n.plain_text||'No content yet'}</div>
+          <div class="notes-card-top"><span class="notes-dot"></span><div class="notes-card-title">${n.pinned?'📌 ':''}${n.favorite?'★ ':''}${n.title||'Untitled note'}</div></div>
+          <div class="notes-card-text">${stripHtml(n.body||n.plain_text||'')||'No content yet'}</div>
           <div class="notes-tags">${toTags(n.tags).slice(0,3).map(t=>html`<span class="notes-tag">#${t}</span>`)}</div>
         </button>`):html`<div class="notes-empty-list">No notes found.</div>`}
       </div>
     </aside>
     <main class="notes-main">
-      ${active?html`<div class="notes-toolbar">
-        <button class="btn" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌 Pinned':'📍 Pin'}</button><button class="btn" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★ Favorite':'☆ Favorite'}</button><button class="btn" onClick=${()=>savePatch(active.id,{archived:active.archived?0:1},true)}>${active.archived?'Unarchive':'Archive'}</button>
-        <button class="btn" onClick=${exportNote}>Export</button><button class="btn danger" onClick=${deleteActive}>Delete</button><span class="notes-saved">${saving?'Saving…':'Saved'} · ${words} words</span>
-      </div>
-      <div class="notes-meta">
+      ${active?html`<div class="notes-topbar">
         <input class="inp notes-title-input" value=${active.title||''} onInput=${e=>savePatch(active.id,{title:e.target.value})} placeholder="Note title" />
-        <input class="inp" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} placeholder="Notebook" list="note-books"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}></option>` )}</datalist>
-        <input class="inp" value=${active.section||''} onInput=${e=>savePatch(active.id,{section:e.target.value})} placeholder="Section"/>
+        <div class="notes-actions">
+          <button class="btn notes-mini" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌':'📍'} Pin</button><button class="btn notes-mini" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★':'☆'}</button><button class="btn notes-mini" onClick=${()=>setToolsOpen(!toolsOpen)}>${toolsOpen?'Hide tools':'Tools'}</button><button class="btn notes-mini danger" onClick=${deleteActive}>Delete</button><span class="notes-saved">${saving?'Saving…':'Saved'} · ${words} words${taskCount?' · '+doneCount+'/'+taskCount+' done':''}</span>
+        </div>
+        ${toolsOpen?html`<div class="notes-tools">
+          <div class="notes-tool-group"><button class="btn notes-mini" onClick=${()=>cmd('bold')}>B</button><button class="btn notes-mini" onClick=${()=>cmd('italic')}>I</button><button class="btn notes-mini" onClick=${()=>cmd('underline')}>U</button><button class="btn notes-mini" onClick=${()=>cmd('formatBlock','h2')}>H2</button><button class="btn notes-mini" onClick=${()=>cmd('insertUnorderedList')}>•</button><button class="btn notes-mini" onClick=${()=>cmd('insertOrderedList')}>1.</button><button class="btn notes-mini" onClick=${insertChecklist}>☑</button><button class="btn notes-mini" onClick=${insertCallout}>Callout</button></div>
+          <div class="notes-tool-group"><span class="notes-tool-label">Text</span>${colors.slice(0,8).map(c=>html`<button title=${c} class="notes-color" style=${{'--note-color':c}} onClick=${()=>applyTextColor(c)}></button>`)}</div>
+          <div class="notes-tool-group"><span class="notes-tool-label">Highlight</span>${colors.slice(0,6).map(c=>html`<button title=${c} class="notes-color" style=${{'--note-color':c}} onClick=${()=>applyHighlight(c)}></button>`)}</div>
+          <div class="notes-tool-group"><span class="notes-tool-label">Note</span>${colors.slice(0,8).map(c=>html`<button title=${c} class=${'notes-color '+(active.color===c?'active':'')} style=${{'--note-color':c}} onClick=${()=>savePatch(active.id,{color:c},true)}></button>`)}</div>
+          <button class="btn notes-mini" onClick=${duplicateActive}>Duplicate</button><button class="btn notes-mini" onClick=${exportNote}>Export</button><button class="btn notes-mini" onClick=${()=>savePatch(active.id,{archived:active.archived?0:1},true)}>${active.archived?'Unarchive':'Archive'}</button>
+        </div>`:null}
       </div>
-      <div class="notes-format">
-        ${['bold','italic','underline'].map(c=>html`<button class="btn" onClick=${()=>cmd(c)}>${c[0].toUpperCase()}</button>`)}<button class="btn" onClick=${()=>cmd('formatBlock','h2')}>H2</button><button class="btn" onClick=${()=>cmd('insertUnorderedList')}>• List</button><button class="btn" onClick=${()=>cmd('insertOrderedList')}>1. List</button><button class="btn" onClick=${insertChecklist}>☐ Checklist</button><button class="btn" onClick=${()=>cmd('insertHorizontalRule')}>Line</button>
-        ${colors.map(c=>html`<button title=${c} class=${'notes-color '+(active.color===c?'active':'')} style=${{'--note-color':c}} onClick=${()=>savePatch(active.id,{color:c},true)}></button>`)}
-      </div>
-      <div class="notes-tagbar">${toTags(active.tags).map(t=>html`<button class="btn" onClick=${()=>savePatch(active.id,{tags:toTags(active.tags).filter(x=>x!==t)},true)}>#${t} ×</button>`)}<input class="inp" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag and press Enter"/><button class="btn" onClick=${addTag}>Add tag</button></div>
-      <div class="notes-editor-wrap"><div ref=${editorRef} class="notes-editor" contentEditable=${true} suppressContentEditableWarning=${true} onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML})}></div></div>`:html`<div class="notes-empty"><button class="btn bp" onClick=${createNote}>Create your first note</button></div>`}
+      <div class="notes-workspace">
+        <div class="notes-editor-wrap"><div ref=${editorRef} class="notes-editor" contentEditable=${true} suppressContentEditableWarning=${true} onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML,plain_text:stripHtml(e.currentTarget.innerHTML)})} onClick=${onEditorClick} onKeyDown=${onEditorKeyDown}></div></div>
+        <aside class="notes-panel">
+          <h4>Notebook</h4><input class="inp notes-mini" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} list="note-books" placeholder="Notebook"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}></option>` )}</datalist>
+          <h4>Section</h4><input class="inp notes-mini" value=${active.section||''} onInput=${e=>savePatch(active.id,{section:e.target.value})} list="note-sections" placeholder="Section"/><datalist id="note-sections">${sections.map(x=>html`<option value=${x}></option>` )}</datalist>
+          <h4>Tags</h4><div class="notes-tagbar">${toTags(active.tags).map(t=>html`<button class="btn notes-mini" onClick=${()=>savePatch(active.id,{tags:toTags(active.tags).filter(x=>x!==t)},true)}>#${t} ×</button>`)}</div><div style=${{display:'flex',gap:'6px',marginTop:'6px'}}><input class="inp notes-mini" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag"/><button class="btn notes-mini" onClick=${addTag}>Add</button></div>
+          <h4>Quick insert</h4><button class="btn notes-mini" onClick=${insertChecklist}>Checklist</button> <button class="btn notes-mini" onClick=${insertCallout}>Callout</button> <button class="btn notes-mini" onClick=${()=>cmd('insertHorizontalRule')}>Divider</button>
+          <h4>Shortcuts</h4><div class="notes-sub">Ctrl+S save · Ctrl+B bold · Ctrl+I italic · checkbox clicks are saved</div>
+        </aside>
+      </div>`:html`<div class="notes-empty"><button class="btn bp" onClick=${()=>createNote('blank')}>Create your first note</button></div>`}
     </main>
   </div>`;
 }
