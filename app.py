@@ -4224,7 +4224,9 @@ def me():
     try:
         import re as _re
         rows = _raw_pg(
-            "SELECT u.*, w.name as _ws_name, w.workspace_slug as _ws_slug "
+            "SELECT u.id,u.name,u.email,u.role,u.avatar,u.color,u.workspace_id,u.last_active,"
+            "u.two_fa_enabled,u.totp_verified,u.logged_out_at,"
+            "w.name as _ws_name, w.workspace_slug as _ws_slug "
             "FROM users u LEFT JOIN workspaces w ON w.id=u.workspace_id "
             "WHERE u.id=?",
             (uid,), fetch=True
@@ -4672,7 +4674,7 @@ def _fetch_app_data_from_db(ws, team_id, uid):
     with get_db(autocommit=True) as db:
         users = [dict(r) for r in db.execute(
             "SELECT id,name,email,role,avatar,color,workspace_id,last_active,"
-            "two_fa_enabled,totp_verified,avatar_data FROM users WHERE workspace_id=? ORDER BY name",
+            "two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",
             (ws,)
         ).fetchall()]
         projects = [dict(r) for r in db.execute(proj_sql, proj_params).fetchall()]
@@ -4814,18 +4816,33 @@ def get_app_data():
 
 
 def _appdata_cache_get(ws, uid, key):
-    """Try to read a specific key from the appdata cache (any team_id variant).
-    Returns (data, found). Used by lightweight polling endpoints to avoid
-    duplicate DB queries — if app-data is cached, sub-endpoints are free."""
-    # Try no-team variant first (most common), then any team variant
-    for suffix in ["", ":"] :
-        for ckey, entry in list(_CACHE.items()):
-            if ckey.startswith(f"appdata:{ws}:{uid}") and not entry.get("refreshing", False):
-                age = _time.time() - entry["ts"]
-                if age < _CACHE_STALE:
-                    val = entry["val"]
-                    if key in val:
-                        return val[key], True
+    """Read a single app-data field from Redis or local SWR cache.
+    This lets chat/notification/presence fallbacks return without opening a
+    separate DB connection immediately after /api/app-data has warmed cache.
+    """
+    prefix = f"appdata:{ws}:{uid}"
+    now = _time.time()
+    if _redis_client is not None:
+        try:
+            # no-team variant first, then any team-scoped cached payload
+            keys = [f"ptcache:{prefix}:"]
+            try: keys += list(_redis_client.scan_iter(f"ptcache:{prefix}:*", count=20))[:10]
+            except Exception: pass
+            for rk in keys:
+                raw = _redis_client.get(rk)
+                if not raw: continue
+                entry = _json.loads(raw)
+                if now - entry.get("ts", 0) < _CACHE_STALE and key in entry.get("val", {}):
+                    return entry["val"][key], True
+        except Exception:
+            pass
+    for ckey, entry in list(_CACHE.items()):
+        if ckey.startswith(prefix) and not entry.get("refreshing", False):
+            age = now - entry["ts"]
+            if age < _CACHE_STALE:
+                val = entry["val"]
+                if key in val:
+                    return val[key], True
     return None, False
 
 @app.route("/api/projects")
@@ -6858,6 +6875,111 @@ def unified_poll():
 
     return jsonify({"dm_unread": dm_unread, "notifications": notifs})
 
+
+
+# ── Notes ───────────────────────────────────────────────────────────────────
+def _ensure_notes_table():
+    with get_db() as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS notes (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            title TEXT DEFAULT '',
+            body TEXT DEFAULT '',
+            plain_text TEXT DEFAULT '',
+            notebook TEXT DEFAULT 'Quick Notes',
+            section TEXT DEFAULT 'General',
+            tags TEXT DEFAULT '[]',
+            color TEXT DEFAULT '#facc15',
+            pinned INTEGER DEFAULT 0,
+            favorite INTEGER DEFAULT 0,
+            archived INTEGER DEFAULT 0,
+            locked INTEGER DEFAULT 0,
+            created TEXT DEFAULT '',
+            updated TEXT DEFAULT ''
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notes_ws_user_updated ON notes(workspace_id,user_id,archived,updated)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notes_ws_user_pin ON notes(workspace_id,user_id,pinned,updated)")
+
+def _note_dict(r):
+    d=dict(r)
+    try: d['tags']=json.loads(d.get('tags') or '[]')
+    except Exception: d['tags']=[]
+    return d
+
+@app.route('/api/notes', methods=['GET'])
+@login_required
+def get_notes():
+    _ensure_notes_table()
+    ws, uid = wid(), session['user_id']
+    include_archived = request.args.get('archived') == '1'
+    q = (request.args.get('q') or '').strip().lower()
+    with get_db() as db:
+        if include_archived:
+            rows = db.execute("SELECT * FROM notes WHERE workspace_id=? AND user_id=? ORDER BY pinned DESC, updated DESC LIMIT 500", (ws, uid)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM notes WHERE workspace_id=? AND user_id=? AND archived=0 ORDER BY pinned DESC, updated DESC LIMIT 500", (ws, uid)).fetchall()
+    notes=[_note_dict(r) for r in rows]
+    if q:
+        notes=[n for n in notes if q in (n.get('title','')+' '+n.get('plain_text','')+' '+n.get('notebook','')+' '+n.get('section','')+' '+(' '.join(n.get('tags') or []))).lower()]
+    return jsonify(notes)
+
+@app.route('/api/notes', methods=['POST'])
+@login_required
+def create_note():
+    _ensure_notes_table()
+    ws, uid = wid(), session['user_id']
+    data = request.get_json(silent=True) or {}
+    now = ts()
+    nid = 'note' + str(int(time.time()*1000)) + secrets.token_hex(3)
+    title = (data.get('title') or 'Untitled note').strip()[:180]
+    body = data.get('body') or ''
+    plain = re.sub(r'<[^>]+>', ' ', body).replace('&nbsp;', ' ')
+    plain = re.sub(r'\s+', ' ', plain).strip()
+    tags = data.get('tags') if isinstance(data.get('tags'), list) else []
+    with get_db() as db:
+        db.execute("""INSERT INTO notes(id,workspace_id,user_id,title,body,plain_text,notebook,section,tags,color,pinned,favorite,archived,locked,created,updated)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            nid, ws, uid, title, body, plain, data.get('notebook') or 'Quick Notes', data.get('section') or 'General',
+            json.dumps(tags), data.get('color') or '#facc15', int(bool(data.get('pinned'))), int(bool(data.get('favorite'))),
+            int(bool(data.get('archived'))), int(bool(data.get('locked'))), now, now
+        ))
+    return jsonify({'ok': True, 'id': nid, 'created': now, 'updated': now})
+
+@app.route('/api/notes/<nid>', methods=['PUT'])
+@login_required
+def update_note(nid):
+    _ensure_notes_table()
+    ws, uid = wid(), session['user_id']
+    data = request.get_json(silent=True) or {}
+    now = ts()
+    allowed=['title','body','notebook','section','color','pinned','favorite','archived','locked']
+    sets=[]; vals=[]
+    if 'body' in data:
+        plain = re.sub(r'<[^>]+>', ' ', data.get('body') or '').replace('&nbsp;', ' ')
+        plain = re.sub(r'\s+', ' ', plain).strip()
+        sets.append('plain_text=?'); vals.append(plain)
+    for k in allowed:
+        if k in data:
+            sets.append(k+'=?')
+            vals.append(int(bool(data[k])) if k in ('pinned','favorite','archived','locked') else (data[k] or ''))
+    if 'tags' in data:
+        sets.append('tags=?'); vals.append(json.dumps(data.get('tags') if isinstance(data.get('tags'),list) else []))
+    if not sets:
+        return jsonify({'ok': True, 'updated': now})
+    sets.append('updated=?'); vals.append(now)
+    vals.extend([nid, ws, uid])
+    with get_db() as db:
+        db.execute('UPDATE notes SET '+','.join(sets)+' WHERE id=? AND workspace_id=? AND user_id=?', vals)
+    return jsonify({'ok': True, 'updated': now})
+
+@app.route('/api/notes/<nid>', methods=['DELETE'])
+@login_required
+def delete_note(nid):
+    _ensure_notes_table()
+    with get_db() as db:
+        db.execute('DELETE FROM notes WHERE id=? AND workspace_id=? AND user_id=?', (nid, wid(), session['user_id']))
+    return jsonify({'ok': True})
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 

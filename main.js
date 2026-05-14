@@ -1352,14 +1352,15 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
   const NAV_ICONS={
     dashboard:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`, projects:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`, tasks:        html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`, messages:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`, tickets:      html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M2 9a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.5a1.5 1.5 0 0 0 0 3V15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1.5a1.5 1.5 0 0 0 0-3V9z"/><line x1="9" y1="7" x2="9" y2="17" strokeDasharray="2 2"/></svg>`, timeline:     html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="14" x2="10" y2="14"/><line x1="8" y1="18" x2="14" y2="18"/></svg>`, productivity: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></svg>`, reminders:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`, team:         html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`, dm:           html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
     'ai-docs':    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><circle cx="10" cy="13" r="2"/><path d="M20 21l-4.35-4.35"/></svg>`,
+    notes:        html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M8 7h8"/><path d="M8 11h6"/></svg>`,
     timesheet:    html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="4" x2="9" y2="9"/><path d="M7 13h2l1 2 2-4 1 2h2"/></svg>`,
     'password-generator': html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 1 4 4v1H8V6a4 4 0 0 1 4-4z"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="8" cy="13" r="1.2" fill="currentColor"/><circle cx="12" cy="13" r="1.2" fill="currentColor"/><circle cx="16" cy="13" r="1.2" fill="currentColor"/><line x1="8" y1="14.2" x2="8" y2="16"/><line x1="12" y1="14.2" x2="12" y2="16"/></svg>`,
     vault: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V6"/><path d="M12 18v-2.5"/><path d="M7.5 12H5"/><path d="M19 12h-2.5"/><path d="M9.2 9.2L7.5 7.5"/><path d="M16.5 16.5l-1.7-1.7"/><path d="M14.8 9.2l1.7-1.7"/><path d="M7.5 16.5l1.7-1.7"/></svg>`,
   };
   const adminNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'notes', label:'Notes', badge:'New'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
-    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
+    {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'notes', label:'Notes'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
 
   // ── Sidebar nav reorder + pin ────────────────────────────────────────────
@@ -6460,6 +6461,64 @@ function WorkspaceSettings({cu,onReload}){
 /* ─── AiDocsView — Chat-first AI Documentation Studio ─────────────────────── */
 
 /* ─── AiDocsView — Chat-first AI Documentation Studio ─────────────────────── */
+
+/* ─── NotesView — OneNote-inspired quick notes workspace ───────────────────── */
+function NotesView({cu}){
+  const [notes,setNotes]=useState([]),[activeId,setActiveId]=useState(null),[q,setQ]=useState(''),[saving,setSaving]=useState(false),[archived,setArchived]=useState(false),[tagInput,setTagInput]=useState(''),[viewMode,setViewMode]=useState('edit');
+  const editorRef=useRef(null); const saveTimer=useRef(null);
+  const colors=['#facc15','#60a5fa','#34d399','#f472b6','#fb923c','#a78bfa','#f87171','#22d3ee'];
+  const loadNotes=useCallback(async()=>{const d=await api.get('/api/notes'+(archived?'?archived=1':''),{quiet:true,timeoutMs:10000});if(Array.isArray(d)){setNotes(d);if(!activeId&&d[0])setActiveId(d[0].id);}},[archived,activeId]);
+  useEffect(()=>{loadNotes();},[loadNotes]);
+  const active=notes.find(n=>n.id===activeId)||notes[0]||null;
+  useEffect(()=>{if(active&&editorRef.current&&editorRef.current.innerHTML!==active.body){editorRef.current.innerHTML=active.body||'';}},[active&&active.id]);
+  const filtered=notes.filter(n=>{const hay=((n.title||'')+' '+(n.plain_text||'')+' '+(n.notebook||'')+' '+(n.section||'')+' '+((n.tags||[]).join(' '))).toLowerCase();return !q||hay.includes(q.toLowerCase());});
+  const notebooks=[...new Set(notes.map(n=>n.notebook||'Quick Notes'))];
+  const updateLocal=(id,patch)=>setNotes(prev=>prev.map(n=>n.id===id?{...n,...patch,updated:new Date().toISOString()}:n));
+  const savePatch=(id,patch,instant=false)=>{updateLocal(id,patch);clearTimeout(saveTimer.current);const run=async()=>{setSaving(true);await api.put('/api/notes/'+id,patch,{quiet:true,timeoutMs:10000});setSaving(false);}; instant?run():saveTimer.current=setTimeout(run,550);};
+  const createNote=async()=>{const d=await api.post('/api/notes',{title:'Untitled note',body:'',notebook:'Quick Notes',section:'General',color:'#facc15'},{quiet:true});await loadNotes();if(d&&d.id)setActiveId(d.id);};
+  const deleteActive=async()=>{if(!active)return;if(!confirm('Delete this note permanently?'))return;await api.del('/api/notes/'+active.id);setNotes(prev=>prev.filter(n=>n.id!==active.id));setActiveId(null);};
+  const cmd=(c,v=null)=>{document.execCommand(c,false,v);if(active&&editorRef.current)savePatch(active.id,{body:editorRef.current.innerHTML});};
+  const addTag=()=>{if(!active||!tagInput.trim())return;const tags=[...new Set([...(active.tags||[]),tagInput.trim().replace(/^#/,'')])];setTagInput('');savePatch(active.id,{tags},true);};
+  const insertChecklist=()=>cmd('insertHTML','<ul data-checklist="1"><li>☐ New task</li></ul>');
+  const exportNote=()=>{if(!active)return;const blob=new Blob([`${active.title}\n\n${active.plain_text||''}`],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(active.title||'note').replace(/[^a-z0-9_-]+/gi,'_')+'.txt';a.click();URL.revokeObjectURL(a.href);};
+  const words=(active?.plain_text||'').trim()?active.plain_text.trim().split(/\s+/).length:0;
+  return html`<div style=${{height:'100%',display:'grid',gridTemplateColumns:'310px 1fr',background:'var(--bg)',overflow:'hidden'}}>
+    <aside style=${{borderRight:'1px solid var(--bd)',background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.02))',display:'flex',flexDirection:'column',minWidth:0}}>
+      <div style=${{padding:16,borderBottom:'1px solid var(--bd)'}}>
+        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:12}}><div><div style=${{fontSize:20,fontWeight:950,color:'var(--tx)'}}>Notes</div><div style=${{fontSize:11,color:'var(--tx3)'}}>Quick notes, notebooks, tags, autosave</div></div><button class="btn bp" onClick=${createNote}>＋</button></div>
+        <input class="inp" value=${q} onInput=${e=>setQ(e.target.value)} placeholder="Search notes, tags, notebooks..." style=${{width:'100%'}}/>
+        <div style=${{display:'flex',gap:8,marginTop:10}}><button class=${'btn '+(!archived?'bp':'')} onClick=${()=>setArchived(false)}>Active</button><button class=${'btn '+(archived?'bp':'')} onClick=${()=>setArchived(true)}>Archive</button></div>
+      </div>
+      <div style=${{padding:10,overflow:'auto',display:'flex',flexDirection:'column',gap:8}}>
+        ${filtered.length?filtered.map(n=>html`<button key=${n.id} onClick=${()=>setActiveId(n.id)} style=${{textAlign:'left',border:'1px solid '+(active&&active.id===n.id?'var(--ac)':'var(--bd)'),background:active&&active.id===n.id?'var(--ac3)':'var(--sf2)',borderRadius:16,padding:12,cursor:'pointer',boxShadow:n.pinned?'0 0 0 1px '+(n.color||'#facc15'):'none'}}>
+          <div style=${{display:'flex',gap:8,alignItems:'center'}}><span style=${{width:10,height:10,borderRadius:99,background:n.color||'#facc15',flexShrink:0}}></span><div style=${{fontSize:13,fontWeight:900,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${n.pinned?'📌 ':''}${n.title||'Untitled note'}</div></div>
+          <div style=${{fontSize:11,color:'var(--tx3)',marginTop:5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${n.plain_text||'No content yet'}</div>
+          <div style=${{display:'flex',gap:5,flexWrap:'wrap',marginTop:8}}>${(n.tags||[]).slice(0,3).map(t=>html`<span style=${{fontSize:10,padding:'2px 7px',borderRadius:99,background:'var(--sf)',color:'var(--tx2)',border:'1px solid var(--bd)'}}>#${t}</span>`)}</div>
+        </button>`):html`<div style=${{padding:28,textAlign:'center',color:'var(--tx3)'}}>No notes found.</div>`}
+      </div>
+    </aside>
+    <main style=${{minWidth:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      ${active?html`<div style=${{padding:'14px 18px',borderBottom:'1px solid var(--bd)',background:'var(--sf)',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <button class="btn" onClick=${()=>savePatch(active.id,{pinned:active.pinned?0:1},true)}>${active.pinned?'📌 Pinned':'📍 Pin'}</button><button class="btn" onClick=${()=>savePatch(active.id,{favorite:active.favorite?0:1},true)}>${active.favorite?'★ Favorite':'☆ Favorite'}</button><button class="btn" onClick=${()=>savePatch(active.id,{archived:active.archived?0:1},true)}>${active.archived?'Unarchive':'Archive'}</button>
+        <button class="btn" onClick=${exportNote}>Export</button><button class="btn danger" onClick=${deleteActive}>Delete</button><span style=${{marginLeft:'auto',fontSize:11,color:'var(--tx3)'}}>${saving?'Saving…':'Saved'} · ${words} words</span>
+      </div>
+      <div style=${{padding:'16px 22px',borderBottom:'1px solid var(--bd)',display:'grid',gridTemplateColumns:'1fr 180px 180px',gap:10,background:'var(--bg)'}}>
+        <input class="inp" value=${active.title||''} onInput=${e=>savePatch(active.id,{title:e.target.value})} placeholder="Note title" style=${{fontSize:24,fontWeight:950,height:46}}/>
+        <input class="inp" value=${active.notebook||''} onInput=${e=>savePatch(active.id,{notebook:e.target.value})} placeholder="Notebook" list="note-books"/><datalist id="note-books">${notebooks.map(x=>html`<option value=${x}/>` )}</datalist>
+        <input class="inp" value=${active.section||''} onInput=${e=>savePatch(active.id,{section:e.target.value})} placeholder="Section"/>
+      </div>
+      <div style=${{padding:'10px 18px',borderBottom:'1px solid var(--bd)',display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',background:'var(--sf)'}}>
+        ${['bold','italic','underline'].map(c=>html`<button class="btn" onClick=${()=>cmd(c)}>${c[0].toUpperCase()}</button>`)}<button class="btn" onClick=${()=>cmd('formatBlock','h2')}>H2</button><button class="btn" onClick=${()=>cmd('insertUnorderedList')}>• List</button><button class="btn" onClick=${()=>cmd('insertOrderedList')}>1. List</button><button class="btn" onClick=${insertChecklist}>☐ Checklist</button><button class="btn" onClick=${()=>cmd('insertHorizontalRule')}>Line</button>
+        ${colors.map(c=>html`<button title=${c} onClick=${()=>savePatch(active.id,{color:c},true)} style=${{width:22,height:22,borderRadius:99,border:active.color===c?'2px solid var(--tx)':'1px solid var(--bd)',background:c,cursor:'pointer'}}></button>`)}
+      </div>
+      <div style=${{padding:'12px 22px',display:'flex',gap:8,alignItems:'center',borderBottom:'1px solid var(--bd)'}}>${(active.tags||[]).map(t=>html`<button class="btn" onClick=${()=>savePatch(active.id,{tags:(active.tags||[]).filter(x=>x!==t)},true)}>#${t} ×</button>`)}<input class="inp" value=${tagInput} onInput=${e=>setTagInput(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')addTag();}} placeholder="Add tag and press Enter" style=${{maxWidth:220}}}/><button class="btn" onClick=${addTag}>Add tag</button></div>
+      <div style=${{flex:1,overflow:'auto',padding:24,background:'linear-gradient(180deg,var(--bg),rgba(255,255,255,.02))'}}>
+        <div ref=${editorRef} contentEditable suppressContentEditableWarning onInput=${e=>savePatch(active.id,{body:e.currentTarget.innerHTML})} style=${{minHeight:'100%',maxWidth:980,margin:'0 auto',padding:28,borderRadius:24,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 18px 60px rgba(0,0,0,.16)',color:'var(--tx)',fontSize:15,lineHeight:1.8,outline:'none'}}></div>
+      </div>`:html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--tx3)'}}><button class="btn bp" onClick=${createNote}>Create your first note</button></div>`}
+    </main>
+  </div>`;
+}
+
 function AiDocsView({cu,projects,tasks,users}){
   const [messages,setMessages]=useState([]);
   const [input,setInput]=useState('');
@@ -9438,7 +9497,7 @@ function App(){
       }catch(e){}
     };
     const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
-    const id=setInterval(check,5000);
+    const id=setInterval(()=>{if(!document.hidden)check();},15000);
     return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
@@ -9640,7 +9699,7 @@ function App(){
       const teamParam=tCtx?'team_id='+tCtx:'';
       const qs=[teamParam,bustParam].filter(Boolean).join('&');
       const appDataUrl='/api/app-data'+(qs?'?'+qs:'');
-      const d=await api.get(appDataUrl,{timeoutMs:30000}); // cold-start can take >10s
+      const d=await api.get(appDataUrl,{timeoutMs:15000}); // cold-start safe but not 30s-stalling
       if(!d||d.error){
         const st=Number(d&&d.status)||0;
         if(st===401||st===403){
@@ -10139,6 +10198,7 @@ function App(){
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
+            ${baseView==='notes'?html`<${NotesView} cu=${cu}/>`:null}
             ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
             ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
             ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}
@@ -10195,6 +10255,7 @@ function App(){
   </div>
 `;
               const results=[];
+              if(q.includes('note'))results.push({type:'notes',id:'notes',title:'Open Notes',sub:'Quick notes workspace',color:'#facc15',bg:'rgba(250,204,21,0.12)',nav:'notes'});
               // Search tasks by ID or title
               safe(data.tasks).forEach(t=>{
                 if(!t||!t.id||!t.title)return;
