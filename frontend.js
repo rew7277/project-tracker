@@ -2642,7 +2642,7 @@ const STAGE_DAYS={backlog:0,planning:7,development:21,code_review:28,testing:35,
 const STAGE_PCT={backlog:0,planning:10,development:35,code_review:55,testing:70,uat:80,release:90,production:95,completed:100,blocked:null};
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
 
-function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,teams,activeTeam}){
+function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initialStage,initialPriority,initialAssignee,initialTaskId,onClearInitialTask,teams,activeTeam}){
   const [mode,setMode]=useState('kanban');
   const [pid,setPid]=useState('all');
   const [teamF,setTeamF]=useState('all');
@@ -2677,6 +2677,18 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     if(initialPriority){setPriF(initialPriority);setShowFilters(true);}
     if(initialAssignee==='me'&&cu){setAssF(cu.id);setShowFilters(true);}
   },[initialStage,initialPriority,initialAssignee,cu]);
+
+  useEffect(()=>{
+    if(!initialTaskId||!safe(tasks).length)return;
+    const t=safe(tasks).find(x=>String(x.id)===String(initialTaskId));
+    if(t){
+      setShowResolved(true);
+      setPid('all');setTeamF('all');setPriF('all');setStageF('all');setAssF('all');setDueF('all');setSearch('');
+      setEditT(t);
+      onClearInitialTask&&onClearInitialTask();
+      try{history.replaceState(null,'','/tasks');}catch(e){}
+    }
+  },[initialTaskId,tasks,onClearInitialTask]);
 
   const RESOLVED_STAGES=new Set(['completed']);
 
@@ -4560,7 +4572,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const reqSeq=useRef(0);
   const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
-  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-250):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
+  const _saveDmCache=(id,list)=>{try{const raw=JSON.parse(localStorage.getItem(_dmCacheKey)||'{}');raw[id]=Array.isArray(list)?list.slice(-300):[];localStorage.setItem(_dmCacheKey,JSON.stringify(raw));}catch{}};
   const threadCache=useRef(_loadDmCache());
   const dmSeenIdsRef=useRef(new Set());
   const dmRecentSendRef=useRef({key:'',at:0});
@@ -4698,8 +4710,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
     const cached=threadCache.current.get(id);
     if(cached){
+      const readCached=normalizeDmList(cached.map(m=>m.sender===id?{...m,read:1}:m));
+      threadCache.current.set(id,readCached);
+      _saveDmCache(id,readCached);
       setMsgThreadId(id);
-      setMsgs(cached);
+      setMsgs(readCached);
       setLoadingThread('');
     }else{
       setMsgThreadId('');
@@ -4707,7 +4722,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[]);
+  },[normalizeDmList]);
   useEffect(()=>{
     if(initialUserId){
       const u=safe(users).find(u=>u.id===initialUserId);
@@ -4738,6 +4753,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const seen=new Set(existing.map(m=>m.id));
         merged=mergePendingReactionState(id,[...existing,...d.filter(m=>!seen.has(m.id))]);
       }else merged=mergePendingReactionState(id,d);
+      // Opening a DM means the user has seen this thread now. Mark local incoming
+      // messages as read immediately so the stale "New messages" divider disappears
+      // without waiting for the next poll/render. The server is already marking them
+      // read inside GET /api/dm/<user>.
+      merged=normalizeDmList(merged.map(m=>m.sender===id?{...m,read:1}:m));
       setThreadMessages(id,merged,true);
       setLoadingThread('');
       onDmRead(id);
@@ -4848,10 +4868,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         return;
       }
       if(msg&&msg.type==='dm_created'&&data&&data.message){
-        const m=data.message;
+        let m=data.message;
         const peer=(m.sender===cu.id)?m.recipient:m.sender;
         const belongs=peer===toId || data.sender===toId || data.recipient===toId;
         if(belongs){
+          if(m.sender!==cu.id)m={...m,read:1};
           setMsgThreadId(toId);
           setLoadingThread('');
           setMsgs(prev=>{
@@ -5087,7 +5108,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const visibleMsgs=(msgThreadId===toId)?normalizeDmList(msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id))):[];
   const displayMsgs=msgSearch.trim()?visibleMsgs.filter(m=>String(m.content||'').toLowerCase().includes(msgSearch.toLowerCase())):visibleMsgs;
   const pinnedMsgs=visibleMsgs.filter(m=>m.pinned||m.pinned===1);
-  const firstUnreadIdx=displayMsgs.findIndex(m=>m.sender===toId&&Number(m.read||0)===0);
+  const firstUnreadIdx=unreadFor(toId)>0?displayMsgs.findIndex(m=>m.sender===toId&&Number(m.read||0)===0):-1;
   const findMsg=id=>visibleMsgs.find(x=>x.id===id);
   const isThreadLoading=!!toId&&loadingThread===toId&&visibleMsgs.length===0;
   const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
@@ -5299,8 +5320,7 @@ function NotifsView({notifs,reload,setData,onNavigate}){
   const unread=safe(notifs).filter(n=>!n.read).length;
   const handleClick=async(n)=>{
     if(!n.read) await api.put('/api/notifications/'+n.id+'/read',{});
-    const T=NT[n.type]||NT.comment;
-    if(T.nav&&onNavigate){onNavigate(T.nav);}
+    if(onNavigate){onNavigate(n);}
     reload();
   };
   const clearAll=async()=>{
@@ -9257,6 +9277,57 @@ function App(){
   },[]);
   const [col,setCol]=useState(()=>{try{return localStorage.getItem('pf_col')==='1';}catch{return false;}});
   const [initialProjectId,setInitialProjectId]=useState(null);
+  const [initialTaskId,setInitialTaskId]=useState(null);
+  const [initialTicketId,setInitialTicketId]=useState(null);
+  const routeToNotification=useCallback((n={})=>{
+    const type=String(n.type||'').toLowerCase();
+    const entityType=String(n.entity_type||'').toLowerCase();
+    const entityId=n.entity_id||n.task_id||n.project_id||n.ticket_id||n.id_ref||'';
+    const senderId=n.sender_id||n.sender||n.from_user_id||'';
+    // Direct message / call notifications must open the exact sender thread.
+    if(type==='dm'||type==='message'||type==='call'||entityType==='dm'){
+      if(senderId)setDmTargetUser(String(senderId));
+      _setView('dm');
+      return;
+    }
+    // Task notifications open the exact task modal when an entity_id is present.
+    if(entityType==='task'||['task_assigned','status_change','comment','deadline','reminder'].includes(type)){
+      if(entityId)setInitialTaskId(String(entityId));
+      _setView('tasks');
+      return;
+    }
+    // Ticket assignments/comments/status changes open the ticket detail panel.
+    if(entityType==='ticket'||type==='ticket'||type==='ticket_assigned'||String(n.content||'').trim().startsWith('🎫')){
+      if(entityId)setInitialTicketId(String(entityId));
+      _setView('tickets');
+      return;
+    }
+    // Project notifications open the exact project detail page/panel.
+    if(entityType==='project'||type==='project_added'||type==='project_updated'){
+      if(entityId)setInitialProjectId(String(entityId));
+      _setView('projects');
+      return;
+    }
+    // Project/channel messages should route to Channels; project id is kept in URL for future deep-linking.
+    if(entityType==='message'||type==='channel_message'||type==='project_message'){
+      _setView('messages');
+      return;
+    }
+    _setView('notifs');
+  },[_setView]);
+
+  useEffect(()=>{
+    try{
+      const q=new URLSearchParams(window.location.search);
+      const action=String(q.get('action')||'').toLowerCase();
+      const id=q.get('id')||q.get('entity_id')||'';
+      const user=q.get('user')||q.get('sender')||'';
+      if(action==='task'&&id){setInitialTaskId(String(id));_setView('tasks');}
+      else if(action==='project'&&id){setInitialProjectId(String(id));_setView('projects');}
+      else if(action==='ticket'&&id){setInitialTicketId(String(id));_setView('tickets');}
+      else if((action==='dm'||window.location.pathname.replace(/^\//,'').split('/')[0]==='dm')&&user){setDmTargetUser(String(user));_setView('dm');}
+    }catch(e){}
+  },[_setView]);
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -10146,22 +10217,7 @@ function App(){
             api.del('/api/notifications/'+n.id).catch(()=>{});
             // Remove from local state instantly — panel clears without waiting for reload
             setData(prev=>({...prev,notifs:prev.notifs.filter(x=>x.id!==n.id)}));
-            const nav={task_assigned:'tasks',status_change:'tasks',comment:'tasks',deadline:'tasks',dm:'dm',project_added:'projects',reminder:'reminders',call:'dm',message:'messages'};
-            const dest=nav[n.type]||'notifs';
-            // DM: open sender's chat thread
-            if(n.type==='dm'||n.type==='message'){
-              const senderId=n.sender_id||n.sender||null;
-              if(senderId)setDmTargetUser(senderId);
-            }
-            // Call: open Google Meet launcher directly
-            if(n.type==='call'){
-              const senderId=n.sender_id||n.sender||null;
-              if(senderId){
-                const callerUser=data.users.find(u=>u.id===senderId);
-                if(senderId)setDmTargetUser(senderId);
-              }
-            }
-            setView(dest);
+            routeToNotification(n);
           }}
           onMarkAllRead=${async()=>{setData(prev=>({...prev,notifs:(prev.notifs||[]).map(n=>({...n,read:1}))}));await api.put('/api/notifications/read-all',{});load();}}
           onClearAll=${async()=>{await api.del('/api/notifications/all');load();}}
@@ -10185,12 +10241,14 @@ function App(){
               initialStage=${taskFilterType==='stage'?taskFilterValue:null}
               initialPriority=${taskFilterType==='priority'?taskFilterValue:null}
               initialAssignee=${taskFilterType==='assignee'?taskFilterValue:null}
+              initialTaskId=${initialTaskId}
+              onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
             ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
-            ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${setView}/>`:null}
-            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null}/>`:null}
+            ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
+            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}

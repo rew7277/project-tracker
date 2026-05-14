@@ -4206,7 +4206,9 @@ def meet_notify():
             db.execute(
                 "INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                 (nid, wid(), "call", msg, target_id, 0, ts()))
-        return jsonify({"ok": True, "caller": cname, "room": room_name})
+    _cache_bust(wid(), "notifications", "notifs", "appdata")
+    _sse_publish(wid(), "notification_updated", {"reason": "call", "sender": session["user_id"], "recipient": target_id})
+    return jsonify({"ok": True, "caller": cname, "room": room_name})
 
 @app.route("/api/auth/me")
 def me():
@@ -4909,7 +4911,7 @@ def create_project():
         # Previously only busting 'notifs' left the appdata cache stale, causing the
         # background SWR refresh to overwrite state and make the new project disappear.
         # Targeted bust: projects and appdata only. Tasks cache untouched (no tasks yet).
-        _cache_bust(wid(), "projects", "appdata")
+        _cache_bust(wid(), "projects", "notifications", "notifs", "appdata")
         # Push SSE event so connected clients update immediately without waiting for next poll
         _sse_publish(wid(), "project_updated", {"id": pid, "action": "created"})
         return jsonify(dict(p))
@@ -4951,7 +4953,7 @@ def update_project(pid):
                           f"{aname} added you to '{updated['name']}'",f"/?action=project&id={pid}"))
     # Targeted bust: projects and appdata. Member/name changes don't affect
     # task, notification, or DM caches.
-    _cache_bust(wid(), "projects", "appdata")
+    _cache_bust(wid(), "projects", "notifications", "notifs", "appdata")
     # Notify connected clients via SSE so they reload without waiting 30s
     _sse_publish(wid(), "project_updated", {"id": pid, "action": "updated"})
     return jsonify(dict(updated))
@@ -5124,7 +5126,7 @@ def create_task():
         # Targeted bust: only invalidate tasks + appdata caches.
         # Notifications, DM, and user caches are unaffected by a new task.
         # SSE event below notifies connected clients immediately so they refetch.
-        _cache_bust(wid(), "tasks", "appdata")
+        _cache_bust(wid(), "tasks", "notifications", "notifs", "appdata")
         # Push SSE event — connected clients reload immediately without polling delay
         _sse_publish(wid(), "task_updated", {"id": tid, "action": "created",
                                               "project": d.get("project", ""),
@@ -5311,7 +5313,7 @@ def update_task(tid):
                 _enqueue_push(push_notification_to_user, db, t["assignee"],
                     f"💬 Comment on: {t['title']}",
                     f"{cname}: {latest.get('text','')[:80]}", "/")
-        _cache_bust(wid(), "tasks", "appdata")
+        _cache_bust(wid(), "tasks", "notifications", "notifs", "appdata")
         updated_task = dict(db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
         # Push SSE — all workspace clients get the new stage/assignee immediately
         _sse_publish(wid(), "task_updated", {"id": tid, "action": "updated",
@@ -5581,7 +5583,7 @@ def get_dm(other_id):
                      AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
                      AND ts > ?
                    ORDER BY ts
-                   LIMIT 100""",
+                   LIMIT 200""",
                 (ws_id, me, other_id, other_id, me, since_str)
             ).fetchall()
         else:
@@ -6516,8 +6518,9 @@ def create_ticket():
                     daemon=True).start()
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
     # Targeted bust: only tickets + appdata. Avoids wiping user/project/task caches.
-    _cache_bust(wid(), "tickets", "appdata")
+    _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
+    _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
 @login_required
 def update_ticket(tid):
