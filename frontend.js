@@ -4533,7 +4533,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(initialUserId||'');
+  const [toId,setToId]=useState(()=>String(initialUserId||''));
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
@@ -4571,6 +4571,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const typingTimerRef=useRef(null);
   const ref=useRef(null);
   const activeToRef=useRef('');
+  const manualDmSelectionRef=useRef(false);
+  const lastInitialUserIdRef=useRef('');
+  const autoOpenDoneRef=useRef(false);
   const reqSeq=useRef(0);
   const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
@@ -4621,7 +4624,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     _saveDmCache(peer,normalized);
     if(alsoSetVisible&&peer===activeToRef.current){ setMsgThreadId(peer); setMsgs(normalized); }
     return normalized;
-  },[normalizeDmList]);
+  },[normalizeDmList,onClearInitial]);
   const pendingReactionUntil=useRef(new Map());
   const parseIncomingCall=(m)=>{
     if(!m||!m.content)return null;
@@ -4715,20 +4718,33 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[]);
   const switchToUser=useCallback((id,source='click')=>{
     const id2=String(id||'');
-    if(!id2||id2===String(activeToRef.current||''))return;
+    if(!id2)return;
     id=id2;
-    // User click must be authoritative. Store it immediately so delayed
-    // unread/prefetch responses cannot jump the UI to another conversation.
+    const isUserClick=source==='click';
+    if(isUserClick){
+      // Manual click is the source of truth. A stale notification target,
+      // saved target, unread fallback, or delayed API response must never
+      // move the chat to somebody else after this.
+      manualDmSelectionRef.current=true;
+      autoOpenDoneRef.current=true;
+      lastInitialUserIdRef.current='';
+      if(onClearInitial)onClearInitial();
+    }
+    if(id===String(activeToRef.current||'')){
+      setToId(id);
+      try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));}catch(_e){}
+      return;
+    }
     try{
       sessionStorage.setItem('pt_open_dm_user',id);
-      if(source==='click'||source==='notification'||source==='sw-notification') history.replaceState(null,'',ptDmUrl(id));
+      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target') history.replaceState(null,'',ptDmUrl(id));
     }catch(_e){}
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
     const cached=threadCache.current.get(id);
     if(cached){
-      const readCached=normalizeDmList(cached.map(m=>m.sender===id?{...m,read:1}:m));
+      const readCached=normalizeDmList(cached.map(m=>String(m.sender)===String(id)?{...m,read:1}:m));
       threadCache.current.set(id,readCached);
       _saveDmCache(id,readCached);
       setMsgThreadId(id);
@@ -4740,23 +4756,26 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList]);
+  },[normalizeDmList,onClearInitial]);
   useEffect(()=>{
-    if(initialUserId){
-      switchToUser(String(initialUserId),'notification');
-      if(onClearInitial)onClearInitial();
-    }
-  },[initialUserId,switchToUser,onClearInitial]);
+    const target=String(initialUserId||'');
+    if(!target)return;
+    if(target===lastInitialUserIdRef.current && target===String(activeToRef.current||''))return;
+    lastInitialUserIdRef.current=target;
+    manualDmSelectionRef.current=false;
+    autoOpenDoneRef.current=true;
+    // Notification URLs carry ids as strings; DB/user ids may be numeric.
+    // Open the exact sender thread directly and let fetch/cache load it.
+    switchToUser(target,'notification');
+  },[initialUserId,switchToUser]);
   useEffect(()=>{
-    if(toId||initialUserId)return;
-    // Only auto-open unread when the route is plain /dm and no selected chat exists.
-    // Never override a person the user already clicked.
+    if(toId||initialUserId||autoOpenDoneRef.current)return;
+    autoOpenDoneRef.current=true;
+    // Plain /dm should not keep jumping between unread users. Only restore the
+    // last explicit chat target once; after a manual click we never auto-switch.
     let saved='';try{saved=sessionStorage.getItem('pt_open_dm_user')||'';}catch(_){}
-    if(saved){ switchToUser(saved,'saved-dm-target'); return; }
-    const firstUnread=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
-    const sid=firstUnread?String(firstUnread.sender||firstUnread.user_id||firstUnread.peer_id||''):'';
-    if(sid) switchToUser(sid,'first-unread-fallback');
-  },[toId,initialUserId,dmUnread,switchToUser]);
+    if(saved){ switchToUser(saved,'saved-dm-target'); }
+  },[toId,initialUserId,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     if(!id)return;
     const seq=++reqSeq.current;
@@ -5130,11 +5149,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const uploadDmAttachment=async(ev)=>{const file=ev.target.files&&ev.target.files[0];ev.target.value='';await sendDmAttachmentFile(file);};
   const handleDmDrop=(ev)=>{ev.preventDefault();const file=ev.dataTransfer&&ev.dataTransfer.files&&ev.dataTransfer.files[0];sendDmAttachmentFile(file);};
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
-  const toUser=safe(users).find(u=>u.id===toId);
-  const visibleMsgs=(msgThreadId===toId)?normalizeDmList(msgs.filter(m=>(m.sender===cu.id&&m.recipient===toId)||(m.sender===toId&&m.recipient===cu.id))):[];
+  const toUser=safe(users).find(u=>String(u.id)===String(toId));
+  const visibleMsgs=(String(msgThreadId)===String(toId))?normalizeDmList(msgs.filter(m=>(String(m.sender)===String(cu.id)&&String(m.recipient)===String(toId))||(String(m.sender)===String(toId)&&String(m.recipient)===String(cu.id)))):[];
   const displayMsgs=msgSearch.trim()?visibleMsgs.filter(m=>String(m.content||'').toLowerCase().includes(msgSearch.toLowerCase())):visibleMsgs;
   const pinnedMsgs=visibleMsgs.filter(m=>m.pinned||m.pinned===1);
-  const unreadFor=id=>(dmUnread.find(x=>x.sender===id)||{cnt:0}).cnt;
+  const unreadFor=id=>(dmUnread.find(x=>String(x.sender||x.user_id||x.peer_id)===String(id))||{cnt:0}).cnt;
   const firstUnreadIdx=toId&&unreadFor(toId)>0?displayMsgs.findIndex(m=>m.sender===toId&&Number(m.read||0)===0):-1;
   const findMsg=id=>visibleMsgs.find(x=>x.id===id);
   const isThreadLoading=!!toId&&loadingThread===toId&&visibleMsgs.length===0;
@@ -7142,39 +7161,6 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
-
-  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
 
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
@@ -9524,19 +9510,12 @@ function App(){
   const [dmUnread,setDmUnread]=useState([]);
   useEffect(()=>{
     if(view!=='dm'||dmTargetUser)return;
-    const first=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
-    const sid=first?String(first.sender||first.user_id||first.peer_id||''):'';
-    if(sid){setDmTargetUser(sid);try{sessionStorage.setItem('pt_open_dm_user',sid);}catch(_){} history.replaceState(null,'',ptDmUrl(sid));}
-    else{
-      // Last-resort exact sender lookup for a notification click that opened /dm
-      // without ?user=. This avoids landing on the empty Select someone screen.
-      api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:6000}).then(latest=>{
-        const m=Array.isArray(latest)?latest.find(x=>x&&String(x.recipient||'')===String(cu&&cu.id||'')):null;
-        const peer=m?String(m.sender||''):'';
-        if(peer&&!dmTargetUser){setDmTargetUser(peer);try{sessionStorage.setItem('pt_open_dm_user',peer);}catch(_){} history.replaceState(null,'',ptDmUrl(peer));}
-      }).catch(()=>{});
-    }
-  },[view,dmUnread,dmTargetUser,cu]);
+    // Do not auto-pick the first unread on every poll. That was the reason a
+    // manually clicked chat could jump to another person after a few seconds.
+    // Exact notification clicks already provide ?user= or pt_open_dm_user.
+    let saved='';try{saved=sessionStorage.getItem('pt_open_dm_user')||'';}catch(_){}
+    if(saved){setDmTargetUser(String(saved));history.replaceState(null,'',ptDmUrl(saved));}
+  },[view,dmTargetUser]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
