@@ -4895,18 +4895,25 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(onClearInitial)onClearInitial();
   },[initialUserId]);
   useEffect(()=>{
-    // No saved/unread auto-open. Leaving /dm empty is safer than changing a user
-    // away from the chat they just clicked.
-  },[toId,initialUserId,switchToUser]);
+    // Notification/plain-/dm recovery: if the DM page was opened from a notification
+    // without ?user=, select the exact unread sender. This only runs while no chat is
+    // selected, so it cannot steal a manual click.
+    if(toId||initialUserId)return;
+    const peer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
+    if(peer){
+      try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);}catch(_){}
+      switchToUser(peer,'notification');
+    }
+  },[toId,initialUserId,dmUnread,cu&&cu.id,switchToUser]);
   useEffect(()=>{
     // One-shot notification target passed through sessionStorage by SW before React mounted.
     if(toId||initialUserId)return;
     try{
       const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
-      const target=sessionStorage.getItem('pt_open_dm_user')||sessionStorage.getItem('pt_dm_notification_target')||'';
-      if(shouldResolve&&target){
+      const target=sessionStorage.getItem('pt_dm_notification_target')||sessionStorage.getItem('pt_open_dm_user')||'';
+      if(target||shouldResolve){
         sessionStorage.removeItem('pt_dm_resolve_next');
-        switchToUser(String(target),'notification');
+        if(target) switchToUser(String(target),'notification');
       }
     }catch(_e){}
   },[toId,initialUserId,switchToUser]);
@@ -5021,7 +5028,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },8000);
+    },15000);
     try{window.__ptDmActivePollTimer=id;window.__ptDmActivePollUser=String(toId);}catch(_){}
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
@@ -5156,6 +5163,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true,_instant:true};
     setTxt('');setReplyTo(null);
     setSending(true);
+    setTimeout(()=>setSending(false),250);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -5270,7 +5278,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }catch(e){alert('Microphone permission is required to record voice notes.');}
   };
   const sendDmAttachmentFile=async(file)=>{
-    if(!file||!toId||sending)return;
+    if(!file||!toId)return;
     setAttaching(true);
     try{
       const fd=new FormData();
@@ -5486,7 +5494,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 16px',borderTop:'1px solid var(--bd)',display:'flex',gap:8,flexShrink:0,alignItems:'center',position:'relative'}}>
         ${previewImage?html`<div onClick=${()=>setPreviewImage('')} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,.75)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center'}}><img src=${previewImage} style=${{maxWidth:'88vw',maxHeight:'88vh',borderRadius:16,boxShadow:'0 30px 80px rgba(0,0,0,.6)'}}/></div>`:null}
         <input ref=${fileInputRef} type="file" style=${{display:'none'}} onChange=${uploadDmAttachment}/>
-        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching||sending}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
+        <button title="Attach file" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0}} onClick=${()=>fileInputRef.current&&fileInputRef.current.click()} disabled=${!toId||attaching}>${attaching?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17Z"/><path d="M12 11v5"/><path d="M9.5 13.5H14.5"/></svg>`}</button>
         <div style=${{position:'relative',flexShrink:0}}>
           <button title="Emoji" class="btn" style=${{padding:'9px 12px',fontSize:16}} onClick=${()=>setShowChatEmoji(v=>!v)} disabled=${!toId}>😊</button>
           ${showChatEmoji?html`<div onClick=${ev=>ev.stopPropagation()} style=${{position:'absolute',bottom:'110%',left:0,display:'grid',gridTemplateColumns:'repeat(9,28px)',gap:4,padding:8,border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:16,boxShadow:'0 18px 40px rgba(0,0,0,.35)',zIndex:40}}>
@@ -5498,7 +5506,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(34,197,94,.18)':'linear-gradient(135deg,#16a34a,#22c55e)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
         <textarea class="inp" style=${{flex:1,minHeight:40,maxHeight:100,resize:'none',padding:'9px 13px',lineHeight:1.5}} placeholder=${editingId?'Edit message...':'Message '+((toUser&&toUser.name)||'...')} value=${txt} onInput=${e=>{setTxt(e.target.value);sendTyping();}} onKeyDown=${e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}></textarea>
-        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId||sending}>${sending?'…':'➤'}</button>
+        <button class="btn bp" style=${{padding:'9px 15px',flexShrink:0}} onClick=${send} disabled=${!txt.trim()||!toId}>➤</button>
       </div>
     </div>
   </div>`;
@@ -9524,16 +9532,26 @@ function ptRouteInfo(){
 function ptDmPeerFromUnreadRows(rows, cuId){
   try{
     const arr=Array.isArray(rows)?rows:[];
-    const candidates=arr.map(x=>{
-      const sender=x&&(x.sender_id||x.sender||x.from_user_id||x.user_id||x.peer_id||x.dm_user_id);
-      const recipient=x&&(x.recipient||x.to_user_id);
-      const peer=String(sender||'')===String(cuId)?recipient:sender;
-      const cnt=Number((x&&(x.cnt||x.count||x.unread||x.unread_count))||1);
-      return peer?{peer:String(peer),cnt}:null;
-    }).filter(Boolean);
-    if(candidates.length===1)return candidates[0].peer;
-    candidates.sort((a,b)=>b.cnt-a.cnt);
-    return candidates[0]&&candidates[0].peer||'';
+    const candidates=[];
+    for(const x of arr){
+      if(!x)continue;
+      const sender=x.sender_id||x.sender||x.from_user_id||x.user_id||x.peer_id||x.dm_user_id||x.id||'';
+      const recipient=x.recipient||x.to_user_id||x.receiver_id||'';
+      let peer=String(sender||'')===String(cuId)?recipient:sender;
+      peer=String(peer||'').trim();
+      if(!peer||peer===String(cuId||''))continue;
+      const cnt=Number(x.cnt||x.count||x.unread||x.unread_count||x.total||1)||1;
+      const ts=Date.parse(x.ts||x.created||x.created_at||x.last_ts||x.updated_at||'')||0;
+      candidates.push({peer,cnt,ts});
+    }
+    if(!candidates.length)return '';
+    const byPeer=new Map();
+    for(const c of candidates){
+      const p=byPeer.get(c.peer)||{peer:c.peer,cnt:0,ts:0};
+      p.cnt+=c.cnt;p.ts=Math.max(p.ts,c.ts);byPeer.set(c.peer,p);
+    }
+    const merged=[...byPeer.values()].sort((a,b)=>(b.cnt-a.cnt)||(b.ts-a.ts));
+    return merged[0]&&merged[0].peer||'';
   }catch(_){return '';}
 }
 async function ptResolveDmNotificationTarget(cuId, dmUnread){
@@ -9791,10 +9809,12 @@ function App(){
         const base=String(view||'').split(':')[0];
         if(base!=='dm'||dmTargetUser)return;
         const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
-        if(!shouldResolve)return;
+        const stored=sessionStorage.getItem('pt_dm_notification_target')||sessionStorage.getItem('pt_open_dm_user')||'';
+        const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
+        if(!shouldResolve&&!stored&&!unreadPeer)return;
         const openedAt=Number(sessionStorage.getItem('pt_dm_route_opened_at')||Date.now());
-        if(Date.now()-openedAt>30000){sessionStorage.removeItem('pt_dm_resolve_next');return;}
-        const peer=await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread);
+        if(shouldResolve&&Date.now()-openedAt>120000){sessionStorage.removeItem('pt_dm_resolve_next');}
+        const peer=stored||unreadPeer||await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread);
         if(cancelled)return;
         sessionStorage.removeItem('pt_dm_resolve_next');
         if(peer){
@@ -9802,6 +9822,7 @@ function App(){
           sessionStorage.setItem('pt_dm_notification_target',peer);
           setDmTargetUser(peer);
           _setView('dm:'+peer);
+          try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
         }
       }catch(_e){}
     };

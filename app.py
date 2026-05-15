@@ -8047,7 +8047,7 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v7: exact DM notification deep routing */
+    js = """/* Project Tracker service worker v8: exact DM notification deep routing */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 self.addEventListener('push', event => {
@@ -8067,12 +8067,13 @@ self.addEventListener('push', event => {
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = (event.notification && event.notification.data) || {};
-  const url = data.url || '/';
+  let url = data.url || '/';
   const tag = data.tag || '';
   const title = data.title || '';
   const body = data.body || '';
   const sender = data.sender || '';
   const kind = data.kind || '';
+  try { if ((kind === 'dm' || (url || '').indexOf('/dm') >= 0) && sender && (url || '').indexOf('user=') < 0) url = '/dm?user=' + encodeURIComponent(sender); } catch(e) {}
   event.waitUntil((async()=>{
     const allClients = await clients.matchAll({type:'window', includeUncontrolled:true});
     for (const client of allClients) {
