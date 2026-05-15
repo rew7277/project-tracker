@@ -7961,16 +7961,22 @@ self.addEventListener('push', event => {
 });
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const url = (event.notification && event.notification.data && event.notification.data.url) || '/';
+  const data = (event.notification && event.notification.data) || {};
+  const url = data.url || '/';
+  const tag = data.tag || '';
   event.waitUntil((async()=>{
     const allClients = await clients.matchAll({type:'window', includeUncontrolled:true});
     for (const client of allClients) {
       try {
         await client.focus();
-        client.postMessage({type:'PF_NAVIGATE', url:url});
+        /* Send PF_NOTIF_CLICK so the stored onClick handler fires in-app
+           without a full page reload. Include url as a fallback in case
+           the handler is gone (e.g. page was refreshed since notif was shown). */
+        client.postMessage({type:'PF_NOTIF_CLICK', tag, url});
         return;
       } catch(e) {}
     }
+    /* No open window — navigate to the deep-link URL directly */
     await clients.openWindow(url);
   })());
 });
