@@ -4818,7 +4818,17 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id2)return;
     id=id2;
     const isUserClick=source==='click';
+    if(!isUserClick&&source!=='notification'&&source!=='sw-notification'){
+      try{
+        const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
+        if(lock&&lock.id&&String(lock.id)!==String(id)&&Date.now()-Number(lock.at||0)<10*60*1000){
+          console.debug('[DM] blocked stale auto-switch', {target:id,locked:lock.id,source});
+          return;
+        }
+      }catch(_){}
+    }
     if(isUserClick){
+      try{window.__ptDmManualLock={id:String(id),at:Date.now()};sessionStorage.setItem('pt_dm_manual_lock',JSON.stringify(window.__ptDmManualLock));}catch(_){}
       // Manual click is the source of truth. A stale notification target,
       // saved target, unread fallback, or delayed API response must never
       // move the chat to somebody else after this.
@@ -4855,6 +4865,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const target=String(initialUserId||'');
     if(!target)return;
     if(target===lastInitialUserIdRef.current && target===String(activeToRef.current||''))return;
+    try{
+      const ri=ptRouteInfo();
+      const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
+      if(lock&&lock.id&&String(lock.id)!==target&&Date.now()-Number(lock.at||0)<10*60*1000&&String(ri.user||'')!==target){
+        console.debug('[DM] ignored stale initialUserId', {target,locked:lock.id,urlUser:ri.user});
+        return;
+      }
+    }catch(_){}
     lastInitialUserIdRef.current=target;
     manualDmSelectionRef.current=false;
     autoOpenDoneRef.current=true;
@@ -4863,12 +4881,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     switchToUser(target,'notification');
   },[initialUserId,switchToUser]);
   useEffect(()=>{
-    if(toId||initialUserId||autoOpenDoneRef.current)return;
-    autoOpenDoneRef.current=true;
-    // Plain /dm should not keep jumping between unread users. Only restore the
-    // last explicit chat target once; after a manual click we never auto-switch.
-    let saved='';try{saved=sessionStorage.getItem('pt_open_dm_user')||'';}catch(_){}
-    if(saved){ switchToUser(saved,'saved-dm-target'); }
+    // No saved/unread auto-open. Leaving /dm empty is safer than changing a user
+    // away from the chat they just clicked.
   },[toId,initialUserId,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     if(!id)return;
@@ -9535,7 +9549,9 @@ function App(){
         let suffix='';
         if(base==='dm'){
           const explicit=raw.startsWith('dm:')?raw.slice(3):'';
-          const target=explicit||sessionStorage.getItem('pt_open_dm_user')||dmTargetUser||'';
+          // Plain /dm must stay plain. Only explicit dm:<user> creates /dm?user=.
+          // This prevents old saved targets from stealing the active conversation.
+          const target=explicit||'';
           if(target)suffix='?user='+encodeURIComponent(String(target));
         }
         history.pushState(null,'',workspaceBasePath(cu)+base+suffix);
@@ -9652,12 +9668,8 @@ function App(){
   },[cu]);
   const [dmUnread,setDmUnread]=useState([]);
   useEffect(()=>{
-    if(view!=='dm'||dmTargetUser)return;
-    // Do not auto-pick the first unread on every poll. That was the reason a
-    // manually clicked chat could jump to another person after a few seconds.
-    // Exact notification clicks already provide ?user= or pt_open_dm_user.
-    let saved='';try{saved=sessionStorage.getItem('pt_open_dm_user')||'';}catch(_){}
-    if(saved){setDmTargetUser(String(saved));history.replaceState(null,'',ptDmUrl(saved));}
+    // Plain /dm intentionally does not auto-select any saved/unread user.
+    // Manual clicks and explicit notification URLs are the only allowed selectors.
   },[view,dmTargetUser]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
@@ -10099,7 +10111,7 @@ function App(){
   // Expose search opener for topbar button
   useEffect(()=>{window._pfOpenSearch=()=>{setShowGlobalSearch(v=>!v);setGlobalSearch('');setSearchSubtasks([]);};},[]);
   // Expose DM target setter for notification click handlers
-  useEffect(()=>{window._pfSetDmTarget=(uid)=>{setDmTargetUser(uid);};},[]);
+  useEffect(()=>{window._pfSetDmTarget=(uid,source='external')=>{try{const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');if(source!=='notification'&&lock&&lock.id&&String(lock.id)!==String(uid)&&Date.now()-Number(lock.at||0)<10*60*1000)return;}catch(_){}setDmTargetUser(uid);};},[]);
   // Fetch subtask search results
   useEffect(()=>{
     const q=(globalSearch||'').trim();
