@@ -4770,12 +4770,17 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     const target=String(initialUserId||'');
     if(!target)return;
-    if(target===lastInitialUserIdRef.current && target===String(activeToRef.current||''))return;
+    // IMPORTANT: initialUserId is a one-shot command, not long-lived state.
+    // Parent renders create a new onClearInitial/switchToUser function identity, so
+    // this effect can re-run after a manual sidebar click. If we do not consume
+    // and clear the target, an old notification target re-selects the wrong chat.
+    if(target===lastInitialUserIdRef.current)return;
     try{
       const ri=ptRouteInfo();
       const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
       if(lock&&lock.id&&String(lock.id)!==target&&Date.now()-Number(lock.at||0)<10*60*1000&&String(ri.user||'')!==target){
         console.debug('[DM] ignored stale initialUserId', {target,locked:lock.id,urlUser:ri.user});
+        if(onClearInitial)onClearInitial();
         return;
       }
     }catch(_){}
@@ -4785,7 +4790,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     // Notification URLs carry ids as strings; DB/user ids may be numeric.
     // Open the exact sender thread directly and let fetch/cache load it.
     switchToUser(target,'notification');
-  },[initialUserId,switchToUser]);
+    if(onClearInitial)onClearInitial();
+  },[initialUserId]);
   useEffect(()=>{
     // No saved/unread auto-open. Leaving /dm empty is safer than changing a user
     // away from the chat they just clicked.
