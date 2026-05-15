@@ -2071,20 +2071,46 @@ def _due_date_email_checker():
                 # Overdue: due date has passed
                 if due_day < today_str and tid not in _notified_over:
                     _notified_over.add(tid)
-                    threading.Thread(
-                        target=send_task_overdue_email,
-                        args=(email, name, title, due_day, tid, ws),
-                        daemon=True
-                    ).start()
+                    uid_row = row[3] if isinstance(row, (list, tuple)) else row.get("assignee", "")
+                    # In-app notification
+                    if _should_notify(uid_row, "deadline", "inapp"):
+                        try:
+                            nid = f"n{int(datetime.now().timestamp()*1000)}ov"
+                            _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                                    (nid, ws, "deadline", f"⚠️ Overdue: {title} (was due {due_day})", uid_row, 0, datetime.utcnow().isoformat(), tid, "task"))
+                            _sse_publish(ws, "notification_updated", {"reason": "deadline", "id": tid})
+                        except Exception as _ie:
+                            log.warning("[due-checker] in-app notif error: %s", _ie)
+                    # Push notification
+                    if _should_notify(uid_row, "deadline", "push"):
+                        threading.Thread(target=push_notification_to_user,
+                            args=(None, uid_row, "Task Overdue", f"{title} was due {due_day}", "/"), daemon=True).start()
+                    # Email notification
+                    if _should_notify(uid_row, "deadline", "email"):
+                        threading.Thread(target=send_task_overdue_email,
+                            args=(email, name, title, due_day, tid, ws), daemon=True).start()
 
                 # Due soon: due date is tomorrow
                 elif due_day == tomorrow_str and tid not in _notified_due:
                     _notified_due.add(tid)
-                    threading.Thread(
-                        target=send_task_due_soon_email,
-                        args=(email, name, title, due_day, tid, ws),
-                        daemon=True
-                    ).start()
+                    uid_row = row[3] if isinstance(row, (list, tuple)) else row.get("assignee", "")
+                    # In-app notification
+                    if _should_notify(uid_row, "deadline", "inapp"):
+                        try:
+                            nid = f"n{int(datetime.now().timestamp()*1000)}ds"
+                            _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                                    (nid, ws, "deadline", f"⏰ Due tomorrow: {title} (due {due_day})", uid_row, 0, datetime.utcnow().isoformat(), tid, "task"))
+                            _sse_publish(ws, "notification_updated", {"reason": "deadline", "id": tid})
+                        except Exception as _ie:
+                            log.warning("[due-checker] in-app notif error: %s", _ie)
+                    # Push notification
+                    if _should_notify(uid_row, "deadline", "push"):
+                        threading.Thread(target=push_notification_to_user,
+                            args=(None, uid_row, "Task Due Tomorrow", f"{title} is due {due_day}", "/"), daemon=True).start()
+                    # Email notification
+                    if _should_notify(uid_row, "deadline", "email"):
+                        threading.Thread(target=send_task_due_soon_email,
+                            args=(email, name, title, due_day, tid, ws), daemon=True).start()
 
         except Exception as e:
             log.warning("[due-checker] Unexpected error: %s", e)
@@ -2092,6 +2118,188 @@ def _due_date_email_checker():
 
 # Start due-date background checker
 _cthread.Thread(target=_due_date_email_checker, daemon=True).start()
+
+def _digest_scheduler():
+    """
+    Daily digest scheduler — fires once per day at configured hour (default 17:00 UTC).
+    Sends weekly/bi-weekly summary emails to users whose prefs match and daily in-app
+    role-based alerts to team leads and managers.
+    """
+    import time as _t
+    _last_digest_day = None
+    DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR_UTC", "17"))  # 5 PM UTC default
+
+    while True:
+        try:
+            _t.sleep(60)
+            now_utc = datetime.utcnow()
+            if now_utc.hour != DIGEST_HOUR:
+                continue
+            today = now_utc.date()
+            if _last_digest_day == today:
+                continue
+            _last_digest_day = today
+
+            # ── 1. Email digests for users who want them ──────────────────────
+            try:
+                all_users = _raw_pg(
+                    "SELECT id, workspace_id, email, role, notify_prefs FROM users WHERE email != ''",
+                    fetch=True
+                ) or []
+            except Exception as _e:
+                log.warning("[digest] DB error: %s", _e)
+                all_users = []
+
+            for u in all_users:
+                uid = u["id"] if isinstance(u, dict) else u[0]
+                ws  = u["workspace_id"] if isinstance(u, dict) else u[1]
+                role = u["role"] if isinstance(u, dict) else u[3]
+                try:
+                    raw_prefs = u["notify_prefs"] if isinstance(u, dict) else u[4]
+                    prefs = {**_DEFAULT_NOTIF_PREFS, **json.loads(raw_prefs or "{}")}
+                except Exception:
+                    prefs = dict(_DEFAULT_NOTIF_PREFS)
+
+                freq = prefs.get("digest_frequency", "weekly")
+                if freq == "none":
+                    continue
+                if not prefs.get("email_enabled", True):
+                    continue
+
+                # Daily digest every day
+                if freq == "daily":
+                    threading.Thread(target=send_status_summary_digest,
+                                     args=(uid, "weekly"), daemon=True).start()
+                    continue
+
+                # Weekly: fire on Monday (weekday 0)
+                if freq == "weekly" and today.weekday() == 0:
+                    threading.Thread(target=send_status_summary_digest,
+                                     args=(uid, "weekly"), daemon=True).start()
+                    continue
+
+                # Bi-weekly: fire on 1st and 15th of month
+                if freq == "bi-weekly" and today.day in (1, 15):
+                    threading.Thread(target=send_status_summary_digest,
+                                     args=(uid, "bi-weekly"), daemon=True).start()
+
+            # ── 2. Role-based in-app alert digests ──────────────────────────
+            try:
+                _send_role_based_alerts()
+            except Exception as _re:
+                log.warning("[digest] role alert error: %s", _re)
+
+        except Exception as _e:
+            log.warning("[digest-scheduler] unexpected error: %s", _e)
+
+def _send_role_based_alerts():
+    """
+    Send role-differentiated in-app + push alerts:
+    - TeamLead:  blockers + overdue items in their team
+    - Manager:   SLA breaches + pending approvals
+    - Admin:     workflow exceptions (stuck tasks, unassigned critical tickets)
+    """
+    try:
+        users = _raw_pg(
+            "SELECT id, workspace_id, role, notify_prefs FROM users WHERE role IN ('TeamLead','Manager','Admin')",
+            fetch=True
+        ) or []
+    except Exception:
+        return
+
+    now_ts = datetime.utcnow().isoformat()
+
+    for u in users:
+        uid  = u["id"] if isinstance(u, dict) else u[0]
+        ws   = u["workspace_id"] if isinstance(u, dict) else u[1]
+        role = u["role"] if isinstance(u, dict) else u[2]
+        try:
+            raw_prefs = u["notify_prefs"] if isinstance(u, dict) else u[3]
+            prefs = {**_DEFAULT_NOTIF_PREFS, **json.loads(raw_prefs or "{}")}
+        except Exception:
+            prefs = dict(_DEFAULT_NOTIF_PREFS)
+
+        if not prefs.get("role_alerts", True):
+            continue
+        if not prefs.get("inapp_enabled", True):
+            continue
+
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+        if role == "TeamLead":
+            # Count overdue tasks in workspace
+            try:
+                overdue = _raw_pg(
+                    "SELECT COUNT(*) as cnt FROM tasks WHERE workspace_id=? AND due != '' AND due < ? AND stage NOT IN ('completed','production') AND deleted_at=''",
+                    (ws, today_str), fetch=True
+                )
+                cnt = overdue[0]["cnt"] if overdue and isinstance(overdue[0], dict) else (overdue[0][0] if overdue else 0)
+                if cnt and int(cnt) > 0:
+                    nid = f"nrl{int(datetime.now().timestamp()*1000)}tl"
+                    _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                            (nid, ws, "deadline", f"📋 Team digest: {cnt} overdue task{'s' if int(cnt)!=1 else ''} need attention", uid, 0, now_ts))
+                    _sse_publish(ws, "notification_updated", {"reason": "role_digest"})
+                    if _should_notify(uid, "deadline", "push"):
+                        threading.Thread(target=push_notification_to_user,
+                            args=(None, uid, "Team Overdue Alert", f"{cnt} overdue tasks in your team", "/"), daemon=True).start()
+            except Exception as _e:
+                log.warning("[role-alert] TeamLead overdue: %s", _e)
+
+        elif role == "Manager":
+            # Pending approvals count
+            try:
+                pending = _raw_pg(
+                    "SELECT COUNT(*) as cnt FROM approvals WHERE workspace_id=? AND status='pending'",
+                    (ws,), fetch=True
+                )
+                cnt = pending[0]["cnt"] if pending and isinstance(pending[0], dict) else (pending[0][0] if pending else 0)
+                if cnt and int(cnt) > 0:
+                    nid = f"nrl{int(datetime.now().timestamp()*1000)}mg"
+                    _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                            (nid, ws, "approval_requested", f"📬 {cnt} pending approval{'s' if int(cnt)!=1 else ''} await your review", uid, 0, now_ts))
+                    _sse_publish(ws, "notification_updated", {"reason": "role_digest"})
+                    if _should_notify(uid, "approval_requested", "push"):
+                        threading.Thread(target=push_notification_to_user,
+                            args=(None, uid, "Pending Approvals", f"{cnt} approvals need your review", "/"), daemon=True).start()
+            except Exception as _e:
+                log.warning("[role-alert] Manager approvals: %s", _e)
+
+            # SLA breach: high/critical tickets open > 3 days
+            try:
+                sla_rows = _raw_pg(
+                    """SELECT COUNT(*) as cnt FROM tickets
+                       WHERE workspace_id=? AND status NOT IN ('resolved','closed')
+                       AND priority IN ('high','critical')
+                       AND created < ?""",
+                    (ws, (datetime.utcnow().replace(hour=0,minute=0,second=0) - __import__('datetime').timedelta(days=3)).isoformat()),
+                    fetch=True
+                )
+                sla_cnt = sla_rows[0]["cnt"] if sla_rows and isinstance(sla_rows[0], dict) else (sla_rows[0][0] if sla_rows else 0)
+                if sla_cnt and int(sla_cnt) > 0:
+                    nid = f"nrl{int(datetime.now().timestamp()*1000)}sla"
+                    _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                            (nid, ws, "deadline", f"🔴 SLA breach: {sla_cnt} critical ticket{'s' if int(sla_cnt)!=1 else ''} unresolved > 3 days", uid, 0, now_ts))
+                    _sse_publish(ws, "notification_updated", {"reason": "sla_breach"})
+            except Exception as _e:
+                log.warning("[role-alert] Manager SLA: %s", _e)
+
+        elif role == "Admin":
+            # Unassigned critical tickets
+            try:
+                unassigned = _raw_pg(
+                    "SELECT COUNT(*) as cnt FROM tickets WHERE workspace_id=? AND assignee='' AND priority IN ('high','critical') AND status NOT IN ('resolved','closed')",
+                    (ws,), fetch=True
+                )
+                cnt = unassigned[0]["cnt"] if unassigned and isinstance(unassigned[0], dict) else (unassigned[0][0] if unassigned else 0)
+                if cnt and int(cnt) > 0:
+                    nid = f"nrl{int(datetime.now().timestamp()*1000)}ad"
+                    _raw_pg("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
+                            (nid, ws, "deadline", f"⚡ {cnt} critical unassigned ticket{'s' if int(cnt)!=1 else ''} need assignment", uid, 0, now_ts))
+                    _sse_publish(ws, "notification_updated", {"reason": "admin_alert"})
+            except Exception as _e:
+                log.warning("[role-alert] Admin unassigned: %s", _e)
+
+_cthread.Thread(target=_digest_scheduler, daemon=True).start()
 
 # ── Push Notification Worker Pool ────────────────────────────────────────────
 # A bounded pool of worker threads processes push sends sequentially.
@@ -2262,6 +2470,83 @@ def push_notification_to_user(db_ignored, user_id, title, body, nav_url="/", tag
         placeholders = ",".join("?" * len(dead_ids))
         _raw_pg(f"DELETE FROM push_subscriptions WHERE id IN ({placeholders})", tuple(dead_ids))
 
+# ── Per-User Notification Preferences ───────────────────────────────────────
+_DEFAULT_NOTIF_PREFS = {
+    "inapp_enabled": True,
+    "push_enabled": True,
+    "email_enabled": True,
+    "mute_after_hours": False,
+    "mute_start": "18:00",
+    "mute_end": "09:00",
+    "priority_only": False,
+    "digest_frequency": "weekly",  # weekly | bi-weekly | daily | none
+    "role_alerts": True,           # Team-lead/manager-specific role digests
+}
+
+# Notification types considered "urgent" for push even with priority_only
+_URGENT_NOTIF_TYPES = {
+    "task_assigned", "approval_requested", "dm", "call", "message",
+    "deadline", "sla_breach", "blocker", "incident"
+}
+
+def _get_notif_prefs(user_id):
+    """Load merged notif prefs for a user (defaults + stored overrides)."""
+    try:
+        row = _raw_pg("SELECT notify_prefs FROM users WHERE id=?", (user_id,), fetch=True)
+        stored = {}
+        if row:
+            r = row[0]
+            raw = r["notify_prefs"] if isinstance(r, dict) else (r[0] if r else "{}")
+            try:
+                stored = json.loads(raw or "{}")
+            except Exception:
+                stored = {}
+        prefs = {**_DEFAULT_NOTIF_PREFS, **stored}
+        return prefs
+    except Exception:
+        return dict(_DEFAULT_NOTIF_PREFS)
+
+def _is_muted(prefs):
+    """Return True if current time falls in user's mute window."""
+    if not prefs.get("mute_after_hours"):
+        return False
+    try:
+        from datetime import datetime as _dt
+        now = _dt.now()
+        start_h, start_m = map(int, prefs.get("mute_start", "18:00").split(":"))
+        end_h, end_m = map(int, prefs.get("mute_end", "09:00").split(":"))
+        cur_mins = now.hour * 60 + now.minute
+        start_mins = start_h * 60 + start_m
+        end_mins = end_h * 60 + end_m
+        if start_mins > end_mins:  # crosses midnight
+            return cur_mins >= start_mins or cur_mins < end_mins
+        return start_mins <= cur_mins < end_mins
+    except Exception:
+        return False
+
+def _should_notify(user_id, notif_type, channel="inapp"):
+    """
+    Check user prefs before sending any notification.
+    channel = "inapp" | "push" | "email"
+    Returns True if allowed, False to suppress.
+    """
+    prefs = _get_notif_prefs(user_id)
+    if channel == "inapp" and not prefs.get("inapp_enabled", True):
+        return False
+    if channel == "push":
+        if not prefs.get("push_enabled", True):
+            return False
+        if _is_muted(prefs):
+            return False
+        if prefs.get("priority_only") and notif_type not in _URGENT_NOTIF_TYPES:
+            return False
+    if channel == "email":
+        if not prefs.get("email_enabled", True):
+            return False
+        if _is_muted(prefs):
+            return False
+    return True
+
 # ── DB Init & Migration ───────────────────────────────────────────────────────
 def init_db():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -2406,6 +2691,7 @@ def init_db():
             "ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN google_picture TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'password'",
+            "ALTER TABLE users ADD COLUMN notify_prefs TEXT DEFAULT '{}'",
             "CREATE TABLE IF NOT EXISTS time_logs (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, team_id TEXT DEFAULT '', date TEXT, task_name TEXT, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '', hours REAL DEFAULT 0, minutes INTEGER DEFAULT 0, comments TEXT DEFAULT '', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_ws ON tasks(workspace_id)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(workspace_id, assignee)",
@@ -4538,6 +4824,30 @@ def update_profile():
             result.pop(k, None)
         return jsonify(result)
 
+@app.route("/api/notif-prefs", methods=["GET"])
+@login_required
+def get_notif_prefs_api():
+    """Return current user's notification preferences."""
+    prefs = _get_notif_prefs(session["user_id"])
+    return jsonify(prefs)
+
+@app.route("/api/notif-prefs", methods=["PUT"])
+@login_required
+def update_notif_prefs_api():
+    """Update current user's notification preferences."""
+    d = request.json or {}
+    prefs = _get_notif_prefs(session["user_id"])
+    allowed = {"inapp_enabled","push_enabled","email_enabled","mute_after_hours",
+               "mute_start","mute_end","priority_only","digest_frequency","role_alerts"}
+    for k in allowed:
+        if k in d:
+            prefs[k] = d[k]
+    with get_db() as db:
+        db.execute("UPDATE users SET notify_prefs=? WHERE id=? AND workspace_id=?",
+                   (json.dumps(prefs), session["user_id"], wid()))
+    _evict_me_cache(session["user_id"])
+    return jsonify({"ok": True, "prefs": prefs})
+
 @app.route("/api/users/<uid>",methods=["PUT"])
 @login_required
 @require_role("Admin", "Manager")
@@ -6549,20 +6859,39 @@ def update_ticket(tid):
                     d.get("project",t["project"]),json.dumps(d.get("tags",json.loads(t["tags"] or "[]"))),now,
                     d.get("team_id",cur_team_id),tid))
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
-        # Email on ticket status change — notify assignee and reporter if different
+        # In-app + email on ticket status change — notify assignee, reporter, and managers
         if d.get("status") and d["status"] != t["status"]:
             _tkt_changer = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
             _tkt_changer_name = _tkt_changer["name"] if _tkt_changer else "Someone"
             _tkt_notified = set()
-            for _tkt_uid in [t["assignee"], t["reporter"]]:
+            _new_status = d["status"]
+            # Notify managers on high/critical priority tickets
+            _managers = []
+            if t.get("priority") in ("high", "critical"):
+                _mgr_rows = db.execute("SELECT id FROM users WHERE workspace_id=? AND role IN ('Manager','Admin')", (wid(),)).fetchall()
+                _managers = [r["id"] for r in _mgr_rows if r["id"] != session["user_id"]]
+            _notif_targets = [t.get("assignee",""), t.get("reporter","")]
+            for _tkt_uid in (_notif_targets + _managers):
                 if not _tkt_uid or _tkt_uid in _tkt_notified:
                     continue
                 _tkt_notified.add(_tkt_uid)
+                _is_manager_notif = _tkt_uid in _managers
+                # In-app notification
+                if _should_notify(_tkt_uid, "ticket_updated", "inapp"):
+                    _nid2 = f"n{int(datetime.now().timestamp()*1000)}{_tkt_uid[:4]}"
+                    _msg = f"\U0001f3ab {_tkt_changer_name} updated ticket: {t['title']} → {_new_status}"
+                    db.execute("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                               (_nid2, wid(), "ticket_updated", _msg, _tkt_uid, 0, now, tid, "ticket"))
+                # Push notification
+                if _should_notify(_tkt_uid, "ticket_updated", "push"):
+                    threading.Thread(target=push_notification_to_user,
+                        args=(None, _tkt_uid, "Ticket Updated", f"{t['title']} → {_new_status}", "/"), daemon=True).start()
+                # Email
                 _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
-                if _tkt_user and _tkt_user["email"]:
+                if _tkt_user and _tkt_user["email"] and _should_notify(_tkt_uid, "ticket_updated", "email"):
                     threading.Thread(target=send_ticket_status_email,
                         args=(_tkt_user["email"], _tkt_user["name"], t["title"],
-                              d["status"], _tkt_changer_name, tid, wid()),
+                              _new_status, _tkt_changer_name, tid, wid()),
                         daemon=True).start()
     _cache_bust(wid(), "tickets", "appdata")
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
@@ -9678,10 +10007,37 @@ def create_approval():
          json.dumps(approvers), json.dumps([]), "", "", now, now, d.get("expires_at", ""))
     )
     with get_db() as db:
+        requester_name = ""
+        _rq = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+        if _rq:
+            requester_name = _rq["name"]
         for approver_id in approvers:
+            if not _should_notify(approver_id, "approval_requested", "inapp"):
+                continue
             nid = f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
-                       (nid, wid(), "approval_requested", f"Your approval needed: {d['title']}", approver_id, 0, now))
+                       (nid, wid(), "approval_requested", f"📬 {requester_name or 'Someone'} needs your approval: {d['title']}", approver_id, 0, now))
+            # Email the approver
+            if _should_notify(approver_id, "approval_requested", "email"):
+                _apv_user = db.execute("SELECT name,email FROM users WHERE id=?", (approver_id,)).fetchone()
+                if _apv_user and _apv_user["email"]:
+                    _apv_subject = f"📬 Approval needed: {d['title']}"
+                    _apv_body = f"""<div style="font-family:sans-serif;padding:24px;max-width:600px">
+                        <h2 style="color:#111">Approval Required</h2>
+                        <p><strong>{requester_name}</strong> has requested your approval for:</p>
+                        <div style="background:#f5f5f5;padding:16px;border-radius:8px;margin:16px 0">
+                            <h3 style="margin:0">{d['title']}</h3>
+                            <p style="color:#666;margin:8px 0 0">{d.get('description','')}</p>
+                        </div>
+                        <p>Please log in to review and approve or reject this request.</p>
+                    </div>"""
+                    threading.Thread(target=send_email,
+                        args=(_apv_user["email"], _apv_subject, _apv_body, wid()),
+                        daemon=True).start()
+            # Push notification
+            if _should_notify(approver_id, "approval_requested", "push"):
+                threading.Thread(target=push_notification_to_user,
+                    args=(None, approver_id, "Approval Needed", d["title"], "/"), daemon=True).start()
         return jsonify(dict(db.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()))
 
 @app.route("/api/approvals/<aid>/approve", methods=["POST"])

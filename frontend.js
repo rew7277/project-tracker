@@ -6181,6 +6181,62 @@ function TwoFASettingsCard({cu}){
 }
 
 /* ─── WorkspaceSettings ───────────────────────────────────────────────────── */
+function NotifPrefsPanel({cu}){
+  const [prefs,setPrefs]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const [saved,setSaved]=useState(false);
+  useEffect(()=>{api.get('/api/notif-prefs').then(d=>{if(!d.error)setPrefs(d);});},[]);
+  const save=async(updates)=>{
+    const merged={...(prefs||{}),...updates};
+    setPrefs(merged);
+    setSaving(true);
+    await api.put('/api/notif-prefs',updates);
+    setSaving(false);setSaved(true);setTimeout(()=>setSaved(false),1800);
+  };
+  if(!prefs)return html`<div style=${{padding:'32px 0',textAlign:'center',color:'var(--tx3)',fontSize:13}}>Loading notification settings…</div>`;
+  const S={card:{background:'var(--bg2)',borderRadius:12,padding:'20px 24px',marginBottom:16,border:'0.5px solid var(--bd)'},label:{fontSize:13,fontWeight:500,color:'var(--tx1)',margin:0},sub:{fontSize:12,color:'var(--tx3)',margin:'3px 0 0'},row:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 0',borderBottom:'0.5px solid var(--bd)'},rowLast:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 0'},toggle:{position:'relative',display:'inline-block',width:38,height:22,cursor:'pointer'},slider:(on)=>({position:'absolute',top:0,left:0,right:0,bottom:0,background:on?'var(--ac)':'var(--bd)',borderRadius:22,transition:'background .2s'}),knob:(on)=>({position:'absolute',top:3,left:on?18:3,width:16,height:16,background:'white',borderRadius:'50%',transition:'left .2s'})};
+  const Toggle=({on,onChange})=>html`<label style=${S.toggle} onClick=${()=>onChange(!on)}>
+    <span style=${S.slider(on)}></span>
+    <span style=${S.knob(on)}></span>
+  </label>`;
+  const sect=(title)=>html`<p style=${{fontSize:11,fontWeight:600,letterSpacing:'.06em',textTransform:'uppercase',color:'var(--tx3)',margin:'24px 0 8px'}}>${title}</p>`;
+  return html`<div style=${{maxWidth:640,margin:'0 auto',padding:'24px 0'}}>
+    <h2 style=${{fontSize:17,fontWeight:600,color:'var(--tx1)',margin:'0 0 4px'}}>Notification preferences</h2>
+    <p style=${{fontSize:13,color:'var(--tx3)',margin:'0 0 20px'}}>Control how and when you receive alerts across all channels.</p>
+    ${sect('Channels')}
+    <div style=${S.card}>
+      <div style=${S.row}><div><p style=${S.label}>In-app notifications</p><p style=${S.sub}>Banner alerts inside the dashboard</p></div><${Toggle} on=${prefs.inapp_enabled!==false} onChange=${v=>save({inapp_enabled:v})}/></div>
+      <div style=${S.row}><div><p style=${S.label}>Desktop / push alerts</p><p style=${S.sub}>Browser and Tauri OS notifications</p></div><${Toggle} on=${prefs.push_enabled!==false} onChange=${v=>save({push_enabled:v})}/></div>
+      <div style=${S.rowLast}><div><p style=${S.label}>Email notifications</p><p style=${S.sub}>Due-date, ticket, and digest emails</p></div><${Toggle} on=${prefs.email_enabled!==false} onChange=${v=>save({email_enabled:v})}/></div>
+    </div>
+    ${sect('Quiet hours')}
+    <div style=${S.card}>
+      <div style=${S.row}><div><p style=${S.label}>Mute after office hours</p><p style=${S.sub}>Suppress push and email during mute window</p></div><${Toggle} on=${!!prefs.mute_after_hours} onChange=${v=>save({mute_after_hours:v})}/></div>
+      ${prefs.mute_after_hours?html`<div style=${{display:'flex',gap:16,padding:'10px 0',alignItems:'center'}}>
+        <div><p style=${S.label}>Mute from</p><input type="time" value=${prefs.mute_start||'18:00'} onChange=${e=>save({mute_start:e.target.value})} style=${{background:'var(--bg3)',border:'0.5px solid var(--bd)',borderRadius:8,padding:'6px 10px',color:'var(--tx1)',fontSize:13,width:110}}/></div>
+        <div><p style=${S.label}>Until</p><input type="time" value=${prefs.mute_end||'09:00'} onChange=${e=>save({mute_end:e.target.value})} style=${{background:'var(--bg3)',border:'0.5px solid var(--bd)',borderRadius:8,padding:'6px 10px',color:'var(--tx1)',fontSize:13,width:110}}/></div>
+      </div>`:null}
+    </div>
+    ${sect('Alert filtering')}
+    <div style=${S.card}>
+      <div style=${S.row}><div><p style=${S.label}>Priority alerts only</p><p style=${S.sub}>Only push for urgent events (tasks, approvals, DMs)</p></div><${Toggle} on=${!!prefs.priority_only} onChange=${v=>save({priority_only:v})}/></div>
+      ${(cu.role==='TeamLead'||cu.role==='Manager'||cu.role==='Admin')?html`<div style=${S.rowLast}><div><p style=${S.label}>Role-based digest alerts</p><p style=${S.sub}>Daily summary for blockers, SLA breaches, pending approvals</p></div><${Toggle} on=${prefs.role_alerts!==false} onChange=${v=>save({role_alerts:v})}/></div>`:null}
+    </div>
+    ${sect('Email digest frequency')}
+    <div style=${S.card}>
+      <div style=${S.rowLast}><div><p style=${S.label}>Summary email frequency</p><p style=${S.sub}>Personalised task and project overview</p></div>
+        <select value=${prefs.digest_frequency||'weekly'} onChange=${e=>save({digest_frequency:e.target.value})} style=${{background:'var(--bg3)',border:'0.5px solid var(--bd)',borderRadius:8,padding:'6px 10px',color:'var(--tx1)',fontSize:13,cursor:'pointer'}}>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly (Mon)</option>
+          <option value="bi-weekly">Bi-weekly (1st & 15th)</option>
+          <option value="none">None</option>
+        </select>
+      </div>
+    </div>
+    ${saved?html`<p style=${{fontSize:12,color:'var(--gr)',textAlign:'center',margin:'8px 0 0'}}>✓ Preferences saved</p>`:null}
+  </div>`;
+}
+
 function WorkspaceSettings({cu,onReload}){
   const [ws,setWs]=useState(null);const [wsName,setWsName]=useState('');const [aiKey,setAiKey]=useState('');const [showKey,setShowKey]=useState(false);const [saving,setSaving]=useState(false);const [saved,setSaved]=useState(false);
   const [emailEnabled,setEmailEnabled]=useState(true);const [smtpServer,setSmtpServer]=useState('smtp.gmail.com');const [smtpPort,setSmtpPort]=useState(587);const [smtpUsername,setSmtpUsername]=useState('');const [smtpPassword,setSmtpPassword]=useState('');const [fromEmail,setFromEmail]=useState('');const [showSmtpPass,setShowSmtpPass]=useState(false);const [testEmail,setTestEmail]=useState('');const [testingEmail,setTestingEmail]=useState(false);const [testResult,setTestResult]=useState(null);const [otpEnabled,setOtpEnabled]=useState(false);
@@ -7083,6 +7139,40 @@ ${hasFiles?'- The user has attached files. Analyze them and create documentation
 /* ─── AIAssistant floating panel ──────────────────────────────────────────── */
 function AIAssistant({cu,projects,tasks,users}){
   const [open,setOpen]=useState(false);const [msgs,setMsgs]=useState([]);const [input,setInput]=useState('');const [busy,setBusy]=useState(false);const ref=useRef(null);const iref=useRef(null);
+
+  // Prefetch DM threads as soon as the DM screen opens, so clicking a member
+  // uses memory cache instead of showing the empty/start placeholder while the API responds.
+  const dmPrefetchedRef=useRef(false);
+  useEffect(()=>{
+    if(dmPrefetchedRef.current||!others.length)return;
+    dmPrefetchedRef.current=true;
+    const ids=others.map(u=>u.id).filter(Boolean);
+    let cancelled=false;
+    const prefetchOne=async(id)=>{
+      if(threadCache.current.has(id))return;
+      const d=await api.get('/api/dm/'+id,{quiet:true});
+      if(cancelled)return;
+      if(Array.isArray(d)){
+        const merged=mergePendingReactionState(id,d);
+        threadCache.current.set(id,merged);
+        _saveDmCache(id,merged);
+        if(!activeToRef.current && id===ids[0]){
+          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
+        }else if(id===activeToRef.current){
+          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
+        }
+      }
+    };
+    (async()=>{
+      const q=[...ids];
+      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
+        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
+      });
+      await Promise.all(workers);
+    })();
+    return()=>{cancelled=true;};
+  },[others.length,mergePendingReactionState]);
+
   useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
 
   const QUICK=[
@@ -10255,6 +10345,7 @@ function App(){
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
+            ${baseView==='settings'?html`<${NotifPrefsPanel} cu=${cu}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
