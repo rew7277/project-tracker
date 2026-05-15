@@ -4725,10 +4725,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return out;
   },[]);
   const setThreadMessages=useCallback((peer,list,alsoSetVisible=true)=>{
+    peer=String(peer||'');
     const normalized=normalizeDmList(list);
     threadCache.current.set(peer,normalized);
     _saveDmCache(peer,normalized);
-    if(alsoSetVisible&&peer===activeToRef.current){ setMsgThreadId(peer); setMsgs(normalized); }
+    if(alsoSetVisible&&peer===String(activeToRef.current||'')){ setMsgThreadId(peer); setMsgs(normalized); }
     return normalized;
   },[normalizeDmList,onClearInitial]);
   const pendingReactionUntil=useRef(new Map());
@@ -4898,9 +4899,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     // away from the chat they just clicked.
   },[toId,initialUserId,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
+    id=String(id||'');
     if(!id)return;
+    // Only the current active conversation may fetch a full DM thread.
+    // Background unread/preview/latest logic must never call /api/dm/:id for another peer.
+    if(id!==String(activeToRef.current||'')){
+      console.debug('[DM] blocked non-active full-thread fetch', {id,active:activeToRef.current,reason});
+      return;
+    }
     const seq=++reqSeq.current;
-    activeToRef.current=id;
     const existing=threadCache.current.get(id)||[];
     if(existing.length){setMsgThreadId(id);setMsgs(existing);setLoadingThread('');}
     else setLoadingThread(id);
@@ -9538,10 +9545,13 @@ function App(){
       const p=window.location.pathname;
       const dl=deepLinkFromSearch();
       if(dl.view)setView(dl.view);
+      if(dl.view==='dm'&&!dl.dmUser){try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_){}}
       if(dl.taskId)setInitialTaskId(dl.taskId);
       if(dl.ticketId)setInitialTicketId(dl.ticketId);
       if(dl.projectId)setInitialProjectId(dl.projectId);
-      if(dl.dmUser)setDmTargetUser(String(dl.dmUser));
+      if(dl.dmUser){setDmTargetUser(String(dl.dmUser));try{sessionStorage.setItem('pt_dm_notification_target',String(dl.dmUser));}catch(_){}}
+      const pathView=routeViewFromPath(VALID_VIEWS);
+      if(pathView==='dm'&&!dl.dmUser&&!new URLSearchParams(window.location.search||'').get('user')){try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_){}}
       const pid=projectIdFromPath();
       if(pid){setInitialProjectId(pid);setView('projects');}
     }catch(e){}
@@ -9594,7 +9604,7 @@ function App(){
       }
     }catch(e){}
   },[cu,dmTargetUser]);
-  const routeToNotification=useCallback((n={})=>{
+  const routeToNotification=useCallback(async(n={})=>{
     // Deep notification router: handles DB notifications, web-push URLs, older rows
     // that do not yet have entity_id/entity_type, and duplicate frontend bundles.
     const s=v=>String(v==null?'':v).trim();
@@ -9615,16 +9625,41 @@ function App(){
       (u.email&&contentLow.includes(String(u.email).toLowerCase()))
     ));
 
-    let dmPeer=s(n.peer_id||n.dm_user_id||n.sender_id||n.from_user_id||n.sender||n.caller_id);
-    const looksDm=['dm','direct_message','direct-message','message_received'].includes(type)||['dm','direct_message','direct-message'].includes(entityType)||contentLow.includes('direct message')||contentLow.includes('sent you a message');
+    let dmPeer=s(n.peer_id||n.dm_user_id||n.user_id||n.sender_id||n.from_user_id||n.sender||n.caller_id);
+    let urlLooksDm=false;
+    try{
+      const notifUrl=s(n.url||n.nav_url||n.link||n.href||'');
+      if(notifUrl){
+        const u=new URL(notifUrl, window.location.origin);
+        const q=u.searchParams;
+        if((u.pathname||'').split('/').filter(Boolean).pop()==='dm' || (u.pathname||'').includes('/dm')) urlLooksDm=true;
+        dmPeer=dmPeer||s(q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||q.get('dm_user_id')||q.get('from_user_id'));
+      }
+    }catch(_e){}
+    const looksDm=urlLooksDm||['dm','direct_message','direct-message','message_received','new_message','dm_created','chat_message'].includes(type)||['dm','direct_message','direct-message','message','chat'].includes(entityType)||contentLow.includes('direct message')||contentLow.includes('sent you a message')||contentLow.includes('new message from');
     const looksCall=['call','video_call','meet_call','incoming_call'].includes(type)||['call','video_call','meet_call'].includes(entityType)||contentLow.includes('calling you')||contentLow.includes('video call')||contentLow.includes('meet call');
     if(!dmPeer&&(looksDm||looksCall)) dmPeer=rawEntityId||s(userFromText&&userFromText.id);
-    if(looksDm||looksCall){
-      if(dmPeer){
-        try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(dmPeer));}catch(_e){}
-        setDmTargetUser(String(dmPeer));
+    if((looksDm||looksCall)){
+      if(!dmPeer){
+        // Some old notification rows / push payloads only contain /dm with no user id.
+        // Resolve exactly from the latest unread DM once, then deep-link to that sender.
+        try{
+          const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:4500});
+          if(Array.isArray(latest)&&latest.length){
+            const m=latest.find(x=>x&&(String(x.sender)!==String(cu&&cu.id)))||latest[0];
+            dmPeer=s(String(m.sender)===String(cu&&cu.id)?m.recipient:m.sender);
+          }
+        }catch(_e){}
       }
-      _setView(dmPeer?('dm:'+String(dmPeer)):'dm');
+      try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_e){}
+      if(dmPeer){
+        try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));}catch(_e){}
+        setDmTargetUser(String(dmPeer));
+        _setView('dm:'+String(dmPeer));
+      }else{
+        try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_e){}
+        _setView('dm');
+      }
       return;
     }
 
@@ -9703,9 +9738,34 @@ function App(){
   },[cu]);
   const [dmUnread,setDmUnread]=useState([]);
   useEffect(()=>{
-    // Plain /dm intentionally does not auto-select any saved/unread user.
-    // Manual clicks and explicit notification URLs are the only allowed selectors.
-  },[view,dmTargetUser]);
+    // Notification fallback only: older browser-push payloads sometimes navigate to plain /dm
+    // without ?user=. In that one case, resolve latest unread once and then clear the flag.
+    // Normal manual navigation to /dm still shows "Select someone".
+    let cancelled=false;
+    const run=async()=>{
+      try{
+        const base=String(view||'').split(':')[0];
+        if(base!=='dm'||dmTargetUser)return;
+        const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
+        if(!shouldResolve)return;
+        sessionStorage.removeItem('pt_dm_resolve_next');
+        const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:4500});
+        if(cancelled)return;
+        if(Array.isArray(latest)&&latest.length){
+          const m=latest.find(x=>x&&(String(x.sender)!==String(cu&&cu.id)))||latest[0];
+          const peer=String(String(m.sender)===String(cu&&cu.id)?m.recipient:m.sender||'');
+          if(peer){
+            sessionStorage.setItem('pt_open_dm_user',peer);
+            sessionStorage.setItem('pt_dm_notification_target',peer);
+            setDmTargetUser(peer);
+            _setView('dm:'+peer);
+          }
+        }
+      }catch(_e){}
+    };
+    run();
+    return()=>{cancelled=true;};
+  },[view,dmTargetUser,cu&&cu.id,_setView]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
