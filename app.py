@@ -546,7 +546,7 @@ import queue as _queue, threading as _poollock
 # Pool sized for: gunicorn workers × gevent greenlets per worker.
 # With POOL_SIZE env var support so Railway can tune without redeploy.
 import os as _os_pool
-_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "20"))
+_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "6"))
 _PG_POOL      = _queue.Queue(maxsize=_PG_POOL_SIZE)
 _PG_POOL_LOCK = _poollock.Lock()
 _PG_KWARGS    = None   # cached once after first parse
@@ -562,19 +562,16 @@ def _make_conn():
     return _PGConn(**_pg_kwargs())
 
 def _get_pool_conn():
-    """Get a healthy connection from pool, or create a new one.
-    We skip the SELECT 1 health-check on every borrow — that check costs
-    one full India→US round-trip (180ms) per request, eliminating all the
-    savings from pooling. Instead we rely on try/except around real queries
-    and close broken connections there. Connections that die in the pool
-    (idle TCP timeout) are caught by _return_pool_conn's ping-before-put
-    for connections that have been idle a long time.
+    """Get a healthy pooled DB connection without creating unlimited new
+    PostgreSQL sessions. The old fallback opened a fresh connection whenever
+    the pool was empty; under DM/presence polling this exhausted Postgres with
+    "too many clients already" and caused 499/500 responses.
     """
     try:
-        conn = _PG_POOL.get_nowait()
-        return conn   # trust the connection; let the real query catch breaks
+        return _PG_POOL.get(timeout=float(_os_pool.environ.get("PG_POOL_WAIT_SECONDS", "3")))
     except _queue.Empty:
-        return _make_conn()
+        # Hard cap: fail fast instead of stampeding Postgres with new clients.
+        raise RuntimeError("Database connection pool exhausted; reduce polling or increase PG_POOL_SIZE/Postgres max_connections")
 
 def _validate_conn(conn):
     """Light ping — called only when a query fails, not on every borrow."""
@@ -600,7 +597,7 @@ def _pool_conn_with_retry():
     conn = _get_pool_conn()
     return conn
 
-def _prewarm_pool(n=4):
+def _prewarm_pool(n=max(1, min(2, _PG_POOL_SIZE))):
     """Open n connections at startup so first requests don't stall."""
     for _ in range(n):
         try:
@@ -4468,6 +4465,7 @@ def get_presence():
     cached = _cache_get(cache_key)
     if cached is not None:
         return jsonify(cached)
+    stale_key = f"presence:{ws}:last:v2"
     try:
         online_cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
         away_cutoff = (now_ist() - timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -4485,8 +4483,9 @@ def get_presence():
         result = {"online": online, "away": away}
     except Exception as e:
         log.warning("[presence] read failed: %s", e)
-        result = {"online": [], "away": []}
+        result = _cache_get(stale_key) or {"online": [], "away": []}
     _cache_set(cache_key, result)
+    _cache_set(stale_key, result)
     return jsonify(result)
 
 @app.route("/api/meet/notify", methods=["POST"])

@@ -4570,7 +4570,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const dmMeetCloseTimerRef=useRef(null);
   const typingTimerRef=useRef(null);
   const ref=useRef(null);
-  const activeToRef=useRef(toId);
+  const activeToRef=useRef('');
   const reqSeq=useRef(0);
   const _dmCacheKey='pfDmThreadCache:v3';
   const _loadDmCache=()=>{try{return new Map(Object.entries(JSON.parse(localStorage.getItem(_dmCacheKey)||'{}')));}catch{return new Map();}};
@@ -4714,7 +4714,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return merged;
   },[]);
   const switchToUser=useCallback((id,source='click')=>{
-    if(!id||id===activeToRef.current)return;
+    const id2=String(id||'');
+    if(!id2||id2===String(activeToRef.current||''))return;
+    id=id2;
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
@@ -4735,10 +4737,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[normalizeDmList]);
   useEffect(()=>{
     if(initialUserId){
-      const u=safe(users).find(u=>u.id===initialUserId);
-      if(u){switchToUser(initialUserId,'notification');if(onClearInitial)onClearInitial();}
+      switchToUser(String(initialUserId),'notification');
+      if(onClearInitial)onClearInitial();
     }
-  },[initialUserId,users,switchToUser,onClearInitial]);
+  },[initialUserId,switchToUser,onClearInitial]);
+  useEffect(()=>{
+    if(toId)return;
+    const firstUnread=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
+    const sid=firstUnread?String(firstUnread.sender||firstUnread.user_id||firstUnread.peer_id||''):'';
+    if(sid) switchToUser(sid,'first-unread-fallback');
+  },[toId,dmUnread,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     if(!id)return;
     const seq=++reqSeq.current;
@@ -9376,16 +9384,30 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
-  const _setView=useCallback((v)=>{
-    setView(v);
+  const [dmTargetUser,setDmTargetUser]=useState(()=>{
     try{
-      const base=v.split(':')[0];
+      const ri=ptRouteInfo();
+      if(ri.page==='dm'&&ri.user)return String(ri.user);
+      return sessionStorage.getItem('pt_open_dm_user')||null;
+    }catch(_){return null;}
+  });
+  const _setView=useCallback((v)=>{
+    const raw=String(v||'dashboard');
+    const base=raw.split(':')[0];
+    setView(base);
+    try{
       if(VALID_VIEWS.includes(base)){
-        history.pushState(null,'','/'+base);
+        let suffix='';
+        if(base==='dm'){
+          const explicit=raw.startsWith('dm:')?raw.slice(3):'';
+          const target=explicit||sessionStorage.getItem('pt_open_dm_user')||dmTargetUser||'';
+          if(target)suffix='?user='+encodeURIComponent(String(target));
+        }
+        history.pushState(null,'','/'+base+suffix);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
-  },[]);
+  },[dmTargetUser]);
   // Handle browser back/forward
   useEffect(()=>{
     const onPop=()=>{
@@ -9434,7 +9456,7 @@ function App(){
         setDmTargetUser(String(dmPeer));
         try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));}catch(_e){}
       }
-      _setView('dm');
+      _setView(dmPeer?('dm:'+String(dmPeer)):'dm');
       return;
     }
 
@@ -9486,8 +9508,8 @@ function App(){
       else if((action==='ticket'||ri.page==='tickets')&&id){setInitialTicketId(String(id));_setView('tickets');}
       else if(action==='dm'||ri.page==='dm'){
         const target=user||savedDm;
-        if(target)setDmTargetUser(String(target));
-        _setView('dm');
+        if(target){setDmTargetUser(String(target));try{sessionStorage.setItem('pt_open_dm_user',String(target));}catch(_){}}
+        _setView(target?('dm:'+String(target)):'dm');
       }
     }catch(e){}
   },[_setView]);
@@ -9517,9 +9539,15 @@ function App(){
     try{localStorage.setItem('pf_team_ctx',id||'');}catch{}
   },[cu]);
   const [dmUnread,setDmUnread]=useState([]);
+  useEffect(()=>{
+    if(view!=='dm'||dmTargetUser)return;
+    const first=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
+    const sid=first?String(first.sender||first.user_id||first.peer_id||''):'';
+    if(sid){setDmTargetUser(sid);try{sessionStorage.setItem('pt_open_dm_user',sid);}catch(_){} history.replaceState(null,'',ptDmUrl(sid));}
+  },[view,dmUnread,dmTargetUser]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
-  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
+  const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
   const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
   const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
@@ -9724,7 +9752,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now())});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now())});
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
@@ -9775,7 +9803,7 @@ function App(){
                     const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
                     const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
                     window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-                    showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);_setView('dm');window.focus();},{tag:'dm-'+m.id});
+                    showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);try{sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id});
                     playSound('notif');
                   }
                 }
@@ -9825,7 +9853,7 @@ function App(){
               }
             }
             if(msg.type==='presence'){
-              api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
+              api.get('/api/presence',{quiet:true,timeoutMs:6000}).then(p=>{if(Array.isArray(p))setOnlineUsers(new Set(p.map(String)));else if(p){setOnlineUsers(new Set((p.online||[]).map(String)));}}).catch(()=>{});
             }
           }catch(err){}
         };
@@ -9840,18 +9868,30 @@ function App(){
     return()=>{if(es)es.close();if(retryTimer)clearTimeout(retryTimer);};
   },[cu,teamCtx]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Presence heartbeat — ping every 30s, fetch online users every 15s
+  // Presence heartbeat — throttled to avoid DB/client exhaustion.
   useEffect(()=>{
     if(!cu)return;
-    const fetchPresence=()=>api.get('/api/presence').then(ids=>{
-      if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
-    }).catch(()=>{});
-    const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    const presStartId=setTimeout(()=>beat(),4000); // delay avoids cold-start stampede
+    let lastPosted=0,lastFetched=0,presenceBusy=false;
+    const applyPresenceLite=(p)=>{
+      if(Array.isArray(p))setOnlineUsers(new Set(p.map(String)));
+      else if(p&&typeof p==='object')setOnlineUsers(new Set((p.online||[]).map(String)));
+    };
+    const fetchPresence=()=>{
+      const now=Date.now();
+      if(presenceBusy||now-lastFetched<25000)return Promise.resolve();
+      presenceBusy=true;lastFetched=now;
+      return api.get('/api/presence',{quiet:true,timeoutMs:6000}).then(applyPresenceLite).catch(()=>{}).finally(()=>{presenceBusy=false;});
+    };
+    const beat=()=>{
+      const now=Date.now();
+      if(now-lastPosted<25000)return fetchPresence();
+      lastPosted=now;
+      return api.post('/api/presence',{}, {quiet:true,timeoutMs:6000}).then(fetchPresence).catch(fetchPresence);
+    };
+    const presStartId=setTimeout(()=>beat(),4000);
     const beatId=setInterval(beat,30000);
     const onFocus=()=>{beat();};
     window.addEventListener('focus',onFocus);
-    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
     return()=>{clearTimeout(presStartId);clearInterval(beatId);window.removeEventListener('focus',onFocus);};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
@@ -10081,7 +10121,7 @@ function App(){
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
               window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-              showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);_setView('dm');window.focus();},{tag:'dm-'+m.id});
+              showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);try{sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id});
               playSound('notif');
             }
           });
