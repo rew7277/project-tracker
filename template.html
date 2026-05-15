@@ -5318,7 +5318,7 @@ const playSound=(type='notif')=>{
     }
   }catch(e){}
 };
-function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set()}){
+function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId=null,onClearInitial,onlineUsers=new Set(),awayUsers=new Set()}){
   const isAdminOrManager=cu&&(cu.role==='Admin'||cu.role==='Manager');
   if(!dmEnabled&&!isAdminOrManager) return html`
     <div style=${{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',gap:12,color:'var(--tx3)'}}>
@@ -5326,7 +5326,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:14,fontWeight:700,color:'var(--tx2)'}}>Direct Messages Disabled</div>
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
-  const others=safe(users).filter(u=>u.id!==cu.id);
+  const others=safe(users).filter(u=>String(u.id)!==String(cu.id));
   const [toId,setToId]=useState(initialUserId||'');
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
@@ -5358,6 +5358,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const voiceChunksRef=useRef([]);
   const [activeCallUsers,setActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
   useEffect(()=>{const h=e=>setActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
+  const hasOnline=(id)=>onlineUsers&&onlineUsers.has&&onlineUsers.has(String(id));
+  const hasAway=(id)=>awayUsers&&awayUsers.has&&awayUsers.has(String(id));
+  const presenceColor=(id)=>activeCallUsers.has(id)||activeCallUsers.has(String(id))?'#8b5cf6':(hasOnline(id)?'#22c55e':(hasAway(id)?'#f59e0b':'#475569'));
+  const presenceShadow=(id)=>activeCallUsers.has(id)||activeCallUsers.has(String(id))?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(hasOnline(id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':(hasAway(id)?'0 0 0 1px #f59e0b,0 0 6px rgba(245,158,11,.45)':'none'));
+  const presenceText=(id)=>activeCallUsers.has(id)||activeCallUsers.has(String(id))?'In a call':(hasOnline(id)?'Active now':(hasAway(id)?'Away':'Offline'));
+
   const dmMeetWindowRef=useRef(null);
   const dmMeetCallRef=useRef(null);
   const dmMeetCloseTimerRef=useRef(null);
@@ -5491,7 +5497,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return merged;
   },[]);
   const switchToUser=useCallback((id,source='click')=>{
-    if(!id||id===activeToRef.current)return;
+    const id2=String(id||'');
+    if(!id2||id2===String(activeToRef.current||''))return;
+    id=id2;
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
@@ -5512,10 +5520,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[normalizeDmList]);
   useEffect(()=>{
     if(initialUserId){
-      const u=safe(users).find(u=>u.id===initialUserId);
-      if(u){switchToUser(initialUserId,'notification');if(onClearInitial)onClearInitial();}
+      // Notification URLs carry ids as strings; DB/user ids may be numeric.
+      // Open the thread directly and let fetch/cache load the conversation.
+      switchToUser(String(initialUserId),'notification');
+      if(onClearInitial)onClearInitial();
     }
-  },[initialUserId,users,switchToUser,onClearInitial]);
+  },[initialUserId,switchToUser,onClearInitial]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     if(!id)return;
     const seq=++reqSeq.current;
@@ -5659,10 +5669,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       }
       if(msg&&msg.type==='dm_created'&&data&&data.message){
         let m=data.message;
-        const peer=(m.sender===cu.id)?m.recipient:m.sender;
-        const belongs=peer===toId || data.sender===toId || data.recipient===toId;
+        const peer=(String(m.sender)===String(cu.id))?String(m.recipient):String(m.sender);
+        const belongs=String(peer)===String(toId) || String(data.sender)===String(toId) || String(data.recipient)===String(toId);
         if(belongs){
-          if(m.sender!==cu.id)m={...m,read:1};
+          if(String(m.sender)!==String(cu.id))m={...m,read:1};
           setMsgThreadId(toId);
           setLoadingThread('');
           setMsgs(prev=>{
@@ -5682,7 +5692,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             const withoutTmp=base.filter(x=>!(String(x.id||'').startsWith('tmpdm')&&x.content===m.content&&x.sender===m.sender) && !(String(x.id||'').startsWith('srvtmp')&&x.content===m.content&&x.sender===m.sender));
             const next=mergePendingReactionState(toId,[...withoutTmp,{...m,_pending:false}]);
             setThreadMessages(toId,next,false);
-            if(m.sender!==cu.id)playSound('notif');
+            if(String(m.sender)!==String(cu.id))playSound('notif');
             return normalizeDmList(next);
           });
           onDmRead(toId);
@@ -6011,18 +6021,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
-        ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;const lm=lastMsgMap[u.id];return html`
+        ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=String(toId)===String(u.id);const lm=lastMsgMap[String(u.id)]||lastMsgMap[u.id];return html`
           <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
-              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
+              <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:presenceColor(u.id),border:'2px solid var(--bg)',boxShadow:presenceShadow(u.id),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
               <div style=${{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:4}}>
                 <div style=${{fontSize:13,fontWeight:unr>0?700:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>${u.name}</div>
                 ${lm?html`<span style=${{fontSize:10,color:'var(--tx3)',flexShrink:0,whiteSpace:'nowrap'}}>${lm.time_label||ago(lm.ts)}</span>`:null}
               </div>
-              ${lm?html`<div style=${{fontSize:11,color:unr>0?'var(--tx2)':'var(--tx3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:unr>0?600:400,marginTop:1}}>${lm.sender===cu.id?'You: ':''}<span>${(lm.content||'').replace(/\n/g,' ')}</span></div>`:null}
+              ${lm?html`<div style=${{fontSize:11,color:unr>0?'var(--tx2)':'var(--tx3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:unr>0?600:400,marginTop:1}}>${String(lm.sender)===String(cu.id)?'You: ':''}<span>${(lm.content||'').replace(/\n/g,' ')}</span></div>`:null}
             </div>
             ${unr>0?html`<span style=${{background:'var(--ac)',color:'#fff',borderRadius:10,fontSize:10,padding:'2px 6px',fontFamily:'monospace',fontWeight:700,flexShrink:0}}>${unr}</span>`:null}
           </button>`;})}
@@ -6033,11 +6043,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         ${toUser?html`
           <div style=${{position:'relative'}}>
             <${Av} u=${toUser} size=${36}/>
-            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:activeCallUsers.has(toUser.id)?'#8b5cf6':(onlineUsers.has(toUser.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(toUser.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.7)':(onlineUsers.has(toUser.id)?'0 0 0 1px #22c55e,0 0 7px rgba(34,197,94,.6)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
+            <div style=${{position:'absolute',bottom:0,right:0,width:11,height:11,borderRadius:'50%',background:presenceColor(toUser.id),border:'2px solid var(--bg)',boxShadow:presenceShadow(toUser.id),transition:'background .3s,box-shadow .3s'}}></div>
           </div>
           <div>
             <div style=${{fontSize:14,fontWeight:700,color:'var(--tx)'}}>${toUser.name}</div>
-            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(onlineUsers.has(toUser.id)?'#22c55e':'var(--tx3)'),fontWeight:500}}>${remoteTyping?'typing…':(activeCallUsers.has(toUser.id)?'In a call':(onlineUsers.has(toUser.id)?'Active now':'Offline'))}</div>
+            <div style=${{fontSize:11,color:remoteTyping?'var(--ac)':(hasOnline(toUser.id)?'#22c55e':(hasAway(toUser.id)?'#f59e0b':'var(--tx3)')),fontWeight:500}}>${remoteTyping?'typing…':presenceText(toUser.id)}</div>
           </div>`:html`<span style=${{color:'var(--tx3)'}}>Select someone to chat</span>`}
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
@@ -10233,6 +10243,14 @@ function App(){
     return()=>window.removeEventListener('pt:sw-navigate',onSwNav);
   },[_setView,setInitialTaskId,setInitialProjectId,setInitialTicketId,setDmTargetUser]);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
+  const [awayUsers,setAwayUsers]=useState(new Set());
+  const applyPresence=(payload)=>{
+    if(Array.isArray(payload)){setOnlineUsers(new Set(payload.map(String)));setAwayUsers(new Set());return;}
+    if(payload&&typeof payload==='object'){
+      setOnlineUsers(new Set((payload.online||[]).map(String)));
+      setAwayUsers(new Set((payload.away||[]).map(String)));
+    }
+  };
   const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
   const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
   useEffect(()=>{const h=e=>setGlobalActiveCallUsers(new Set((e.detail&&e.detail.users)||[]));window.addEventListener('pt_active_call_users',h);return()=>window.removeEventListener('pt_active_call_users',h);},[]);
@@ -10430,7 +10448,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?'/?action=dn&user='+encodeURIComponent(n.sender||''):(n.url||'/')});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);}catch(_){} _setView&&_setView('dm');}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?'/?action=dm&user='+encodeURIComponent(n.sender||''):(n.url||'/')});
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
@@ -10514,7 +10532,7 @@ function App(){
               }
             }
             if(msg.type==='presence'){
-              api.get('/api/presence').then(ids=>{if(Array.isArray(ids))setOnlineUsers(new Set(ids));}).catch(()=>{});
+              api.get('/api/presence').then(applyPresence).catch(()=>{});
             }
           }catch(err){}
         };
@@ -10529,19 +10547,28 @@ function App(){
     return()=>{if(es)es.close();if(retryTimer)clearTimeout(retryTimer);};
   },[cu,teamCtx]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Presence heartbeat — ping every 30s, fetch online users every 15s
+  // Presence heartbeat: Teams-like status. Only heartbeat while locally active;
+  // after 3 minutes without keyboard/mouse, the server naturally shows the user as Away.
   useEffect(()=>{
     if(!cu)return;
-    const fetchPresence=()=>api.get('/api/presence').then(ids=>{
-      if(Array.isArray(ids)&&ids.length>=0)setOnlineUsers(new Set(ids));
-    }).catch(()=>{});
-    const beat=()=>api.post('/api/presence',{}).then(()=>fetchPresence()).catch(()=>{});
-    beat();
-    const beatId=setInterval(beat,30000);
-    const onFocus=()=>{beat();};
-    window.addEventListener('focus',onFocus);
-    // REMOVED: redundant presId interval — beat() already calls fetchPresence() each cycle
-    return()=>{clearInterval(beatId);window.removeEventListener('focus',onFocus);};
+    const lastLocalActivity={current:Date.now()};
+    let lastPosted=0;
+    const fetchPresence=()=>api.get('/api/presence',{quiet:true}).then(applyPresence).catch(()=>{});
+    const postActive=()=>{
+      const now=Date.now();
+      if(now-lastPosted<12000)return fetchPresence();
+      lastPosted=now;
+      return api.post('/api/presence',{}, {quiet:true}).then(fetchPresence).catch(fetchPresence);
+    };
+    const onActivity=()=>{lastLocalActivity.current=Date.now();postActive();};
+    ['mousemove','mousedown','keydown','touchstart','scroll'].forEach(ev=>window.addEventListener(ev,onActivity,{passive:true}));
+    postActive();
+    const beatId=setInterval(()=>{
+      if(Date.now()-lastLocalActivity.current<3*60*1000) postActive();
+      else fetchPresence();
+    },30000);
+    window.addEventListener('focus',onActivity);
+    return()=>{clearInterval(beatId);window.removeEventListener('focus',onActivity);['mousemove','mousedown','keydown','touchstart','scroll'].forEach(ev=>window.removeEventListener(ev,onActivity));};
   },[cu]);
   const [showReminders,setShowReminders]=useState(false);const [reminderTask,setReminderTask]=useState(null);const [upcomingReminders,setUpcomingReminders]=useState([]);
   const [showNotifBanner,setShowNotifBanner]=useState(false);
@@ -11071,7 +11098,7 @@ function App(){
               onClearInitialTask=${()=>setInitialTaskId(null)}
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
-            ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>`:null}
+            ${baseView==='dm'?html`<${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers} awayUsers=${awayUsers}/>`:null}
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}

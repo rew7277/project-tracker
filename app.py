@@ -4431,41 +4431,61 @@ def register():
 @app.route("/api/presence", methods=["POST"])
 @login_required
 def update_presence():
-    """Update user last_active timestamp. Throttled: only writes to DB once per 60s
-    per user. Uses _raw_pg (pooled, no extra SELECT 1) for the write."""
-    uid = session["user_id"]
-    ws  = wid()
-    throttle_key = f"presence_write:{uid}"
-    # Skip DB write if we wrote recently — return instantly
+    """Record current user's last activity.
+
+    The frontend only calls this while the browser is actually active. If the
+    user stops interacting, GET /api/presence will naturally move them from
+    online -> away -> offline without any extra status column.
+    """
+    uid = session.get("user_id")
+    ws = wid()
+    throttle_key = f"presence_write:{ws}:{uid}"
     if _cache_get(throttle_key):
         return jsonify({"ok": True, "throttled": True})
     try:
-        _raw_pg("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?",
-                (ts(), uid, ws))
+        _raw_pg("UPDATE users SET last_active=? WHERE id=? AND workspace_id=?", (ts(), uid, ws))
     except Exception as _e:
         log.warning("[presence] write failed: %s", _e)
-    # Mark throttle via proper cache (Redis if available, dict otherwise)
     _cache_set(throttle_key, True)
-    # Bust presence cache so next GET sees the fresh timestamp
     _cache_bust(ws, "presence")
+    _cache_set(f"presence:{ws}", None)
     return jsonify({"ok": True})
 
 @app.route("/api/presence")
 @login_required
 def get_presence():
-    """Returns list of user IDs active in last 3 minutes. Cached 15s."""
+    """Teams-like presence.
+
+    Returns:
+      { online: [ids active within 3 minutes], away: [ids active within 15 minutes] }
+
+    Older clients that expected an array are handled in the frontend parser, but
+    the object lets the UI show the yellow Away state instead of wrongly saying
+    everyone is Active now.
+    """
     ws = wid()
-    cache_key = f"presence:{ws}"
+    cache_key = f"presence:{ws}:v2"
     cached = _cache_get(cache_key)
-    if cached is not None: return jsonify(cached)
+    if cached is not None:
+        return jsonify(cached)
     try:
-        cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
+        online_cutoff = (now_ist() - timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S')
+        away_cutoff = (now_ist() - timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%S')
         rows = _raw_pg(
-            "SELECT id FROM users WHERE workspace_id=? AND last_active>?",
-            (ws, cutoff), fetch=True)
-        result = [r["id"] for r in (rows or [])]
-    except Exception:
-        result = []
+            "SELECT id,last_active FROM users WHERE workspace_id=? AND last_active>?",
+            (ws, away_cutoff), fetch=True) or []
+        online, away = [], []
+        for r in rows:
+            uid = str(r["id"] if isinstance(r, dict) else r[0])
+            la = (r["last_active"] if isinstance(r, dict) else r[1]) or ""
+            if str(la) > online_cutoff:
+                online.append(uid)
+            else:
+                away.append(uid)
+        result = {"online": online, "away": away}
+    except Exception as e:
+        log.warning("[presence] read failed: %s", e)
+        result = {"online": [], "away": []}
     _cache_set(cache_key, result)
     return jsonify(result)
 
@@ -5857,8 +5877,8 @@ def get_dm(other_id):
     it on subsequent polls so only new messages are transferred.
     Example: GET /api/dm/u123?since=1715000000000
 
-    On the first load (no since param) the last 200 messages are returned
-    to cap response size on long-running conversations.
+    On the first load (no since param) the last 1000 messages are returned
+    so older conversation history is available immediately while still bounding response size.
     """
     me=session["user_id"]
     ws_id=wid()
@@ -5896,17 +5916,17 @@ def get_dm(other_id):
                      AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
                      AND ts > ?
                    ORDER BY ts
-                   LIMIT 200""",
+                   LIMIT 500""",
                 (ws_id, me, other_id, other_id, me, since_str)
             ).fetchall()
         else:
-            # Full load — cap at 200 most recent to bound response size.
+            # Full load — return enough history that older messages are visible immediately.
             rows=db.execute(
                 """SELECT * FROM direct_messages
                    WHERE workspace_id=?
                      AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
                    ORDER BY ts DESC
-                   LIMIT 200""",
+                   LIMIT 1000""",
                 (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
