@@ -248,9 +248,41 @@ const _apiRequest = async (u, opts = {}) => {
     clearTimeout(timer);
   }
 };
+function _ptDmThreadPeerFromUrl(u){
+  try{
+    const clean=String(u||'').split('?')[0];
+    const m=clean.match(/^\/api\/dm\/([^\/]+)$/);
+    if(!m)return '';
+    const peer=decodeURIComponent(m[1]||'');
+    if(['unread','latest-unread','route-target','previews','typing','react','edit','delete','pin'].includes(peer))return '';
+    return peer;
+  }catch(_){return '';}
+}
+function _ptDmLocalThreadCache(peer){
+  try{
+    const raw=JSON.parse(localStorage.getItem('pfDmThreadCache:v3')||'{}');
+    return Array.isArray(raw[String(peer||'')])?raw[String(peer||'')]:[];
+  }catch(_){return [];}
+}
 const api={
   _abort(){ _apiAbortCtrl.abort(); _apiAbortCtrl = new AbortController(); },
-  get:(u,opts={})=>_apiRequest(u,opts),
+  get:(u,opts={})=>{
+    const peer=_ptDmThreadPeerFromUrl(u);
+    if(peer){
+      try{
+        const active=String(window.__ptActiveDmUser||window.__ptDmActivePollUser||'');
+        const allowNoActive=(opts&&opts.allowNoActiveDmFetch)===true;
+        if(active&&String(peer)!==active){
+          console.debug('[DM] suppressed stale thread request', {peer,active,url:u});
+          return Promise.resolve(_ptDmLocalThreadCache(peer));
+        }
+        if(!active&&!allowNoActive&&String(location.pathname||'').includes('/dm')){
+          return Promise.resolve(_ptDmLocalThreadCache(peer));
+        }
+      }catch(_){}
+    }
+    return _apiRequest(u,opts);
+  },
   post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
   put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
   del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
@@ -4637,7 +4669,14 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:14,fontWeight:700,color:'var(--tx2)'}}>Direct Messages Disabled</div>
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
-  const others=safe(users).filter(u=>u.id!==cu.id);
+  const currentIds=new Set([String(cu&&cu.id||''),String(cu&&cu.email||'').toLowerCase(),String(cu&&cu.name||'').toLowerCase()].filter(Boolean));
+  const others=safe(users).filter(u=>{
+    if(!u)return false;
+    const uid=String(u.id||'');
+    const email=String(u.email||'').toLowerCase();
+    const name=String(u.name||'').toLowerCase();
+    return uid&&uid!==String(cu&&cu.id||'')&&!currentIds.has(email)&&!(email&&email===String(cu&&cu.email||'').toLowerCase())&&!(name&&name===String(cu&&cu.name||'').toLowerCase()&&email===String(cu&&cu.email||'').toLowerCase());
+  });
   const [toId,setToId]=useState('');
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
@@ -4853,7 +4892,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     if(isAuthoritativeSelection){
       dmSelectionSourceRef.current=source;
-      try{window.__ptActiveDmUser=String(id);window.__ptActiveDmSource=source;window.__ptActiveDmAt=Date.now();}catch(_){}
+      try{
+        window.__ptActiveDmUser=String(id);
+        window.__ptDmActivePollUser=String(id);
+        window.__ptActiveDmSource=source;
+        window.__ptActiveDmAt=Date.now();
+      }catch(_){}
     }
     if(isUserClick){
       try{
@@ -4873,15 +4917,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     if(id===String(activeToRef.current||'')){
       setToId(id);
-      try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));}catch(_e){}
+      try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
       return;
     }
     try{
       sessionStorage.setItem('pt_open_dm_user',id);
-      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target') history.replaceState(null,'',ptDmUrl(id));
+      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target'||source==='url'||source==='unread-auto') history.replaceState(null,'',ptDmUrl(id));
     }catch(_e){}
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
+    try{window.__ptActiveDmUser=String(id);window.__ptDmActivePollUser=String(id);window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_){}
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
     const cached=threadCache.current.get(id);
     if(cached){
@@ -4894,7 +4939,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList,onClearInitial,resolvePeerId]);
+  },[normalizeDmList,onClearInitial,resolvePeerId,users]);
   useEffect(()=>{
     const target=String(initialUserId||'');
     if(!target)return;
@@ -4936,6 +4981,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
   },[toId,initialUserId,dmUnread,cu&&cu.id,users,switchToUser]);
   useEffect(()=>{
+    // Last-resort recovery for plain /dm opened from a browser notification whose
+    // payload did not include ?user=. If the page has unread DM(s), immediately
+    // open the most relevant unread sender instead of showing "Select someone".
+    if(toId||initialUserId||autoOpenDoneRef.current||manualDmSelectionRef.current)return;
+    const peer=ptFirstValidDmPeer([ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id)],users,cu&&cu.id);
+    if(peer){
+      autoOpenDoneRef.current=true;
+      try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);sessionStorage.removeItem('pt_dm_resolve_next');}catch(_){}
+      switchToUser(peer,'unread-auto');
+    }
+  },[toId,initialUserId,dmUnread,users,cu&&cu.id,switchToUser]);
+  useEffect(()=>{
     // One-shot notification target passed through sessionStorage by SW before React mounted.
     if(toId||initialUserId)return;
     try{
@@ -4967,7 +5024,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     console.debug('[DM] load start', {id,reason,seq,cached:existing.length});
     const lastMsg=existing.length?existing[existing.length-1]:null;
     const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+new Date(lastMsg.ts).getTime():'';
-    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true,timeoutMs:20000});
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true,timeoutMs:45000,allowNoActiveDmFetch:true});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
@@ -4994,7 +5051,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
   },[onDmRead,mergePendingReactionState,setThreadMessages]);
   useEffect(()=>{
-    if(!toId){setMsgThreadId('');setMsgs([]);setLoadingThread('');return;}
+    if(!toId){
+      try{window.__ptActiveDmUser='';window.__ptDmActivePollUser='';}
+      catch(_){}
+      setMsgThreadId('');setMsgs([]);setLoadingThread('');return;
+    }
     const cached=threadCache.current.get(toId);
     // Pre-populate from global incoming cache (messages received via SSE/poll before this
     // component mounted) so the thread is visible before the network call completes.
@@ -5035,7 +5096,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const cachedAtStart=threadCache.current.get(requestedTo)||[];
         const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
         const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
-        const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:20000});
+        const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:45000,allowNoActiveDmFetch:true});
         if(requestedTo!==String(activeToRef.current||''))return;
         try{if(window.__ptDmActivePollUser&&String(window.__ptDmActivePollUser)!==requestedTo)return;}catch(_){}
         if(Array.isArray(d)){
@@ -5162,6 +5223,22 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   // background responses could visually jump the user to another conversation.
   // We now load only the selected/notification target thread, showing cached or
   // SSE-injected messages instantly while the fresh API response merges in.
+
+  useEffect(()=>{
+    // Sidebar previews must come from a preview endpoint, not by loading every
+    // conversation body. This keeps DM instant and prevents /api/dm/:id storms.
+    let cancelled=false;
+    const loadPreviews=async()=>{
+      try{
+        const d=await api.get('/api/dm/previews',{quiet:true,timeoutMs:8000});
+        if(cancelled||!d||typeof d!=='object')return;
+        setLastMsgMap(prev=>({...prev,...d}));
+      }catch(_){}
+    };
+    loadPreviews();
+    const id=setInterval(loadPreviews,60000);
+    return()=>{cancelled=true;clearInterval(id);};
+  },[]);
 
   const atBottomRef=useRef(true);
   const handleScroll=()=>{if(!ref.current)return;const{scrollTop,scrollHeight,clientHeight}=ref.current;atBottomRef.current=scrollHeight-scrollTop-clientHeight<120;};
@@ -5483,7 +5560,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
         ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;const lm=lastMsgMap[u.id];return html`
-          <button key=${u.id} onMouseDown=${e=>{e.preventDefault();switchToUser(u.id,'click')}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
+          <button key=${u.id} data-dm-peer=${u.id} type="button" onPointerDown=${e=>{e.preventDefault();e.stopPropagation();switchToUser(u.id,'click')}} onMouseDown=${e=>{e.preventDefault();e.stopPropagation();switchToUser(u.id,'click')}} onClick=${e=>{e.preventDefault();e.stopPropagation();switchToUser(u.id,'click')}} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>

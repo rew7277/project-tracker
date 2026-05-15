@@ -5924,7 +5924,7 @@ def get_dm(other_id):
     it on subsequent polls so only new messages are transferred.
     Example: GET /api/dm/u123?since=1715000000000
 
-    On the first load (no since param) the last 300 messages are returned
+    On the first load (no since param) the last 150 messages are returned
     so older conversation history is available immediately while still bounding response size.
     """
     me=session["user_id"]
@@ -5973,7 +5973,7 @@ def get_dm(other_id):
                    WHERE workspace_id=?
                      AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
                    ORDER BY ts DESC
-                   LIMIT 300""",
+                   LIMIT 150""",
                 (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
@@ -6631,6 +6631,46 @@ def dm_route_target():
                 ORDER BY ts DESC LIMIT 1
             """, (ws_id, me)).fetchone()
     return jsonify(dict(r) if r else {"user":"", "source":"none"})
+
+
+@app.route("/api/dm/previews")
+@login_required
+def dm_previews():
+    """Fast sidebar previews for all DM peers without loading full threads."""
+    ws_id = wid()
+    me = session["user_id"]
+    out = {}
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT * FROM (
+              SELECT dm.*,
+                     CASE WHEN dm.sender=? THEN dm.recipient ELSE dm.sender END AS peer_id,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY CASE WHEN dm.sender=? THEN dm.recipient ELSE dm.sender END
+                       ORDER BY dm.ts DESC
+                     ) AS rn
+              FROM direct_messages dm
+              WHERE dm.workspace_id=?
+                AND (dm.sender=? OR dm.recipient=?)
+                AND COALESCE(dm.deleted,0)=0
+            ) x
+            WHERE rn=1
+            LIMIT 200
+        """, (me, me, ws_id, me, me)).fetchall()
+        for r in rows:
+            d = dict(r)
+            peer = str(d.get("peer_id") or "")
+            if not peer or peer == str(me):
+                continue
+            out[peer] = {
+                "content": d.get("content") or "",
+                "ts": d.get("ts") or "",
+                "sender": d.get("sender") or "",
+                "time_label": ""
+            }
+    resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 @app.route("/api/dm/latest-unread")
 @login_required
