@@ -2859,10 +2859,6 @@ def init_db():
             "ALTER TABLE workspaces ADD COLUMN domain_join_requires_approval INTEGER DEFAULT 1",
             # ── Phase 2: Workspace URL slug (already exists but ensure column) ──
             "ALTER TABLE workspaces ADD COLUMN custom_url_id TEXT DEFAULT ''",
-            # ── DM routing & status columns ──
-            "ALTER TABLE direct_messages ADD COLUMN context_type TEXT DEFAULT ''",
-            "ALTER TABLE direct_messages ADD COLUMN context_id TEXT DEFAULT ''",
-            "ALTER TABLE direct_messages ADD COLUMN read_at TEXT DEFAULT ''",
         ]:
             try: db.execute(stmt)
             except: pass
@@ -5876,7 +5872,10 @@ def get_dm(other_id):
         cached_thread = _cache_get(dm_cache_key)
         if cached_thread is not None:
             return jsonify(cached_thread)
-    with get_db(autocommit=True) as db:
+    # NOTE: must use get_db() (autocommit=False) so the UPDATE that marks messages as
+    # read is actually committed. get_db(autocommit=True) skips COMMIT, so read status
+    # never persists and unread badges/delivered indicators are permanently wrong.
+    with get_db() as db:
         if since:
             # Incremental: only messages newer than the client's last known ts.
             # ts column stores ISO-8601 strings — lexicographic comparison works
@@ -5923,54 +5922,7 @@ def get_dm(other_id):
                 "WHERE workspace_id=? AND sender=? AND recipient=? AND read=0",
                 (ts(), ws_id, other_id, me)
             )
-        raw=_attach_dm_reactions(db, ws_id, rows)
-        # Enrich each message with computed display fields
-        now_ist = datetime.utcnow() + IST_OFFSET
-        today_str = now_ist.strftime('%Y-%m-%d')
-        yesterday_str = (now_ist - timedelta(days=1)).strftime('%Y-%m-%d')
-        # Get sender names for all messages in one query
-        sender_ids = list({m.get('sender') for m in raw if m.get('sender')})
-        sender_names = {}
-        if sender_ids:
-            qm = ','.join(['?']*len(sender_ids))
-            for r in db.execute(f"SELECT id,name FROM users WHERE workspace_id=? AND id IN ({qm})", [ws_id]+sender_ids).fetchall():
-                sender_names[r['id']] = r['name']
-        data = []
-        for m in raw:
-            d = dict(m)
-            # Parse ts for display
-            ts_str = d.get('ts','')
-            try:
-                if '+' in ts_str:
-                    ts_dt = datetime.strptime(ts_str[:19], '%Y-%m-%dT%H:%M:%S')
-                else:
-                    ts_dt = datetime.strptime(ts_str[:19], '%Y-%m-%dT%H:%M:%S')
-                msg_date = ts_dt.strftime('%Y-%m-%d')
-                if msg_date == today_str:
-                    d['date_label'] = 'Today'
-                elif msg_date == yesterday_str:
-                    d['date_label'] = 'Yesterday'
-                else:
-                    d['date_label'] = ts_dt.strftime('%-d %b %Y')
-                hour = ts_dt.hour
-                ampm = 'AM' if hour < 12 else 'PM'
-                h12 = hour % 12 or 12
-                d['time_label'] = f"{h12}:{ts_dt.minute:02d} {ampm}"
-            except Exception:
-                d['date_label'] = ''
-                d['time_label'] = ''
-            # Status: seen > delivered > sent > pending
-            if d.get('sender') == me:
-                if d.get('seen_at') or d.get('read'):
-                    d['status'] = 'seen'
-                elif d.get('delivered_at'):
-                    d['status'] = 'delivered'
-                else:
-                    d['status'] = 'sent'
-            else:
-                d['status'] = 'received'
-            d['sender_name'] = sender_names.get(d.get('sender',''), '')
-            data.append(d)
+        data=_attach_dm_reactions(db, ws_id, rows)
     # Only bust caches if we actually just marked messages as read
     if unread_count:
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
@@ -6455,8 +6407,6 @@ def send_dm():
     recipient=(d.get("recipient") or "").strip()
     reply_to=(d.get("reply_to") or "").strip()
     client_msg_id=(d.get("client_msg_id") or "").strip()
-    context_type=(d.get("context_type") or "").strip()
-    context_id=str(d.get("context_id") or "").strip()
     if not content:
         return jsonify({"error":"Empty"}),400
     if not recipient:
@@ -6467,11 +6417,11 @@ def send_dm():
     now=ts()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
-    # ── Round-trip 1: get all workspace users for name lookup + @mention routing ──
+    # ── Round-trip 1: get both users in one query ─────────────────────────────
     with get_db(autocommit=True) as db:
         users_rows=db.execute(
-            "SELECT id,name FROM users WHERE workspace_id=? AND COALESCE(deleted_at,\'\')=\'\' LIMIT 200",
-            (ws_id,)
+            "SELECT id,name FROM users WHERE workspace_id=? AND id IN (?,?) AND COALESCE(deleted_at,'')=''",
+            (ws_id, me, recipient)
         ).fetchall()
     users_map={r["id"]:r["name"] for r in (users_rows or [])}
     if recipient not in users_map:
@@ -6479,18 +6429,16 @@ def send_dm():
     sender_name=users_map.get(me) or "Someone"
     preview=content[:60]+("..." if len(content)>60 else "")
 
-    # ── @mention routing: parse @Name patterns ────────────────────────────────
-    import re as _re
-    mentioned_ids = set()
-    name_to_id = {v.lower():k for k,v in users_map.items()}
-    for mention in _re.findall(r'@([\w][\w ]{0,30})', content):
-        uid = name_to_id.get(mention.strip().lower())
-        if uid and uid != me and uid != recipient:
-            mentioned_ids.add(uid)
+    # Do not pre-publish before DB commit. One committed dm_created event avoids duplicate renders/blinking.
 
-    # ── Round-trip 2: idempotency check + insert ──────────────────────────────
+    # ── Round-trip 2: idempotency check + insert (client_msg_id preferred) ────
+    # NOTE: must use get_db() (autocommit=False) so _PooledDB.__exit__ calls COMMIT.
+    # get_db(autocommit=True) skips the COMMIT call, leaving the INSERT in an open
+    # transaction on the pool connection. Other sessions cannot see uncommitted rows,
+    # so subsequent GET /api/dm polls return empty and the message appears to vanish.
     row=None
-    with get_db(autocommit=True) as db:
+    with get_db() as db:
+        # Idempotency: if client_msg_id present, check for duplicate first.
         if client_msg_id:
             try:
                 existing=db.execute(
@@ -6506,87 +6454,60 @@ def send_dm():
             try:
                 result=db.execute("""INSERT INTO direct_messages(
                                id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id,
-                               context_type,context_id
-                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
-                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,
-                            context_type,context_id))
+                               delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
+                           (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
                 r=result.fetchone()
                 if r:
                     row=dict(r)
             except Exception:
+                # RETURNING not supported or client_msg_id column missing; fall back.
                 try:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id,
-                                   context_type,context_id
-                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id,
-                                context_type,context_id))
+                                   delivered_at,seen_at,edited,deleted,pinned,client_msg_id
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
                 except Exception:
-                    try:
-                        db.execute("""INSERT INTO direct_messages(
-                                       id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                                       delivered_at,seen_at,edited,deleted,pinned,client_msg_id
-                                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                   (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
-                    except Exception:
-                        db.execute("""INSERT INTO direct_messages(
-                                       id,workspace_id,sender,recipient,content,read,ts,reply_to,
-                                       delivered_at,seen_at,edited,deleted,pinned
-                                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                   (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0))
+                    db.execute("""INSERT INTO direct_messages(
+                                   id,workspace_id,sender,recipient,content,read,ts,reply_to,
+                                   delivered_at,seen_at,edited,deleted,pinned
+                               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0))
                 row={"id":mid,"workspace_id":ws_id,"sender":me,"recipient":recipient,
                      "content":content,"read":0,"ts":now,"reply_to":reply_to or "",
                      "delivered_at":now,"seen_at":"","edited":0,"deleted":0,"pinned":0,
-                     "client_msg_id":client_msg_id,"context_type":context_type,"context_id":context_id}
+                     "client_msg_id":client_msg_id}
 
     if not row:
         return jsonify({"error":"Failed to send message"}),500
 
     if client_msg_id and not row.get("client_msg_id"):
         row["client_msg_id"]=client_msg_id
-    row.setdefault("context_type", context_type)
-    row.setdefault("context_id", context_id)
-    row["status"] = "sent"
-    row["sender_name"] = sender_name
 
     # ── Round-trip 3: notification insert — run in background ─────────────────
     def _insert_notif():
         nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
         try:
-            with get_db(autocommit=True) as db2:
+            with get_db() as db2:  # get_db() so COMMIT is called on exit
                 try:
                     db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me,me,"dm"))
                 except Exception:
                     db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts) VALUES (?,?,?,?,?,?,?)",
                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
-                # @mention notifications
-                for muid in mentioned_ids:
-                    mnid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
-                    try:
-                        db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                   (mnid,ws_id,"dm",f"{sender_name} mentioned you: {preview}",muid,0,now,me,me,"dm"))
-                    except Exception:
-                        pass
         except Exception as e:
             log.warning("[DM] notification insert failed: %s", e)
     threading.Thread(target=_insert_notif, daemon=True).start()
 
-    # Bust caches and push the committed row immediately.
+    # Bust caches and push the committed row immediately. Keep slower Web Push work
+    # outside the critical path so the receiver gets the real DB message first.
     try:
         _bust_dm_thread(ws_id, me, recipient)
         _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
         _sse_publish(ws_id, "dm_created", {"id": row.get("id", mid), "sender": me, "recipient": recipient, "content": preview, "message": row})
         _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
         _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": mid})
-        for muid in mentioned_ids:
-            try:
-                _sse_publish(ws_id, "dm_mention", {"recipient": muid, "sender": me, "sender_name": sender_name, "content": preview, "message_id": mid})
-                _sse_publish(ws_id, "notification_updated", {"reason": "dm_mention", "sender": me, "recipient": muid})
-            except Exception:
-                pass
     except Exception as e:
         log.warning("[DM] immediate SSE fanout failed: %s", e)
 
@@ -9249,21 +9170,22 @@ def stripe_webhook():
     event = request.get_json(force=True)
     etype = event.get("type","")
     obj   = event.get("data",{}).get("object",{})
-    db    = get_db(autocommit=True)
     ws_id = obj.get("metadata",{}).get("workspace_id","")
-    if etype == "checkout.session.completed":
-        plan = obj.get("metadata",{}).get("plan","team")
-        sub  = obj.get("subscription","")
-        if ws_id:
-            db.execute("UPDATE workspaces SET plan=?, stripe_subscription_id=? WHERE id=?", (plan, sub, ws_id))
-    elif etype in ("customer.subscription.updated","customer.subscription.deleted"):
-        status = obj.get("status","")
-        sub_id = obj.get("id","")
-        ws_row = db.execute("SELECT id FROM workspaces WHERE stripe_subscription_id=?", (sub_id,)).fetchone()
-        if ws_row:
-            new_plan = "starter" if status in ("canceled","unpaid","past_due") else (obj.get("metadata",{}).get("plan","team"))
-            exp      = datetime.fromtimestamp(obj.get("current_period_end", 0)).isoformat() if obj.get("current_period_end") else ""
-            db.execute("UPDATE workspaces SET plan=?, plan_expires=? WHERE id=?", (new_plan, exp, ws_row["id"]))
+    # Use get_db() context manager so UPDATEs are committed on exit.
+    with get_db() as db:
+        if etype == "checkout.session.completed":
+            plan = obj.get("metadata",{}).get("plan","team")
+            sub  = obj.get("subscription","")
+            if ws_id:
+                db.execute("UPDATE workspaces SET plan=?, stripe_subscription_id=? WHERE id=?", (plan, sub, ws_id))
+        elif etype in ("customer.subscription.updated","customer.subscription.deleted"):
+            status = obj.get("status","")
+            sub_id = obj.get("id","")
+            ws_row = db.execute("SELECT id FROM workspaces WHERE stripe_subscription_id=?", (sub_id,)).fetchone()
+            if ws_row:
+                new_plan = "starter" if status in ("canceled","unpaid","past_due") else (obj.get("metadata",{}).get("plan","team"))
+                exp      = datetime.fromtimestamp(obj.get("current_period_end", 0)).isoformat() if obj.get("current_period_end") else ""
+                db.execute("UPDATE workspaces SET plan=?, plan_expires=? WHERE id=?", (new_plan, exp, ws_row["id"]))
     return "ok", 200
 
 # ═══════════════════════════════════════════════════════════════
