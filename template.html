@@ -10181,28 +10181,6 @@ function App(){
     }catch(e){}
   },[_setView]);
 
-  /* ── SW notification click → in-app routing (no full reload) ─────────── */
-  useEffect(()=>{
-    const onSwNav=(e)=>{
-      try{
-        const {params={},_resolve}=e.detail||{};
-        const action=String(params.action||'').toLowerCase();
-        const id=String(params.id||params.entity_id||'');
-        const user=String(params.user||params.sender||'');
-        if(action==='task'&&id){setInitialTaskId(id);_setView('tasks');}
-        else if(action==='project'&&id){setInitialProjectId(id);_setView('projects');}
-        else if(action==='ticket'&&id){setInitialTicketId(id);_setView('tickets');}
-        else if(action==='dm'&&user){setDmTargetUser(user);_setView('dm');}
-        else if(action==='messages'){_setView('messages');}
-        else if(action==='reminders'){_setView('reminders');}
-        else if(action==='notifs'||action==='notifications'){_setView('notifs');}
-        else{_setView('dashboard');}
-        if(typeof _resolve==='function')_resolve();
-      }catch(_){}
-    };
-    window.addEventListener('pt:sw-navigate',onSwNav);
-    return()=>window.removeEventListener('pt:sw-navigate',onSwNav);
-  },[_setView,setInitialTaskId,setInitialProjectId,setInitialTicketId,setDmTargetUser]);
   useEffect(()=>{
     try{
       const saved=JSON.parse(localStorage.getItem('pf_accent')||'null');
@@ -10232,6 +10210,28 @@ function App(){
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);const [dmTargetUser,setDmTargetUser]=useState(null);
+  /* ── SW notification click → in-app routing (no full reload) ─────────── */
+  useEffect(()=>{
+    const onSwNav=(e)=>{
+      try{
+        const {params={},_resolve}=e.detail||{};
+        const action=String(params.action||'').toLowerCase();
+        const id=String(params.id||params.entity_id||'');
+        const user=String(params.user||params.sender||'');
+        if(action==='task'&&id){setInitialTaskId(id);_setView('tasks');}
+        else if(action==='project'&&id){setInitialProjectId(id);_setView('projects');}
+        else if(action==='ticket'&&id){setInitialTicketId(id);_setView('tickets');}
+        else if(action==='dm'&&user){setDmTargetUser(user);_setView('dm');}
+        else if(action==='messages'){_setView('messages');}
+        else if(action==='reminders'){_setView('reminders');}
+        else if(action==='notifs'||action==='notifications'){_setView('notifs');}
+        else{_setView('dashboard');}
+        if(typeof _resolve==='function')_resolve();
+      }catch(_){}
+    };
+    window.addEventListener('pt:sw-navigate',onSwNav);
+    return()=>window.removeEventListener('pt:sw-navigate',onSwNav);
+  },[_setView,setInitialTaskId,setInitialProjectId,setInitialTicketId,setDmTargetUser]);
   const [onlineUsers,setOnlineUsers]=useState(new Set());
   const [globalIncomingCall,setGlobalIncomingCall]=useState(null);
   const [globalActiveCallUsers,setGlobalActiveCallUsers]=useState(()=>ptGetActiveCallUsers());
