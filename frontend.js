@@ -9538,24 +9538,49 @@ function VaultView({cu}){
 
 
 function workspaceSlugFromUser(u){
-  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
+  try{
+    const raw=(u&&(u.workspace_slug||u.slug||u.workspace_name||u.name||u.workspace_id_from_me||u.workspace_id))||'workspace';
+    return String(raw).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';
+  }catch(e){return 'workspace';}
+}
+function ptCurrentWorkspaceContext(extra){
+  try{
+    const base=Object.assign({}, window.PT_WORKSPACE||{}, window._pfWorkspace||{}, window._pfCurrentWorkspace||{});
+    const cu=window._pfCurrentUser||window.PT_CURRENT_USER||{};
+    if(cu&&typeof cu==='object'){
+      if(!base.workspace_id)base.workspace_id=cu.workspace_id||cu.workspace_id_from_me||cu.id_from_workspace||'';
+      if(!base.workspace_id_from_me)base.workspace_id_from_me=cu.workspace_id_from_me||cu.workspace_id||'';
+      if(!base.workspace_slug)base.workspace_slug=cu.workspace_slug||cu.workspace_name_slug||'';
+      if(!base.workspace_name)base.workspace_name=cu.workspace_name||cu._ws_name||'';
+      if(!base.name)base.name=cu.workspace_name||cu._ws_name||base.name||'';
+    }
+    if(extra&&typeof extra==='object')Object.assign(base,extra);
+    return base;
+  }catch(e){return extra||{};}
 }
 function ptWorkspacePrefixFromPath(){
   try{
     const VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault','notifs'];
     const seg=window.location.pathname.split('/').filter(Boolean);
     const vi=seg.findIndex(s=>VIEWS.includes(String(s||'').trim()));
-    if(vi>0)return '/'+seg.slice(0,vi).join('/')+'/';
+    if(vi>0){
+      const prefix=seg.slice(0,vi);
+      // Do not preserve the old placeholder /workspace/... once real workspace
+      // slug/id are available; it caused links like /workspace/dm.
+      if(prefix.length===1 && String(prefix[0]).toLowerCase()==='workspace')return '';
+      return '/'+prefix.map(encodeURIComponent).join('/')+'/';
+    }
   }catch(e){}
   return '';
 }
 function workspaceBasePath(u){
   try{
+    const ctx=ptCurrentWorkspaceContext(u);
     const existing=ptWorkspacePrefixFromPath();
-    if(existing)return existing;
-    const slug=workspaceSlugFromUser(u);
-    const wsId=String((u&&(u.workspace_id||u.workspace_id_from_me))||'').trim();
+    const wsId=String((ctx&&(ctx.workspace_id||ctx.id||ctx.workspace_id_from_me))||'').trim();
+    const slug=workspaceSlugFromUser(ctx);
     if(wsId)return '/'+slug+'/'+encodeURIComponent(wsId)+'/';
+    if(existing)return existing;
     return '/'+slug+'/';
   }catch(e){return '/workspace/';}
 }
@@ -9664,9 +9689,9 @@ async function ptResolveDmNotificationTarget(cuId, dmUnread){
   return '';
 }
 
-function ptDmUrl(user){
-  const u=user?('?user='+encodeURIComponent(String(user))):'';
-  return ptEntityUrl('dm','')+u;
+function ptDmUrl(user,u=null){
+  const q=user?('?user='+encodeURIComponent(String(user))):'';
+  return ptEntityUrl('dm','',u)+q;
 }
 
 function App(){
@@ -9815,10 +9840,11 @@ function App(){
       dmPeer=ptFirstValidDmPeer([dmPeer],users,cu&&cu.id)||String(dmPeer||'');
       try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_e){}
       if(dmPeer){
-        try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));}catch(_e){}
+        try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));sessionStorage.removeItem('pt_dm_resolve_next');}catch(_e){}
         setDmTargetUser(String(dmPeer));
-        try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(dmPeer),source:'notification'}}));}catch(_){}
         _setView('dm:'+String(dmPeer));
+        const fireDmOpen=()=>{try{if(window.__ptOpenDmPeer)window.__ptOpenDmPeer(String(dmPeer),'notification');window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(dmPeer),source:'notification'}}));}catch(_){}};
+        fireDmOpen(); setTimeout(fireDmOpen,0); setTimeout(fireDmOpen,160);
       }else{
         try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_e){}
         _setView('dm');
@@ -10193,7 +10219,7 @@ function App(){
                   if(String(m.recipient||'')===String(cu.id)&&String(m.sender||'')!==String(cu.id)){
                     const sender=(data.users||[]).find(u=>String(u.id)===String(m.sender))||{};
                     const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90);
-                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); try{setDmTargetUser&&setDmTargetUser(m.sender);}catch(_){} _setView&&_setView('dm');}, {tag:'dm-'+(m.id||Date.now())});
+                    if(!String(m.content||'').includes('CALL_INVITE:')) showBrowserNotif(sender.name||'New message', body||'Sent you a message', ()=>{window.focus(); try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));setDmTargetUser&&setDmTargetUser(String(m.sender));}catch(_){} _setView&&_setView('dm:'+String(m.sender)); try{if(window.__ptOpenDmPeer)window.__ptOpenDmPeer(String(m.sender),'notification');window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(m.sender),source:'notification'}}));}catch(_){}}, {tag:'dm-'+(m.id||Date.now())});
                   }
                 }catch(e){}
               }
@@ -10389,7 +10415,7 @@ function App(){
       setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
-      if(ws)setWsDmEnabled(ws.dm_enabled!==0);
+      if(ws){try{window.PT_WORKSPACE=Object.assign({},window.PT_WORKSPACE||{},ws,{workspace_id:ws.id||ws.workspace_id||ws.workspace_id_from_me||((cu&&cu.workspace_id)||''),workspace_id_from_me:ws.id||ws.workspace_id||ws.workspace_id_from_me||((cu&&cu.workspace_id)||''),workspace_slug:ws.workspace_slug||ws.slug||'',workspace_name:ws.name||ws.workspace_name||''});}catch(_){} setWsDmEnabled(ws.dm_enabled!==0);}
       if(Array.isArray(rems)){const now=new Date();setUpcomingReminders(rems.filter(r=>new Date(r.remind_at)>=now).sort((a,b)=>new Date(a.remind_at)-new Date(b.remind_at)));}
     }catch(e){console.error('[Load] Error:',e);}
   },[cu,teamCtx]);
@@ -10398,7 +10424,7 @@ function App(){
     // Try to get current user; if backend is unreachable, enter offline mode
     // so Vault and Password Generator still work without a server
     api.get('/api/auth/me').then(u=>{
-      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
+      if(u&&!u.error){ setCu(u); window._pfCurrentUser=u; window.PT_CURRENT_USER=u; try{window.PT_WORKSPACE=Object.assign({},window.PT_WORKSPACE||{},{workspace_id:u.workspace_id||u.workspace_id_from_me||'',workspace_id_from_me:u.workspace_id_from_me||u.workspace_id||'',workspace_slug:u.workspace_slug||'',workspace_name:u.workspace_name||u._ws_name||''});}catch(_){} try{localStorage.setItem('pf_had_session','1');}catch{} setLoading(false); }
       else {
         // Got a response but errored (e.g. 401 not logged in) — show login instantly
         try{localStorage.removeItem('pf_had_session');}catch{}

@@ -4602,6 +4602,7 @@ def me():
             result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
             result["workspace_slug"] = slug
             result["workspace_id_from_me"] = u["workspace_id"]
+            result["workspace_name"] = ws_name or ""
         _cache_set(me_cache_key, result)
         return jsonify(result)
     except Exception as _e:
@@ -4614,6 +4615,17 @@ def me():
             result = dict(u)
             for k in ("password","plain_password","totp_secret"):
                 result.pop(k, None)
+            try:
+                import re as _re
+                ws_row = db.execute("SELECT name, workspace_slug FROM workspaces WHERE id=?", (u["workspace_id"],)).fetchone()
+                if ws_row:
+                    slug = ws_row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", (ws_row["name"] or "").lower().strip()).strip("-") or "workspace"
+                    result["workspace_dashboard_url"] = f"/{slug}/{u['workspace_id']}/dashboard"
+                    result["workspace_slug"] = slug
+                    result["workspace_id_from_me"] = u["workspace_id"]
+                    result["workspace_name"] = ws_row["name"] or ""
+            except Exception:
+                pass
             return jsonify(result)
 
 # ── Vault ─────────────────────────────────────────────────────────────────────
@@ -6105,6 +6117,37 @@ def _server_google_token():
         tok = _json_mod.loads(resp.read())
     return (tok.get("access_token") or "").strip()
 
+
+
+def _workspace_url(workspace_id, page, entity_id="", params=None):
+    """Build workspace-scoped frontend URLs: /<workspace-slug>/<workspace-id>/<page>."""
+    import re as _re
+    try:
+        wsid = str(workspace_id or "").strip()
+        slug = "workspace"
+        if wsid:
+            with get_db() as db:
+                row = db.execute("SELECT name, workspace_slug FROM workspaces WHERE id=?", (wsid,)).fetchone()
+                if row:
+                    slug = (row["workspace_slug"] or _re.sub(r"[^a-z0-9]+", "-", (row["name"] or "").lower().strip()).strip("-") or "workspace")
+        clean_page = str(page or "").strip("/")
+        if wsid:
+            path = f"/{slug}/{wsid}/{clean_page}"
+        else:
+            path = f"/{slug}/{clean_page}"
+        if entity_id:
+            from urllib.parse import quote as _quote
+            path += "/" + _quote(str(entity_id))
+        if params:
+            from urllib.parse import urlencode as _urlencode
+            path += "?" + _urlencode(params)
+        return path
+    except Exception:
+        from urllib.parse import urlencode as _urlencode
+        clean_page = str(page or "").strip("/")
+        q = ("?" + _urlencode(params)) if params else ""
+        return f"/{clean_page}" + (("/" + str(entity_id)) if entity_id else "") + q
+
 @app.route("/api/calls/google-meet", methods=["POST"])
 @login_required
 def create_google_meet_call():
@@ -6546,7 +6589,7 @@ def send_dm():
             _bust_dm_thread(ws_id, me, recipient)
             _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
             _sse_publish(ws_id, "dm_created", {"id": row.get("id", mid), "sender": me, "recipient": recipient, "content": preview, "message": row})
-            _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + str(row.get("id", mid)), "url": "/dm?user=" + me})
+            _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + str(row.get("id", mid)), "url": _workspace_url(ws_id, "dm", params={"user": me})})
             _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": row.get("id", mid)})
         except Exception as e:
             log.warning("[DM] async SSE fanout failed: %s", e)
@@ -6562,7 +6605,7 @@ def send_dm():
         except Exception as e:
             log.warning("[DM] notification insert failed: %s", e)
         try:
-            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + str(row.get("id", mid)))
+            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", _workspace_url(ws_id, "dm", params={"user": me}), "dm-" + str(row.get("id", mid)))
         except Exception as e:
             log.warning("[DM] web push enqueue failed: %s", e)
 
