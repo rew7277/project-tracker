@@ -9,8 +9,8 @@ window._pfSWReady = false;
 window._pfPushSub = null;
 
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js', {scope:'/'})
-    .then(function(reg){
+  navigator.serviceWorker.register('/sw.js?v=dm-instant-20260515b', {scope:'/'})
+    .then(function(reg){ try{reg.update&&reg.update();}catch(_e){}
       window._pfSWReady = true;
       window._pfSWReg   = reg;
 
@@ -4713,6 +4713,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const dmMeetCallRef=useRef(null);
   const dmMeetCloseTimerRef=useRef(null);
   const typingTimerRef=useRef(null);
+  const typingOffTimerRef=useRef(null);
+  const lastTypingSentRef=useRef(0);
   const ref=useRef(null);
   const activeToRef=useRef('');
   const dmSelectionSourceRef=useRef('none');
@@ -5228,6 +5230,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     window.addEventListener('dm_refresh',onDmRefresh);
     return()=>{
       clearInterval(id);
+      try{clearTimeout(typingOffTimerRef.current);}catch(_){}
       try{if(window.__ptDmActivePollTimer===id){window.__ptDmActivePollTimer=null;window.__ptDmActivePollUser='';}}catch(_){}
       window.removeEventListener('dm_refresh',onDmRefresh);
     };
@@ -5298,8 +5301,17 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||''},{timeoutMs:20000});
-      if(m&&m.ok===false) throw new Error(m.error||'DM send failed');
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||''},{timeoutMs:60000});
+      if(m&&m.ok===false){
+        // Initial DB cold starts can exceed the browser timeout while the server
+        // still commits the message. Keep the optimistic bubble instead of showing
+        // a false "Message not sent" toast; SSE/poll/server confirmation will merge it.
+        if(m.status===408 || /timeout/i.test(String(m.error||''))){
+          console.warn('[DM] send still pending after timeout', {recipient,clientMsgId});
+          return;
+        }
+        throw new Error(m.error||'DM send failed');
+      }
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
         setMsgThreadId(recipient);
@@ -5318,8 +5330,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         throw new Error('DM send did not return a committed message');
       }
     }catch(e){
+      const msg=String(e&&e.message||e||'Network/server error');
       console.warn('[DM] send failed', e);
-      window._pfToast&&window._pfToast('error','Message not sent',String(e&&e.message||e||'Network/server error').slice(0,140));
+      if(/timeout|abort|408/i.test(msg)){
+        // Do not restore text or mark failed on timeout; the backend may still be
+        // committing. Keep the optimistic message and let SSE/poll confirm it.
+        setMsgs(prev=>{
+          const next=(Array.isArray(prev)?prev:[]).map(x=>(x.id===tempId||(x.client_msg_id&&x.client_msg_id===clientMsgId))?{...x,_pending:true,_slow:true}:x);
+          threadCache.current.set(recipient,next);_saveDmCache(recipient,next);return next;
+        });
+        return;
+      }
+      window._pfToast&&window._pfToast('error','Message not sent',msg.slice(0,140));
       setMsgs(prev=>{
         const next=(Array.isArray(prev)?prev:[]).map(x=>(x.id===tempId||(x.client_msg_id&&x.client_msg_id===clientMsgId))?{...x,_failed:true,_pending:false}:x);
         threadCache.current.set(recipient,next);
@@ -5348,7 +5370,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   };
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
   useEffect(()=>{window._pfSetDmContext=setDmContext;},[]);
-  const sendTyping=()=>{if(!toId)return;clearTimeout(typingTimerRef.current);api.post('/api/dm/typing',{recipient:toId,typing:true},{quiet:true}).catch(()=>{});typingTimerRef.current=setTimeout(()=>api.post('/api/dm/typing',{recipient:toId,typing:false},{quiet:true}).catch(()=>{}),1200);};
+  const sendTyping=()=>{
+    if(!toId)return;
+    const now=Date.now();
+    clearTimeout(typingOffTimerRef.current);
+    // Typing is a cosmetic signal. Do not let one POST per keypress create
+    // /api/dm/typing 499 storms or block real message sends.
+    if(now-(lastTypingSentRef.current||0)>3500){
+      lastTypingSentRef.current=now;
+      api.post('/api/dm/typing',{recipient:toId,typing:true},{quiet:true,timeoutMs:1200}).catch(()=>{});
+    }
+    typingOffTimerRef.current=setTimeout(()=>api.post('/api/dm/typing',{recipient:toId,typing:false},{quiet:true,timeoutMs:1200}).catch(()=>{}),1800);
+  };
   const uploadVoiceBlob=async(blob)=>{
     if(!blob||!toId)return;
     const fd=new FormData();fd.append('file',new File([blob],'voice-note.webm',{type:'audio/webm'}));

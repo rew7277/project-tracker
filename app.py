@@ -6484,28 +6484,20 @@ def send_dm():
     now=ts()
     mid=f"dm{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
 
-    # ── Round-trip 1: get both users in one query ─────────────────────────────
-    with get_db(autocommit=True) as db:
+    row=None
+    sender_name="Someone"
+    # Single DB transaction: validate users + idempotency + insert. The previous
+    # implementation opened multiple DB connections before returning, which caused
+    # slow first sends and 499/timeout behavior under polling load.
+    with get_db() as db:
         users_rows=db.execute(
             "SELECT id,name FROM users WHERE workspace_id=? AND id IN (?,?) AND COALESCE(deleted_at,'')=''",
             (ws_id, me, recipient)
         ).fetchall()
-    users_map={r["id"]:r["name"] for r in (users_rows or [])}
-    if recipient not in users_map:
-        return jsonify({"error":"Recipient not found"}),404
-    sender_name=users_map.get(me) or "Someone"
-    preview=content[:60]+("..." if len(content)>60 else "")
-
-    # Do not pre-publish before DB commit. One committed dm_created event avoids duplicate renders/blinking.
-
-    # ── Round-trip 2: idempotency check + insert (client_msg_id preferred) ────
-    # NOTE: must use get_db() (autocommit=False) so _PooledDB.__exit__ calls COMMIT.
-    # get_db(autocommit=True) skips the COMMIT call, leaving the INSERT in an open
-    # transaction on the pool connection. Other sessions cannot see uncommitted rows,
-    # so subsequent GET /api/dm polls return empty and the message appears to vanish.
-    row=None
-    with get_db() as db:
-        # Idempotency: if client_msg_id present, check for duplicate first.
+        users_map={r["id"]:r["name"] for r in (users_rows or [])}
+        if recipient not in users_map:
+            return jsonify({"error":"Recipient not found"}),404
+        sender_name=users_map.get(me) or "Someone"
         if client_msg_id:
             try:
                 existing=db.execute(
@@ -6516,7 +6508,6 @@ def send_dm():
                     row=dict(existing)
             except Exception:
                 pass
-
         if not row:
             try:
                 result=db.execute("""INSERT INTO direct_messages(
@@ -6525,10 +6516,8 @@ def send_dm():
                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
                            (mid,ws_id,me,recipient,content,0,now,reply_to or "",now,"",0,0,0,client_msg_id))
                 r=result.fetchone()
-                if r:
-                    row=dict(r)
+                if r: row=dict(r)
             except Exception:
-                # RETURNING not supported or client_msg_id column missing; fall back.
                 try:
                     db.execute("""INSERT INTO direct_messages(
                                    id,workspace_id,sender,recipient,content,read,ts,reply_to,
@@ -6548,15 +6537,22 @@ def send_dm():
 
     if not row:
         return jsonify({"error":"Failed to send message"}),500
-
     if client_msg_id and not row.get("client_msg_id"):
         row["client_msg_id"]=client_msg_id
+    preview=content[:60]+("..." if len(content)>60 else "")
 
-    # ── Round-trip 3: notification insert — run in background ─────────────────
-    def _insert_notif():
-        nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+    def _dm_after_commit(row=row, preview=preview, sender_name=sender_name):
         try:
-            with get_db() as db2:  # get_db() so COMMIT is called on exit
+            _bust_dm_thread(ws_id, me, recipient)
+            _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
+            _sse_publish(ws_id, "dm_created", {"id": row.get("id", mid), "sender": me, "recipient": recipient, "content": preview, "message": row})
+            _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + str(row.get("id", mid)), "url": "/dm?user=" + me})
+            _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": row.get("id", mid)})
+        except Exception as e:
+            log.warning("[DM] async SSE fanout failed: %s", e)
+        try:
+            nid=f"n{int(datetime.now().timestamp()*1000)}{secrets.token_hex(2)}"
+            with get_db() as db2:
                 try:
                     db2.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,sender_id,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now,me,me,"dm"))
@@ -6565,25 +6561,12 @@ def send_dm():
                                (nid,ws_id,"dm",f"{sender_name}: {preview}",recipient,0,now))
         except Exception as e:
             log.warning("[DM] notification insert failed: %s", e)
-    threading.Thread(target=_insert_notif, daemon=True).start()
-
-    # Bust caches and push the committed row immediately. Keep slower Web Push work
-    # outside the critical path so the receiver gets the real DB message first.
-    try:
-        _bust_dm_thread(ws_id, me, recipient)
-        _cache_bust(ws_id, "dm_unread", "notifications", "notifs", "appdata")
-        _sse_publish(ws_id, "dm_created", {"id": row.get("id", mid), "sender": me, "recipient": recipient, "content": preview, "message": row})
-        _sse_publish(ws_id, "web_notification", {"kind": "dm", "recipient": recipient, "sender": me, "title": sender_name, "body": preview, "tag": "dm-" + mid, "url": "/dm?user=" + me})
-        _sse_publish(ws_id, "notification_updated", {"reason": "dm", "sender": me, "recipient": recipient, "message_id": mid})
-    except Exception as e:
-        log.warning("[DM] immediate SSE fanout failed: %s", e)
-
-    def _after_dm_push():
         try:
-            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + mid)
+            _enqueue_push(push_notification_to_user, None, recipient, "💬 " + sender_name, preview or "Sent you a message", "/dm?user=" + me, "dm-" + str(row.get("id", mid)))
         except Exception as e:
-            log.warning("[DM] web push failed: %s", e)
-    threading.Thread(target=_after_dm_push, daemon=True).start()
+            log.warning("[DM] web push enqueue failed: %s", e)
+
+    threading.Thread(target=_dm_after_commit, daemon=True).start()
     resp=jsonify(row)
     resp.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
     return resp
@@ -6750,10 +6733,17 @@ def pin_dm_message():
 @app.route("/api/dm/typing",methods=["POST"])
 @login_required
 def dm_typing():
-    d=request.json or {}; recipient=(d.get("recipient") or "").strip(); typing=bool(d.get("typing"))
+    # Typing must be best-effort and instant. Never let Redis/SSE/backpressure make
+    # keypress POSTs sit for 15s and produce 499s that compete with real DM sends.
+    d=request.json or {}
+    recipient=(d.get("recipient") or "").strip()
+    typing=bool(d.get("typing"))
     if recipient:
-        _sse_publish(wid(),"dm_typing",{"sender":session["user_id"],"recipient":recipient,"typing":typing})
-    return jsonify({"ok":True})
+        ws_id=wid(); sender=session["user_id"]
+        threading.Thread(target=lambda: _sse_publish(ws_id,"dm_typing",{"sender":sender,"recipient":recipient,"typing":typing}), daemon=True).start()
+    resp=jsonify({"ok":True})
+    resp.headers["Cache-Control"]="no-store, max-age=0"
+    return resp
 
 @app.route("/api/dm/unread")
 @login_required
@@ -6769,6 +6759,49 @@ def dm_unread():
     resp=jsonify([dict(r) for r in rows])
     resp.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
     return resp
+
+
+# ── Workspace-scoped task/ticket API aliases for email/deep-link integrations ──
+def _ws_alias_ok(workspace_id):
+    return str(workspace_id or "") == str(wid() or "")
+
+@app.route("/api/<workspace_name>/<workspace_id>/tasks", methods=["GET"])
+@login_required
+def tasks_workspace_alias(workspace_name, workspace_id):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return get_tasks()
+
+@app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>", methods=["GET"])
+@login_required
+def task_detail_workspace_alias(workspace_name, workspace_id, tid):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    with get_db(autocommit=True) as db:
+        r=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(tid,wid())).fetchone()
+    return jsonify(dict(r) if r else {"error":"Task not found"}) if r else (jsonify({"error":"Task not found"}),404)
+
+@app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>", methods=["PUT"])
+@login_required
+def task_update_workspace_alias(workspace_name, workspace_id, tid):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return update_task(tid)
+
+@app.route("/api/<workspace_name>/<workspace_id>/tickets", methods=["GET"])
+@login_required
+def tickets_workspace_alias(workspace_name, workspace_id):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return get_tickets()
+
+@app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>/comments", methods=["GET"])
+@login_required
+def ticket_comments_workspace_alias(workspace_name, workspace_id, tid):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return get_ticket_comments(tid)
+
+@app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>/comments", methods=["POST"])
+@login_required
+def add_ticket_comment_workspace_alias(workspace_name, workspace_id, tid):
+    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return add_ticket_comment(tid)
 
 # ── Workspace-scoped API aliases for email/deep-link integrations ───────────
 @app.route("/api/<workspace_name>/<workspace_id>/dm/<other_id>")
@@ -8119,7 +8152,7 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v9: in-page exact DM notification routing */
+    js = """/* Project Tracker service worker v10: instant DM routing + no stale notification target */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 self.addEventListener('push', event => {
