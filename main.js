@@ -23,9 +23,26 @@ if('serviceWorker' in navigator){
         if(e.data && e.data.type === 'PF_NOTIF_CLICK'){
           window.focus();
           var tag=e.data.tag;
+          var handlerFired=false;
           if(tag&&window._pfNotifHandlers&&window._pfNotifHandlers[tag]){
             try{window._pfNotifHandlers[tag]();}catch(err){}
             delete window._pfNotifHandlers[tag];
+            handlerFired=true;
+          }
+          // Fallback: if the stored handler is gone (e.g. page refreshed since the
+          // notification was shown) but we have sender/kind in the payload, route
+          // in-app directly instead of doing nothing.
+          if(!handlerFired && e.data.kind==='dm' && e.data.sender){
+            try{
+              sessionStorage.removeItem('pt_dm_manual_lock');
+              window.__ptDmManualLock=null;
+              sessionStorage.setItem('pt_open_dm_user',String(e.data.sender));
+            }catch(_){}
+            if(typeof window.__ptOpenDmPeer==='function'){
+              try{window.__ptOpenDmPeer(String(e.data.sender),'sw-notification');}catch(_){}
+            }else{
+              window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(e.data.sender),source:'sw-notification'}}));
+            }
           }
         }
       });
@@ -7634,7 +7651,7 @@ function ToastStack({toasts,onDismiss,onNav}){
         const cfg=TOAST_CFG[t.type]||TOAST_CFG.default;
         return html`
           <div key=${t.id} class=${'toast'+(t.leaving?' leaving':'')}
-            onClick=${()=>{onDismiss(t.id);onNav&&onNav(cfg.nav);}}>
+            onClick=${()=>{onDismiss(t.id);if(onNav){const nav=cfg.nav+(t.extra&&t.extra.peer?':'+String(t.extra.peer):'');onNav(nav);}}}>
             <div class="toast-accent" style=${{background:cfg.color}}></div>
             <div class="toast-bar" style=${{width:t.progress+'%',background:cfg.color}}></div>
             <div class="toast-icon" style=${{background:cfg.bg,color:cfg.color}}>${cfg.icon}</div>
@@ -9649,7 +9666,14 @@ function VaultView({cu}){
 function workspaceSlugFromUser(u){
   try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
 }
-function workspaceBasePath(u){return '/'+workspaceSlugFromUser(u)+'/';}
+function workspaceBasePath(u){
+  try{
+    const slug=workspaceSlugFromUser(u);
+    const wsId=String((u&&(u.workspace_id||u.workspace_id_from_me))||'').trim();
+    if(wsId)return '/'+slug+'/'+wsId+'/';
+    return '/'+slug+'/';
+  }catch(e){return '/workspace/';}
+}
 function pathParts(){try{return window.location.pathname.split('/').filter(Boolean);}catch(e){return [];}}
 function routeViewFromPath(validViews){
   try{
@@ -9780,8 +9804,15 @@ function ptDmUrl(user){
   const u=user?('?user='+encodeURIComponent(String(user))):'';
   try{
     const seg=window.location.pathname.split('/').filter(Boolean);
-    if(seg.length>=2 && /^ws/i.test(seg[1])) return '/'+seg[0]+'/'+seg[1]+'/dm'+u;
-  }catch(_){ }
+    // Find the first path segment that is a known view name; everything before it
+    // is the workspace prefix (slug + optional wsId).  This works regardless of
+    // whether the workspace ID starts with "ws" or is purely numeric.
+    const VIEWS=['dm','dashboard','projects','tasks','messages','tickets','timeline',
+                 'settings','team','reminders','timesheet','productivity','ops',
+                 'vault','ai-docs','password-generator','notes','notifs'];
+    const vi=seg.findIndex(s=>VIEWS.includes(s));
+    if(vi>0)return '/'+seg.slice(0,vi).join('/')+'/dm'+u;
+  }catch(_){}
   return '/dm'+u;
 }
 
@@ -10276,7 +10307,7 @@ function App(){
                   if(String(m.sender||'')!==String(cu.id)&&String(m.recipient||'')===String(cu.id)&&!raw.includes('CALL_INVITE:')){
                     const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
                     const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
-                    window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
+                    window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body,{peer:String(m.sender||'')});
                     showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender)); try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(m.sender),source:'notification'}}));}catch(_){} window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
                     playSound('notif');
                   }
@@ -10374,10 +10405,10 @@ function App(){
   const toastTimers=useRef({});
   const TOAST_DUR=6000; // ms before auto-dismiss
 
-  const addToast=useCallback((type,title,body)=>{
+  const addToast=useCallback((type,title,body,extra=null)=>{
     const id='t'+Date.now()+Math.random();
     const timeStr=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
-    setToasts(prev=>[{id,type,title,body,timeStr,progress:100,leaving:false},...prev].slice(0,5));
+    setToasts(prev=>[{id,type,title,body,timeStr,progress:100,leaving:false,extra:extra||null},...prev].slice(0,5));
     const start=Date.now();
     const tick=setInterval(()=>{
       const elapsed=Date.now()-start;
@@ -10597,7 +10628,7 @@ function App(){
             const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
-              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
+              window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body,{peer:String(m.sender||'')});
               showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender)); try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(m.sender),source:'notification'}}));}catch(_){} window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
               playSound('notif');
             }
