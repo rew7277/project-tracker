@@ -283,7 +283,7 @@ const api={
     }
     return _apiRequest(u,opts);
   },
-  post:(u,b,opts={})=>_apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
+  post:(u,b,opts={})=>{if(String(u||'').split('?')[0]==='/api/dm/typing')return Promise.resolve({ok:true});return _apiRequest(u,{...opts,method:'POST',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})});},
   put:(u,b,opts={})=>_apiRequest(u,{...opts,method:'PUT',headers:{'Content-Type':'application/json',...(opts.headers||{})},body:JSON.stringify(b ?? {})}),
   del:(u,opts={})=>_apiRequest(u,{...opts,method:'DELETE'}),
   upload:(u,fd,opts={})=>_apiRequest(u,{...opts,method:'POST',body:fd}),
@@ -9905,7 +9905,7 @@ function App(){
         dmPeer=dmPeer||s(q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||q.get('dm_user_id')||q.get('from_user_id'));
       }
     }catch(_e){}
-    const looksDm=urlLooksDm||['dm','direct_message','direct-message','message_received','new_message','dm_created','chat_message'].includes(type)||['dm','direct_message','direct-message','message','chat'].includes(entityType)||contentLow.includes('direct message')||contentLow.includes('sent you a message')||contentLow.includes('new message from');
+    const looksDm=urlLooksDm||['dm','direct_message','direct-message','message_received','new_message','dm_created','chat_message'].includes(type)||['dm','direct_message','direct-message','message','chat'].includes(entityType)||contentLow.includes('direct message')||contentLow.includes('sent you a message')||contentLow.includes('new message from')||contentLow.includes('received message from');
     const looksCall=['call','video_call','meet_call','incoming_call'].includes(type)||['call','video_call','meet_call'].includes(entityType)||contentLow.includes('calling you')||contentLow.includes('video call')||contentLow.includes('meet call');
     if(!dmPeer&&(looksDm||looksCall)) dmPeer=rawEntityId||s(userFromText&&userFromText.id);
     if((looksDm||looksCall)){
@@ -10242,7 +10242,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} setDmTargetUser&&setDmTargetUser(String(n.sender)); _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?ptDmUrl(n.sender||''):(n.url||'/'),kind:n.kind||'',sender:n.sender||''});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} setDmTargetUser&&setDmTargetUser(String(n.sender)); _setView&&_setView('dm:'+String(n.sender)); try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(n.sender),source:'notification'}}));}catch(_){}}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?ptDmUrl(n.sender||''):(n.url||'/'),kind:n.kind||'',sender:n.sender||''});
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
@@ -10277,7 +10277,7 @@ function App(){
                     const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
                     const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
                     window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-                    showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
+                    showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender)); try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(m.sender),source:'notification'}}));}catch(_){} window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
                     playSound('notif');
                   }
                 }
@@ -10598,7 +10598,7 @@ function App(){
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
               window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-              showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
+              showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender)); try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(m.sender),source:'notification'}}));}catch(_){} window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
               playSound('notif');
             }
           });
