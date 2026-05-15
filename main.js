@@ -4267,7 +4267,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },15000); // reduced 2s->15s: channel message poll
+    },30000); // reduced 2s->15s: channel message poll
     return()=>clearInterval(id);
   },[pid]);
 
@@ -4638,7 +4638,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
   const others=safe(users).filter(u=>u.id!==cu.id);
-  const [toId,setToId]=useState(()=>String(initialUserId||''));
+  const [toId,setToId]=useState('');
   const [msgs,setMsgs]=useState([]);
   const [txt,setTxt]=useState('');
   const [search,setSearch]=useState('');
@@ -4731,7 +4731,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     _saveDmCache(peer,normalized);
     if(alsoSetVisible&&peer===String(activeToRef.current||'')){ setMsgThreadId(peer); setMsgs(normalized); }
     return normalized;
-  },[normalizeDmList,onClearInitial]);
+  },[normalizeDmList]);
   const pendingReactionUntil=useRef(new Map());
   const parseIncomingCall=(m)=>{
     if(!m||!m.content)return null;
@@ -4789,6 +4789,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   };
   const closeMsgOverlays=()=>{setReactionPickerFor('');setMenuFor('');setMenuPos(null);};
   useEffect(()=>{activeToRef.current=toId;},[toId]);
+  const resolvePeerId=useCallback((id)=>{
+    const raw=String(id||'').trim();
+    if(!raw)return '';
+    return ptValidDmPeer(raw, users, cu&&cu.id);
+  },[users,cu&&cu.id]);
   const mergePendingReactionState=useCallback((peer,incoming)=>{
     const list=Array.isArray(incoming)?incoming:[];
     const now=Date.now();
@@ -4816,8 +4821,19 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return merged;
   },[]);
   const switchToUser=useCallback((id,source='click')=>{
-    const id2=String(id||'');
-    if(!id2)return;
+    const rawId=String(id||'').trim();
+    if(!rawId)return;
+    const id2=resolvePeerId(rawId);
+    if(!id2){
+      console.warn('[DM] blocked invalid peer target', {target:rawId,source});
+      if(source!=='click'){
+        try{
+          if(sessionStorage.getItem('pt_open_dm_user')===rawId)sessionStorage.removeItem('pt_open_dm_user');
+          if(sessionStorage.getItem('pt_dm_notification_target')===rawId)sessionStorage.removeItem('pt_dm_notification_target');
+        }catch(_e){}
+      }
+      return;
+    }
     id=id2;
     const isUserClick=source==='click';
     const isAuthoritativeSelection=(isUserClick||source==='notification'||source==='sw-notification'||source==='url');
@@ -4867,39 +4883,40 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList,onClearInitial]);
+  },[normalizeDmList,onClearInitial,resolvePeerId]);
   useEffect(()=>{
     const target=String(initialUserId||'');
     if(!target)return;
-    // IMPORTANT: initialUserId is a one-shot command, not long-lived state.
-    // Parent renders create a new onClearInitial/switchToUser function identity, so
-    // this effect can re-run after a manual sidebar click. If we do not consume
-    // and clear the target, an old notification target re-selects the wrong chat.
-    if(target===lastInitialUserIdRef.current)return;
+    // IMPORTANT: initialUserId is a one-shot command, but it may arrive before
+    // users are loaded. Validate only after users exist; otherwise retry when
+    // the users list changes through resolvePeerId/switchToUser dependencies.
+    const resolvedTarget=resolvePeerId(target);
+    if(!resolvedTarget)return;
+    if(resolvedTarget===lastInitialUserIdRef.current)return;
     try{
       const ri=ptRouteInfo();
       const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
-      if(lock&&lock.id&&String(lock.id)!==target&&Date.now()-Number(lock.at||0)<10*60*1000&&String(ri.user||'')!==target){
+      if(lock&&lock.id&&String(lock.id)!==resolvedTarget&&Date.now()-Number(lock.at||0)<10*60*1000&&String(ri.user||'')!==resolvedTarget){
         console.debug('[DM] ignored stale initialUserId', {target,locked:lock.id,urlUser:ri.user});
         if(onClearInitial)onClearInitial();
         return;
       }
     }catch(_){}
-    lastInitialUserIdRef.current=target;
+    lastInitialUserIdRef.current=resolvedTarget;
     manualDmSelectionRef.current=false;
     try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_){}
     autoOpenDoneRef.current=true;
     // Notification URLs carry ids as strings; DB/user ids may be numeric.
     // Open the exact sender thread directly and let fetch/cache load it.
-    switchToUser(target,'notification');
+    switchToUser(resolvedTarget,'notification');
     if(onClearInitial)onClearInitial();
-  },[initialUserId]);
+  },[initialUserId,switchToUser,onClearInitial,resolvePeerId,users]);
   useEffect(()=>{
     // Notification/plain-/dm recovery: if the DM page was opened from a notification
     // without ?user=, select the exact unread sender. This only runs while no chat is
     // selected, so it cannot steal a manual click.
     if(toId||initialUserId)return;
-    const peer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
+    const peer=ptFirstValidDmPeer([ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id)],users,cu&&cu.id);
     if(peer){
       try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);}catch(_){}
       switchToUser(peer,'notification');
@@ -4910,7 +4927,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(toId||initialUserId)return;
     try{
       const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
-      const target=sessionStorage.getItem('pt_dm_notification_target')||sessionStorage.getItem('pt_open_dm_user')||'';
+      const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
+      const openStored=shouldResolve?(sessionStorage.getItem('pt_open_dm_user')||''):'';
+      const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
+      const target=ptFirstValidDmPeer([stored,openStored,unreadPeer],users,cu&&cu.id);
       if(target||shouldResolve){
         sessionStorage.removeItem('pt_dm_resolve_next');
         if(target) switchToUser(String(target),'notification');
@@ -5028,7 +5048,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },15000);
+    },30000);
     try{window.__ptDmActivePollTimer=id;window.__ptDmActivePollUser=String(toId);}catch(_){}
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
@@ -5299,6 +5319,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   };
   const uploadDmAttachment=async(ev)=>{const file=ev.target.files&&ev.target.files[0];ev.target.value='';await sendDmAttachmentFile(file);};
   const handleDmDrop=(ev)=>{ev.preventDefault();const file=ev.dataTransfer&&ev.dataTransfer.files&&ev.dataTransfer.files[0];sendDmAttachmentFile(file);};
+  useEffect(()=>{
+    // Clear invalid/stale targets (old notification/session ids, self id, deleted users).
+    // Without this the app can keep fetching /api/dm/<stale> while the UI shows Select someone.
+    if(!toId)return;
+    const valid=resolvePeerId(toId);
+    if(!valid){
+      console.warn('[DM] clearing invalid selected peer', {toId});
+      activeToRef.current='';
+      setToId('');setMsgThreadId('');setMsgs([]);setLoadingThread('');
+      try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');history.replaceState(null,'',ptDmUrl(''));}catch(_e){}
+    }else if(valid!==String(toId)){
+      switchToUser(valid,'url');
+    }
+  },[toId,resolvePeerId,switchToUser]);
   const filtered=others.filter(u=>u.name.toLowerCase().includes(search.toLowerCase()));
   const toUser=safe(users).find(u=>String(u.id)===String(toId));
   const visibleMsgs=(String(msgThreadId)===String(toId))?normalizeDmList(msgs.filter(m=>(String(m.sender)===String(cu.id)&&String(m.recipient)===String(toId))||(String(m.sender)===String(toId)&&String(m.recipient)===String(cu.id)))):[];
@@ -5435,7 +5469,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
         ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;const lm=lastMsgMap[u.id];return html`
-          <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
+          <button key=${u.id} onMouseDown=${e=>{e.preventDefault();switchToUser(u.id,'click')}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
@@ -9554,6 +9588,33 @@ function ptDmPeerFromUnreadRows(rows, cuId){
     return merged[0]&&merged[0].peer||'';
   }catch(_){return '';}
 }
+
+function ptValidDmPeer(id, users, cuId){
+  try{
+    const raw=String(id||'').trim();
+    if(!raw||raw===String(cuId||''))return '';
+    const arr=Array.isArray(users)?users:[];
+    const exact=arr.find(u=>u&&String(u.id)===raw&&String(u.id)!==String(cuId||''));
+    if(exact)return String(exact.id);
+    const low=raw.toLowerCase();
+    const named=arr.find(u=>u&&String(u.id)!==String(cuId||'')&&(
+      String(u.name||'').toLowerCase()===low ||
+      String(u.email||'').toLowerCase()===low ||
+      String(u.name||'').toLowerCase().includes(low)
+    ));
+    return named?String(named.id):'';
+  }catch(_){return '';}
+}
+function ptFirstValidDmPeer(candidates, users, cuId){
+  try{
+    for(const c of (Array.isArray(candidates)?candidates:[candidates])){
+      const v=ptValidDmPeer(c,users,cuId);
+      if(v)return v;
+    }
+  }catch(_){ }
+  return '';
+}
+
 async function ptResolveDmNotificationTarget(cuId, dmUnread){
   // Used only after a notification opens plain /dm without ?user=.
   // It is intentionally NOT used for normal manual /dm navigation.
@@ -9652,6 +9713,7 @@ function App(){
     settings:'Settings',team:'Team Management',productivity:'Dev Productivity',
     'ai-docs':'AI Documentation'
   };
+  const clearDmTargetUser=useCallback(()=>setDmTargetUser(null),[]);
   const _setView=useCallback((v)=>{
     const raw=String(v||'dashboard');
     const base=raw.split(':')[0];
@@ -9714,6 +9776,7 @@ function App(){
           dmPeer=s(await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread));
         }catch(_e){}
       }
+      dmPeer=ptFirstValidDmPeer([dmPeer],users,cu&&cu.id)||String(dmPeer||'');
       try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_e){}
       if(dmPeer){
         try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));}catch(_e){}
@@ -9809,12 +9872,14 @@ function App(){
         const base=String(view||'').split(':')[0];
         if(base!=='dm'||dmTargetUser)return;
         const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
-        const stored=sessionStorage.getItem('pt_dm_notification_target')||sessionStorage.getItem('pt_open_dm_user')||'';
+        const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
+        const openStored=shouldResolve?(sessionStorage.getItem('pt_open_dm_user')||''):'';
         const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
         if(!shouldResolve&&!stored&&!unreadPeer)return;
         const openedAt=Number(sessionStorage.getItem('pt_dm_route_opened_at')||Date.now());
         if(shouldResolve&&Date.now()-openedAt>120000){sessionStorage.removeItem('pt_dm_resolve_next');}
-        const peer=stored||unreadPeer||await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread);
+        let peer=ptFirstValidDmPeer([stored,openStored,unreadPeer],data.users,cu&&cu.id);
+        if(!peer){ peer=ptFirstValidDmPeer([await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread)],data.users,cu&&cu.id); }
         if(cancelled)return;
         sessionStorage.removeItem('pt_dm_resolve_next');
         if(peer){
@@ -10677,7 +10742,7 @@ function App(){
             />`:null}
             ${baseView==='messages'?html`<${MessagesView} projects=${scopedProjects} users=${data.users} cu=${cu} tasks=${scopedTasks} key=${'msgs-'+(teamCtx||'all')}/>`:null}
             <div style=${{display:baseView==='dm'?'flex':'none',flex:1,overflow:'hidden',flexDirection:'column',height:'100%'}}>
-              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${()=>setDmTargetUser(null)} onlineUsers=${onlineUsers}/>
+              <${DirectMessages} cu=${cu} users=${data.users} dmUnread=${dmUnread} onDmRead=${onDmRead} dmEnabled=${wsDmEnabled} initialUserId=${dmTargetUser} onClearInitial=${clearDmTargetUser} onlineUsers=${onlineUsers}/>
             </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
