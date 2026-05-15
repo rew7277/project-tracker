@@ -4644,6 +4644,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const [search,setSearch]=useState('');
   const [msgThreadId,setMsgThreadId]=useState('');
   const [sending,setSending]=useState(false);
+  const [lastMsgMap,setLastMsgMap]=useState({});
+  const [dmContext,setDmContext]=useState(null);
   const [loadingThread,setLoadingThread]=useState('');
   const [reactionPickerFor,setReactionPickerFor]=useState('');
   const [showChatEmoji,setShowChatEmoji]=useState(false);
@@ -4859,6 +4861,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       // Clear global incoming cache — full network fetch has now merged all messages.
       try{if(window._pfDmIncoming&&window._pfDmIncoming[id])delete window._pfDmIncoming[id];}catch(_){}
       console.debug('[DM] load ok', {id,count:merged.length,incremental:!!sinceParam,seq});
+      if(merged.length>0){const lastM=merged[merged.length-1];setLastMsgMap(prev=>({...prev,[id]:{content:lastM.content,ts:lastM.ts,sender:lastM.sender,time_label:lastM.time_label||''}}));}
     }else{
       setMsgThreadId(id);
       setMsgs(threadCache.current.get(id)||[]);
@@ -5046,7 +5049,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return()=>{cancelled=true;};
   },[others.length,mergePendingReactionState]);
 
-  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
+  const atBottomRef=useRef(true);
+  const handleScroll=()=>{if(!ref.current)return;const{scrollTop,scrollHeight,clientHeight}=ref.current;atBottomRef.current=scrollHeight-scrollTop-clientHeight<120;};
+  useEffect(()=>{if(ref.current&&atBottomRef.current)ref.current.scrollTop=ref.current.scrollHeight;},[msgs]);
+  useEffect(()=>{if(ref.current){ref.current.scrollTop=ref.current.scrollHeight;atBottomRef.current=true;}},[toId]);
   // Do NOT auto-open the call screen from old DM history.
   // Incoming call UI must appear only from the live SSE `call_status:ringing` event,
   // otherwise opening a chat with an old CALL_INVITE message shows a fake/default call.
@@ -5086,7 +5092,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId},{timeoutMs:20000});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||''},{timeoutMs:20000});
       if(m&&m.ok===false) throw new Error(m.error||'DM send failed');
       if(m&&m.id){
         const confirmed={...m,client_msg_id:m.client_msg_id||clientMsgId,_pending:false,_failed:false};
@@ -5101,6 +5107,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return next;
         });
         console.debug('[DM] send confirmed', {recipient,id:m.id});
+        setLastMsgMap(prev=>({...prev,[recipient]:{content:c,ts:m.ts||new Date().toISOString(),sender:cu.id,time_label:m.time_label||''}}));
       }else{
         throw new Error('DM send did not return a committed message');
       }
@@ -5134,6 +5141,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     try{const r=await api.post('/api/dm/pin',{message_id:m.id,pinned:nextPin});if(r&&r.message)applyDmPatch(r.message,peer);}catch(e){console.warn('[DM] pin failed',e);loadMsgs(peer,'pin-rollback');}
   };
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
+  useEffect(()=>{window._pfSetDmContext=setDmContext;},[]);
   const sendTyping=()=>{if(!toId)return;clearTimeout(typingTimerRef.current);api.post('/api/dm/typing',{recipient:toId,typing:true},{quiet:true}).catch(()=>{});typingTimerRef.current=setTimeout(()=>api.post('/api/dm/typing',{recipient:toId,typing:false},{quiet:true}).catch(()=>{}),1200);};
   const uploadVoiceBlob=async(blob)=>{
     if(!blob||!toId)return;
@@ -5345,16 +5353,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     <div style=${{width:220,borderRight:'1px solid var(--bd)',display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style=${{padding:'11px 12px',borderBottom:'1px solid var(--bd)'}}><div style=${{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.7,marginBottom:8}}>Direct Messages</div><input class="inp" style=${{fontSize:12,padding:'6px 10px'}} placeholder="Search..." value=${search} onInput=${e=>setSearch(e.target.value)}/></div>
       <div style=${{flex:1,overflowY:'auto',padding:6}}>
-        ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;return html`
+        ${filtered.map(u=>{const unr=unreadFor(u.id);const isA=toId===u.id;const lm=lastMsgMap[u.id];return html`
           <button key=${u.id} onMouseDown=${()=>{}} onClick=${()=>switchToUser(u.id,'click')} style=${{display:'flex',alignItems:'center',gap:9,width:'100%',padding:'8px 10px',border:'none',borderRadius:9,cursor:'pointer',marginBottom:2,background:isA?'rgba(99,102,241,.14)':'transparent',transition:'all .14s'}}>
             <div style=${{position:'relative',flexShrink:0}}>
               <${Av} u=${u} size=${32}/>
               <div style=${{position:'absolute',bottom:0,right:0,width:10,height:10,borderRadius:'50%',background:activeCallUsers.has(u.id)?'#8b5cf6':(onlineUsers.has(u.id)?'#22c55e':'#475569'),border:'2px solid var(--bg)',boxShadow:activeCallUsers.has(u.id)?'0 0 0 1px #8b5cf6,0 0 8px rgba(139,92,246,.65)':(onlineUsers.has(u.id)?'0 0 0 1px #22c55e,0 0 6px rgba(34,197,94,.5)':'none'),transition:'background .3s,box-shadow .3s'}}></div>
             </div>
             <div style=${{flex:1,minWidth:0,textAlign:'left'}}>
-              <div style=${{fontSize:13,fontWeight:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${u.name}</div>
+              <div style=${{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:4}}>
+                <div style=${{fontSize:13,fontWeight:unr>0?700:600,color:'var(--tx)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>${u.name}</div>
+                ${lm?html`<span style=${{fontSize:10,color:'var(--tx3)',flexShrink:0,whiteSpace:'nowrap'}}>${lm.time_label||ago(lm.ts)}</span>`:null}
+              </div>
+              ${lm?html`<div style=${{fontSize:11,color:unr>0?'var(--tx2)':'var(--tx3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:unr>0?600:400,marginTop:1}}>${lm.sender===cu.id?'You: ':''}<span>${(lm.content||'').replace(/\n/g,' ')}</span></div>`:null}
             </div>
-            ${unr>0?html`<span style=${{background:'var(--ac)',color:'#fff',borderRadius:10,fontSize:10,padding:'2px 6px',fontFamily:'monospace',fontWeight:700}}>${unr}</span>`:null}
+            ${unr>0?html`<span style=${{background:'var(--ac)',color:'#fff',borderRadius:10,fontSize:10,padding:'2px 6px',fontFamily:'monospace',fontWeight:700,flexShrink:0}}>${unr}</span>`:null}
           </button>`;})}
       </div>
     </div>
@@ -5372,9 +5384,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         <input class="inp" placeholder="Search in conversation..." value=${msgSearch} onInput=${e=>setMsgSearch(e.target.value)} style=${{marginLeft:'auto',width:220,height:30,fontSize:12}}/>
       </div>
       ${pinnedMsgs.length?html`<div style=${{padding:'7px 16px',borderBottom:'1px solid var(--bd)',background:'rgba(245,158,11,.08)',display:'flex',gap:8,alignItems:'center',fontSize:12,color:'var(--tx2)'}}><b>📌 Pinned</b><span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${pinnedMsgs[0].content}</span></div>`:null}
-      <div ref=${ref} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
+      <div ref=${ref} onScroll=${handleScroll} onDragOver=${ev=>ev.preventDefault()} onDrop=${handleDmDrop} onClick=${closeMsgOverlays} style=${{flex:1,overflowY:'auto',padding:'16px',display:'flex',flexDirection:'column',gap:12}}>
                 ${(!isThreadLoading&&visibleMsgs.length===0)?html`<div style=${{textAlign:'center',paddingTop:60,color:'var(--tx3)',fontSize:13}}><div style=${{fontSize:36,marginBottom:10}}>👋</div><div style=${{fontWeight:600,marginBottom:4,color:'var(--tx2)'}}>${toUser?'Start a conversation with '+toUser.name:'Select someone'}</div></div>`:null}
-        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const replied=findMsg(m.reply_to);return html`${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
+        ${displayMsgs.map((m,i)=>{const isMe=m.sender===cu.id;const showT=i===displayMsgs.length-1||displayMsgs[i+1].sender!==m.sender;const prevM=i>0?displayMsgs[i-1]:null;const curDateLabel=m.date_label||(()=>{try{const d=new Date(m.ts);const now=new Date();const diff=now.setHours(0,0,0,0)-new Date(d).setHours(0,0,0,0);return diff===0?'Today':diff===86400000?'Yesterday':d.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});}catch{return '';}})();const prevDateLabel=prevM?(prevM.date_label||(()=>{try{const d=new Date(prevM.ts);const now=new Date();const diff=now.setHours(0,0,0,0)-new Date(d).setHours(0,0,0,0);return diff===0?'Today':diff===86400000?'Yesterday':d.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});}catch{return '';}})()):'__START__';const showDateSep=curDateLabel&&curDateLabel!==prevDateLabel;const replied=findMsg(m.reply_to);return html`${showDateSep?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--tx3)',fontSize:11,fontWeight:600,margin:'8px 0 4px'}}><span style=${{height:1,background:'var(--bd)',flex:1}}></span><span style=${{padding:'2px 10px',borderRadius:999,border:'1px solid var(--bd)',background:'var(--sf)',whiteSpace:'nowrap'}}>${curDateLabel}</span><span style=${{height:1,background:'var(--bd)',flex:1}}></span></div>`:null}${firstUnreadIdx===i?html`<div style=${{display:'flex',alignItems:'center',gap:10,color:'var(--ac)',fontSize:11,fontWeight:800,margin:'6px 0'}}><span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span>New messages<span style=${{height:1,background:'var(--ac)',flex:1,opacity:.45}}></span></div>`:null}
           <div key=${m.client_msg_id||m.id} style=${{display:'flex',gap:8,alignItems:'flex-end',flexDirection:isMe?'row-reverse':'row',animation:'dmBubbleIn .18s ease-out'}}>
             <div style=${{width:28,flexShrink:0}}>${!isMe&&(i===0||displayMsgs[i-1].sender!==m.sender)?html`<${Av} u=${toUser} size=${28}/>`:null}</div>
             <div style=${{display:'flex',flexDirection:'column',gap:2,alignItems:isMe?'flex-end':'flex-start',maxWidth:'68%'}}>
@@ -5394,7 +5406,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
                   ${m.reactions.map(r=>{const mine=(r.users||[]).includes(cu.id);return html`<button onClick=${ev=>{ev.stopPropagation();toggleReaction(m.id,r.emoji);}} title=${mine?'Remove reaction':'Add reaction'} style=${{border:mine?'1px solid var(--ac)':'1px solid var(--bd)',background:mine?'rgba(99,102,241,.18)':'var(--sf)',color:'var(--tx)',borderRadius:999,fontSize:11,padding:'2px 7px',cursor:'pointer',boxShadow:mine?'0 0 0 1px rgba(99,102,241,.18)':'none',lineHeight:1.2}}>${r.emoji} ${r.count}</button>`;})}
                 </div>`:null}
               </div>
-              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:3,margin:'0 2px'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed — retry':(ago(m.ts)+(isMe&&m._pending?' · Sending…':'')+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed&&m.read?html`<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" title="Seen" style=${{display:'inline-block',verticalAlign:'middle',opacity:0.85}}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:null}</div>`:null}
+              ${showT?html`<div style=${{display:'flex',alignItems:'center',gap:4,margin:'2px 2px 0',flexDirection:isMe?'row-reverse':'row'}}><span style=${{fontSize:10,color:m._failed?'var(--rd)':'var(--tx3)',fontFamily:'monospace'}}>${m._failed?'Failed':((m.time_label||(()=>{try{const d=new Date(m.ts);const h=d.getHours();const ap=h<12?'AM':'PM';return (h%12||12)+':'+String(d.getMinutes()).padStart(2,'0')+' '+ap;}catch{return ago(m.ts);}})())+(m.edited?' · edited':''))}</span>${isMe&&!m._pending&&!m._failed?html`<span title=${m.status==='seen'?'Seen':m.status==='delivered'?'Delivered':'Sent'} style=${{display:'flex',alignItems:'center',color:m.status==='seen'?'var(--ac)':'var(--tx3)',opacity:0.8}}>${m.status==='seen'?html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`:(m.status==='delivered'?html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`:html`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`)}</span>`:null}${m._failed?html`<button onClick=${()=>{setTxt(m.content||'');setMsgs(prev=>prev.filter(x=>x.id!==m.id));}} style=${{border:'none',background:'none',color:'var(--rd)',fontSize:10,cursor:'pointer',padding:'0 3px',fontWeight:700}}>↩ Retry</button>`:null}</div>`:null}
             </div>
           </div>`;})}
       </div>
@@ -5408,7 +5420,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
             ${CHAT_EMOJIS.map(e=>html`<button title=${e} onMouseEnter=${ev=>emojiHover(ev,true)} onMouseMove=${emojiMove} onMouseLeave=${ev=>emojiHover(ev,false)} onClick=${ev=>{ev.stopPropagation();setTxt(v=>v+e);}} style=${{border:'none',background:'transparent',borderRadius:10,fontSize:18,lineHeight:1,padding:'5px 4px',cursor:'pointer',transition:'transform .16s cubic-bezier(.2,.9,.25,1.35),filter .16s'}}> ${e}</button>`)}
           </div>`:null}
         </div>
-        ${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
+        ${dmContext?html`<div style=${{position:'absolute',left:0,right:0,bottom:'100%',padding:'5px 16px',background:'rgba(99,102,241,.10)',borderTop:'1px solid rgba(99,102,241,.2)',fontSize:11,color:'var(--ac)',display:'flex',alignItems:'center',gap:8}}><span style=${{fontWeight:700,textTransform:'capitalize'}}>${dmContext.type}:</span><span style=${{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${dmContext.label||dmContext.id}</span><button onClick=${()=>setDmContext(null)} style=${{border:'none',background:'none',color:'var(--tx3)',cursor:'pointer',fontSize:14,padding:'0 2px'}}>×</button></div>`:null}${replyTo?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>↩ Replying to: ${replyTo.content}<button style=${{float:'right'}} onClick=${()=>setReplyTo(null)}>×</button></div>`:null}
         ${editingId?html`<div style=${{position:'absolute',left:118,right:80,bottom:58,padding:'7px 10px',border:'1px solid var(--bd)',background:'var(--sf)',borderRadius:10,fontSize:12,color:'var(--tx2)'}}>✎ Editing message <button style=${{float:'right'}} onClick=${()=>{setEditingId('');setTxt('');}}>×</button></div>`:null}
         <button title="Start instant video call" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:startingMeet?'rgba(34,197,94,.18)':'linear-gradient(135deg,#16a34a,#22c55e)',color:'#fff',border:'none'}} onClick=${startGoogleMeetCall} disabled=${!toId||startingMeet}>${startingMeet?'…':html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style=${{display:'block'}}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`}</button>
         <button title="Voice note" class="btn" style=${{padding:'9px 12px',fontSize:16,flexShrink:0,background:recording?'rgba(239,68,68,.2)':'var(--sf)'}} onClick=${toggleRecording} disabled=${!toId}>${recording?'■':html`<span style=${{width:30,height:30,borderRadius:99,background:'#050505',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:3,boxShadow:'0 8px 24px rgba(0,0,0,.28)'}}><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:16,borderRadius:3,background:'#fff',display:'block'}}></i><i style=${{width:3,height:10,borderRadius:3,background:'#fff',display:'block'}}></i></span>`}</button>
