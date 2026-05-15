@@ -8000,7 +8000,7 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v4: push notification deep routing */
+    js = """/* Project Tracker service worker v6: push notification deep routing */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 self.addEventListener('push', event => {

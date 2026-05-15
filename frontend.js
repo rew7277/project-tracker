@@ -4717,6 +4717,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const id2=String(id||'');
     if(!id2||id2===String(activeToRef.current||''))return;
     id=id2;
+    // User click must be authoritative. Store it immediately so delayed
+    // unread/prefetch responses cannot jump the UI to another conversation.
+    try{
+      sessionStorage.setItem('pt_open_dm_user',id);
+      if(source==='click'||source==='notification'||source==='sw-notification') history.replaceState(null,'',ptDmUrl(id));
+    }catch(_e){}
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
     reqSeq.current+=1; // invalidate any in-flight response for the previous thread
@@ -4742,11 +4748,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
   },[initialUserId,switchToUser,onClearInitial]);
   useEffect(()=>{
-    if(toId)return;
+    if(toId||initialUserId)return;
+    // Only auto-open unread when the route is plain /dm and no selected chat exists.
+    // Never override a person the user already clicked.
+    let saved='';try{saved=sessionStorage.getItem('pt_open_dm_user')||'';}catch(_){}
+    if(saved){ switchToUser(saved,'saved-dm-target'); return; }
     const firstUnread=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
     const sid=firstUnread?String(firstUnread.sender||firstUnread.user_id||firstUnread.peer_id||''):'';
     if(sid) switchToUser(sid,'first-unread-fallback');
-  },[toId,dmUnread,switchToUser]);
+  },[toId,initialUserId,dmUnread,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     if(!id)return;
     const seq=++reqSeq.current;
@@ -4943,37 +4953,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
   },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone,setThreadMessages,normalizeDmList]);
   // Prefetch DM threads as soon as the DM screen opens, so clicking a member
-  // uses memory cache instead of showing the empty/start placeholder while the API responds.
-  const dmPrefetchedRef=useRef(false);
-  useEffect(()=>{
-    if(dmPrefetchedRef.current||!others.length)return;
-    dmPrefetchedRef.current=true;
-    const ids=others.map(u=>u.id).filter(Boolean);
-    let cancelled=false;
-    const prefetchOne=async(id)=>{
-      if(threadCache.current.has(id))return;
-      const d=await api.get('/api/dm/'+id,{quiet:true});
-      if(cancelled)return;
-      if(Array.isArray(d)){
-        const merged=mergePendingReactionState(id,d);
-        threadCache.current.set(id,merged);
-        _saveDmCache(id,merged);
-        if(!activeToRef.current && id===ids[0]){
-          activeToRef.current=id; setToId(id); setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }else if(id===activeToRef.current){
-          setMsgThreadId(id); setMsgs(merged); setLoadingThread('');
-        }
-      }
-    };
-    (async()=>{
-      const q=[...ids];
-      const workers=Array.from({length:Math.min(1,q.length)},async()=>{
-        while(q.length&&!cancelled){ await prefetchOne(q.shift()); }
-      });
-      await Promise.all(workers);
-    })();
-    return()=>{cancelled=true;};
-  },[others.length,mergePendingReactionState]);
+  // Do not prefetch every DM thread. It caused DB pressure and, worse, slow
+  // background responses could visually jump the user to another conversation.
+  // We now load only the selected/notification target thread, showing cached or
+  // SSE-injected messages instantly while the fresh API response merges in.
 
   const atBottomRef=useRef(true);
   const handleScroll=()=>{if(!ref.current)return;const{scrollTop,scrollHeight,clientHeight}=ref.current;atBottomRef.current=scrollHeight-scrollTop-clientHeight<120;};
@@ -9544,7 +9527,16 @@ function App(){
     const first=(Array.isArray(dmUnread)?dmUnread:[]).find(x=>x&&(x.sender||x.user_id||x.peer_id));
     const sid=first?String(first.sender||first.user_id||first.peer_id||''):'';
     if(sid){setDmTargetUser(sid);try{sessionStorage.setItem('pt_open_dm_user',sid);}catch(_){} history.replaceState(null,'',ptDmUrl(sid));}
-  },[view,dmUnread,dmTargetUser]);
+    else{
+      // Last-resort exact sender lookup for a notification click that opened /dm
+      // without ?user=. This avoids landing on the empty Select someone screen.
+      api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:6000}).then(latest=>{
+        const m=Array.isArray(latest)?latest.find(x=>x&&String(x.recipient||'')===String(cu&&cu.id||'')):null;
+        const peer=m?String(m.sender||''):'';
+        if(peer&&!dmTargetUser){setDmTargetUser(peer);try{sessionStorage.setItem('pt_open_dm_user',peer);}catch(_){} history.replaceState(null,'',ptDmUrl(peer));}
+      }).catch(()=>{});
+    }
+  },[view,dmUnread,dmTargetUser,cu]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
@@ -9878,7 +9870,7 @@ function App(){
     };
     const fetchPresence=()=>{
       const now=Date.now();
-      if(presenceBusy||now-lastFetched<60000)return Promise.resolve();
+      if(presenceBusy||now-lastFetched<15000)return Promise.resolve();
       presenceBusy=true;lastFetched=now;
       return api.get('/api/presence',{quiet:true,timeoutMs:6000}).then(applyPresenceLite).catch(()=>{}).finally(()=>{presenceBusy=false;});
     };
@@ -10303,7 +10295,7 @@ function App(){
       }
     };
     checkDue();
-    const id=setInterval(()=>{if(!document.hidden)checkDue();},120000); // SSE handles most updates; fallback only
+    const id=setInterval(()=>{if(!document.hidden)checkDue();},30000); // SSE handles most updates; fallback only
     return()=>clearInterval(id);
   },[cu,addToast]);
 
