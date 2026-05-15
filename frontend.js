@@ -168,7 +168,10 @@ const api={
     }
     return _apiRequest(u,o||{});
   },
-  post:(u,b,o)=>_apiRequest(u,{...(o||{}),method:'POST',headers:{'Content-Type':'application/json',...((o&&o.headers)||{})},body:JSON.stringify(b ?? {})}),
+  post:(u,b,o)=>{
+    if(String(u||'').split('?')[0]==='/api/dm/typing') return Promise.resolve({ok:true});
+    return _apiRequest(u,{...(o||{}),method:'POST',headers:{'Content-Type':'application/json',...((o&&o.headers)||{})},body:JSON.stringify(b ?? {})});
+  },
   put:(u,b,o)=>_apiRequest(u,{...(o||{}),method:'PUT',headers:{'Content-Type':'application/json',...((o&&o.headers)||{})},body:JSON.stringify(b ?? {})}),
   del:u=>_apiRequest(u,{method:'DELETE'}),
   upload:(u,fd)=>_apiRequest(u,{method:'POST',body:fd}),
@@ -4567,13 +4570,22 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       <div style=${{fontSize:14,fontWeight:700,color:'var(--tx2)'}}>Direct Messages Disabled</div>
       <div style=${{fontSize:13,color:'var(--tx3)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Your workspace admin has disabled direct messages. Contact your admin to enable them.</div>
     </div>`;
-  const currentIds=new Set([String(cu&&cu.id||''),String(cu&&cu.email||'').toLowerCase(),String(cu&&cu.name||'').toLowerCase()].filter(Boolean));
+  const currentId=String(cu&&cu.id||'');
+  const currentEmail=String(cu&&cu.email||'').trim().toLowerCase();
+  const currentName=String(cu&&cu.name||'').trim().toLowerCase();
+  const currentHandle=String(cu&&cu.handle||cu&&cu.username||'').trim().toLowerCase();
   const others=safe(users).filter(u=>{
     if(!u)return false;
-    const uid=String(u.id||'');
-    const email=String(u.email||'').toLowerCase();
-    const name=String(u.name||'').toLowerCase();
-    return uid&&uid!==String(cu&&cu.id||'')&&!currentIds.has(email)&&!(email&&email===String(cu&&cu.email||'').toLowerCase())&&!(name&&name===String(cu&&cu.name||'').toLowerCase()&&email===String(cu&&cu.email||'').toLowerCase());
+    const uid=String(u.id||'').trim();
+    const email=String(u.email||'').trim().toLowerCase();
+    const name=String(u.name||'').trim().toLowerCase();
+    const handle=String(u.handle||u.username||'').trim().toLowerCase();
+    if(!uid)return false;
+    if(currentId && uid===currentId)return false;
+    if(currentEmail && email && email===currentEmail)return false;
+    if(currentHandle && handle && handle===currentHandle)return false;
+    if(currentName && name && name===currentName)return false;
+    return true;
   });
   const [toId,setToId]=useState('');
   const [msgs,setMsgs]=useState([]);
@@ -4895,7 +4907,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   useEffect(()=>{
     // Notification/plain-/dm recovery only. Normal manual navigation to /dm must
     // remain on "Select someone" and must not auto-open the latest unread chat.
-    if(toId||initialUserId)return;
+    if(initialUserId)return;
     let shouldResolve=false;
     try{shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1'||!!sessionStorage.getItem('pt_dm_notification_target');}catch(_){}
     if(!shouldResolve)return;
@@ -4919,7 +4931,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   },[toId,initialUserId,dmUnread,users,cu&&cu.id,switchToUser]);
   useEffect(()=>{
     // One-shot notification target passed through sessionStorage by SW before React mounted.
-    if(toId||initialUserId)return;
+    if(initialUserId)return;
     try{
       const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
       const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
@@ -5222,7 +5234,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     });
     console.debug('[DM] optimistic send', {recipient,tempId});
     try{
-      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||''},{timeoutMs:60000});
+      const m=await api.post('/api/dm',{recipient,content:c,reply_to:optimistic.reply_to,client_msg_id:clientMsgId,context_type:dmContext&&dmContext.type||'',context_id:dmContext&&dmContext.id||''},{timeoutMs:120000});
       if(m&&m.ok===false){
         // Initial DB cold starts can exceed the browser timeout while the server
         // still commits the message. Keep the optimistic bubble instead of showing
@@ -5292,16 +5304,9 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const startEdit=(m)=>{setMenuFor('');setEditingId(m.id);setReplyTo(null);setTxt(m.content||'');};
   useEffect(()=>{window._pfSetDmContext=setDmContext;},[]);
   const sendTyping=()=>{
-    if(!toId)return;
-    const now=Date.now();
+    // Typing indicator is intentionally local-only. The previous network POST on
+    // keypress created /api/dm/typing 499 storms and delayed real sends.
     clearTimeout(typingOffTimerRef.current);
-    // Typing is a cosmetic signal. Do not let one POST per keypress create
-    // /api/dm/typing 499 storms or block real message sends.
-    if(now-(lastTypingSentRef.current||0)>3500){
-      lastTypingSentRef.current=now;
-      api.post('/api/dm/typing',{recipient:toId,typing:true},{quiet:true,timeoutMs:1200}).catch(()=>{});
-    }
-    typingOffTimerRef.current=setTimeout(()=>api.post('/api/dm/typing',{recipient:toId,typing:false},{quiet:true,timeoutMs:1200}).catch(()=>{}),1800);
   };
   const uploadVoiceBlob=async(blob)=>{
     if(!blob||!toId)return;
@@ -9866,36 +9871,42 @@ function App(){
   },[cu]);
   const [dmUnread,setDmUnread]=useState([]);
   useEffect(()=>{
-    // Notification fallback only: older push payloads sometimes open plain /dm.
-    // Resolve one exact sender, then clear the flag. Manual /dm still shows Select someone.
+    // Notification fallback only: older push payloads sometimes open plain /dm,
+    // or the user is already sitting on /dm with another thread selected.
+    // This resolver is allowed to switch the active DM because it only runs when
+    // a notification-click flag is present. Normal manual /dm keeps Select someone.
     let cancelled=false;
-    const run=async()=>{
+    const resolveAndOpen=async(source='notification')=>{
       try{
-        const base=String(view||'').split(':')[0];
-        if(base!=='dm'||dmTargetUser)return;
         const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
         const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
-        const openStored=shouldResolve?(sessionStorage.getItem('pt_open_dm_user')||''):'';
-        const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
-        if(!shouldResolve&&!stored)return;
+        const openStored=sessionStorage.getItem('pt_open_dm_user')||'';
+        if(!shouldResolve&&!stored)return '';
         const openedAt=Number(sessionStorage.getItem('pt_dm_route_opened_at')||Date.now());
-        if(shouldResolve&&Date.now()-openedAt>120000){sessionStorage.removeItem('pt_dm_resolve_next');}
+        if(shouldResolve&&Date.now()-openedAt>180000){sessionStorage.removeItem('pt_dm_resolve_next');return '';}
+        const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
         let peer=ptFirstValidDmPeer([stored,openStored,unreadPeer],data.users,cu&&cu.id);
         if(!peer){ peer=ptFirstValidDmPeer([await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread)],data.users,cu&&cu.id); }
-        if(cancelled)return;
-        sessionStorage.removeItem('pt_dm_resolve_next');
+        if(cancelled)return '';
         if(peer){
+          sessionStorage.removeItem('pt_dm_resolve_next');
+          sessionStorage.removeItem('pt_dm_manual_lock');
+          window.__ptDmManualLock=null;
           sessionStorage.setItem('pt_open_dm_user',peer);
           sessionStorage.setItem('pt_dm_notification_target',peer);
           setDmTargetUser(peer);
-          try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source:'notification'}}));}catch(_){}
+          try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source}}));}catch(_){}
           _setView('dm:'+peer);
           try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
+          return peer;
         }
       }catch(_e){}
+      return '';
     };
-    run();
-    return()=>{cancelled=true;};
+    window._pfResolveDmNotifNow=resolveAndOpen;
+    const base=String(view||'').split(':')[0];
+    if(base==='dm') resolveAndOpen('notification');
+    return()=>{cancelled=true;if(window._pfResolveDmNotifNow===resolveAndOpen)window._pfResolveDmNotifNow=null;};
   },[view,dmTargetUser,cu&&cu.id,dmUnread,data.users,_setView]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);

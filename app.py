@@ -6733,14 +6733,8 @@ def pin_dm_message():
 @app.route("/api/dm/typing",methods=["POST"])
 @login_required
 def dm_typing():
-    # Typing must be best-effort and instant. Never let Redis/SSE/backpressure make
-    # keypress POSTs sit for 15s and produce 499s that compete with real DM sends.
-    d=request.json or {}
-    recipient=(d.get("recipient") or "").strip()
-    typing=bool(d.get("typing"))
-    if recipient:
-        ws_id=wid(); sender=session["user_id"]
-        threading.Thread(target=lambda: _sse_publish(ws_id,"dm_typing",{"sender":sender,"recipient":recipient,"typing":typing}), daemon=True).start()
+    # Cosmetic endpoint only. Return instantly; do not open DB/Redis work here.
+    # This removes keypress-triggered 499 storms and keeps DM send requests fast.
     resp=jsonify({"ok":True})
     resp.headers["Cache-Control"]="no-store, max-age=0"
     return resp
@@ -6831,6 +6825,62 @@ def send_dm_workspace_alias(workspace_name, workspace_id):
     if str(workspace_id or "") != str(wid() or ""):
         return jsonify({"error":"Workspace mismatch"}), 403
     return send_dm()
+
+
+# ── Workspace-scoped project/task/ticket/email deep-link API aliases ─────────
+# Canonical shape: /api/<workspaceName>/<workspaceId>/<resource>/...
+# The workspace name is readable only; workspaceId is authoritative.
+
+def _workspace_alias_allowed(workspace_id):
+    return str(workspace_id or "") == str(wid() or "")
+
+@app.route("/api/<workspace_name>/<workspace_id>/projects", methods=["GET"])
+@login_required
+def projects_workspace_alias_all(workspace_name, workspace_id):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return get_projects_all() if 'get_projects_all' in globals() else get_projects()
+
+@app.route("/api/<workspace_name>/<workspace_id>/projects/<pid>", methods=["GET"])
+@login_required
+def project_workspace_alias_one(workspace_name, workspace_id, pid):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    with get_db(autocommit=True) as db:
+        r=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(pid,wid())).fetchone()
+    return jsonify(dict(r)) if r else (jsonify({"error":"Project not found"}),404)
+
+@app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>/comments", methods=["GET"])
+@login_required
+def task_comments_workspace_alias(workspace_name, workspace_id, tid):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    with get_db(autocommit=True) as db:
+        rows=db.execute("SELECT * FROM comments WHERE workspace_id=? AND task_id=? ORDER BY ts",(wid(),tid)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>", methods=["GET"])
+@login_required
+def ticket_detail_workspace_alias(workspace_name, workspace_id, tid):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    with get_db(autocommit=True) as db:
+        r=db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(tid,wid())).fetchone()
+    return jsonify(dict(r)) if r else (jsonify({"error":"Ticket not found"}),404)
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm/route-target")
+@login_required
+def dm_route_target_workspace_alias(workspace_name, workspace_id):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return dm_route_target()
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm/latest-unread")
+@login_required
+def latest_unread_dm_workspace_alias(workspace_name, workspace_id):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return latest_unread_dm()
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm/typing",methods=["POST"])
+@login_required
+def dm_typing_workspace_alias(workspace_name, workspace_id):
+    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    return dm_typing()
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 @app.route("/api/reminders", methods=["GET"])
@@ -8152,7 +8202,7 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v10: instant DM routing + no stale notification target */
+    js = """/* Project Tracker service worker v11: instant in-page DM routing + workspace aliases */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 self.addEventListener('push', event => {
