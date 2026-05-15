@@ -2493,9 +2493,9 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
     if(safe(projects).length===0) return;
     // Check URL for project id first
     try{
-      const parts=window.location.pathname.split('/');
-      if(parts[1]==='projects'&&parts[2]){
-        const urlProject=safe(projects).find(proj=>proj.id===parts[2]);
+      const ri=ptRouteInfo();
+      if(ri.page==='projects'&&ri.id){
+        const urlProject=safe(projects).find(proj=>String(proj.id)===String(ri.id));
         if(urlProject){setDetail(urlProject);return;}
       }
     }catch(e){}
@@ -2535,12 +2535,12 @@ function ProjectsView({projects,tasks,users,cu,reload,setData,onSetReminder,team
   // Handle browser back/forward within projects
   useEffect(()=>{
     const onPop=()=>{
-      const parts=window.location.pathname.split('/');
-      if(parts[1]==='projects'&&parts[2]){
-        const p=safe(projects).find(proj=>proj.id===parts[2]);
+      const ri=ptRouteInfo();
+      if(ri.page==='projects'&&ri.id){
+        const p=safe(projects).find(proj=>String(proj.id)===String(ri.id));
         if(p){setDetail(p);return;}
       }
-      if(window.location.pathname==='/projects'||window.location.pathname==='/projects/'){
+      if(ri.page==='projects'&&!ri.id){
         setDetail(null);
       }
     };
@@ -4990,7 +4990,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     // the users list changes through resolvePeerId/switchToUser dependencies.
     const resolvedTarget=resolvePeerId(target);
     if(!resolvedTarget)return;
-    if(resolvedTarget===lastInitialUserIdRef.current)return;
+    if(resolvedTarget===lastInitialUserIdRef.current && String(activeToRef.current||'')===String(resolvedTarget))return;
     try{
       const ri=ptRouteInfo();
       const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
@@ -9663,32 +9663,19 @@ function VaultView({cu}){
 
 
 
-function workspaceSlugFromUser(u){
-  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
-}
-function workspaceBasePath(u){
-  try{
-    const slug=workspaceSlugFromUser(u);
-    const wsId=String((u&&(u.workspace_id||u.workspace_id_from_me))||'').trim();
-    if(wsId)return '/'+slug+'/'+wsId+'/';
-    return '/'+slug+'/';
-  }catch(e){return '/workspace/';}
-}
 function pathParts(){try{return window.location.pathname.split('/').filter(Boolean);}catch(e){return [];}}
 function routeViewFromPath(validViews){
   try{
     const parts=pathParts();
-    if(!parts.length)return '';
-    if(validViews.includes(parts[0]))return parts[0];
-    if(parts.length>=2&&validViews.includes(parts[1]))return parts[1];
+    const i=parts.findIndex(x=>validViews.includes(String(x||'').trim()));
+    return i>=0?parts[i]:'';
   }catch(e){}
   return '';
 }
 function projectIdFromPath(){
   try{
-    const parts=pathParts();
-    if(parts[0]==='projects'&&parts[1])return parts[1];
-    if(parts.length>=3&&parts[1]==='projects')return parts[2];
+    const ri=ptRouteInfo();
+    if(ri.page==='projects'&&ri.id)return ri.id;
   }catch(e){}
   return '';
 }
@@ -9708,24 +9695,60 @@ function deepLinkFromSearch(){
 }
 
 
+
+function workspaceSlugFromUser(u){
+  try{return (u&&(u.workspace_slug||u.workspace_name||u.workspace_id_from_me||u.workspace_id)||'workspace').toString().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'workspace';}catch(e){return 'workspace';}
+}
+function ptWorkspacePrefixFromPath(){
+  try{
+    const VIEWS=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault','notifs'];
+    const seg=window.location.pathname.split('/').filter(Boolean);
+    const vi=seg.findIndex(s=>VIEWS.includes(String(s||'').trim()));
+    if(vi>0)return '/'+seg.slice(0,vi).join('/')+'/';
+  }catch(e){}
+  return '';
+}
+function workspaceBasePath(u){
+  try{
+    const existing=ptWorkspacePrefixFromPath();
+    if(existing)return existing;
+    const slug=workspaceSlugFromUser(u);
+    const wsId=String((u&&(u.workspace_id||u.workspace_id_from_me))||'').trim();
+    if(wsId)return '/'+slug+'/'+encodeURIComponent(wsId)+'/';
+    return '/'+slug+'/';
+  }catch(e){return '/workspace/';}
+}
+function ptEntityUrl(page,id='',u=null){
+  try{
+    const base=workspaceBasePath(u);
+    const p=String(page||'').replace(/^\/+|\/+$/g,'');
+    const eid=String(id||'').trim();
+    return base+p+(eid?'/'+encodeURIComponent(eid):'');
+  }catch(e){return '/'+String(page||'')+(id?'/'+encodeURIComponent(String(id)):'');}
+}
+
 function ptRouteInfo(){
   try{
     const VALID=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault','notifs'];
     const seg=window.location.pathname.split('/').filter(Boolean);
     const q=new URLSearchParams(window.location.search||'');
     let idx=0;
-    if(seg.length>=3 && /^ws/i.test(seg[1])) idx=2;
+    // Workspace URLs are /<workspace-slug>/<workspace-id>/<page>/... .
+    // Also keep supporting legacy /<page>/... URLs.
+    const viewIdx=seg.findIndex(s=>VALID.includes(String(s||'').trim()));
+    if(viewIdx>=0)idx=viewIdx;
     let page=(seg[idx]||'').trim();
     if(page==='kanban') page='tasks';
     if(page==='channels') page='messages';
     if(!VALID.includes(page)) page='';
-    const action=String(q.get('action')||'').toLowerCase();
+    const action=String(q.get('action')||q.get('view')||'').toLowerCase();
     if(!page && VALID.includes(action)) page=action;
     const user=q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||(page==='dm'?(seg[idx+1]||''):'');
-    const id=q.get('id')||q.get('entity_id')||(page&&seg[idx+1]&&page!=='dm'?seg[idx+1]:'');
+    const id=q.get('id')||q.get('entity_id')||q.get('task_id')||q.get('project_id')||q.get('ticket_id')||(page&&seg[idx+1]&&page!=='dm'?seg[idx+1]:'');
     return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx};
   }catch(_){return {page:'',user:'',id:'',action:'',seg:[],idx:0};}
 }
+
 
 function ptDmPeerFromUnreadRows(rows, cuId){
   try{
@@ -9802,18 +9825,7 @@ async function ptResolveDmNotificationTarget(cuId, dmUnread){
 
 function ptDmUrl(user){
   const u=user?('?user='+encodeURIComponent(String(user))):'';
-  try{
-    const seg=window.location.pathname.split('/').filter(Boolean);
-    // Find the first path segment that is a known view name; everything before it
-    // is the workspace prefix (slug + optional wsId).  This works regardless of
-    // whether the workspace ID starts with "ws" or is purely numeric.
-    const VIEWS=['dm','dashboard','projects','tasks','messages','tickets','timeline',
-                 'settings','team','reminders','timesheet','productivity','ops',
-                 'vault','ai-docs','password-generator','notes','notifs'];
-    const vi=seg.findIndex(s=>VIEWS.includes(s));
-    if(vi>0)return '/'+seg.slice(0,vi).join('/')+'/dm'+u;
-  }catch(_){}
-  return '/dm'+u;
+  return ptEntityUrl('dm','')+u;
 }
 
 function App(){
@@ -9898,6 +9910,9 @@ function App(){
           // This prevents old saved targets from stealing the active conversation.
           const target=explicit||'';
           if(target)suffix='?user='+encodeURIComponent(String(target));
+        }else if(raw.startsWith(base+':')){
+          const entityId=raw.slice(base.length+1);
+          if(entityId)suffix='/'+encodeURIComponent(String(entityId));
         }
         history.pushState(null,'',workspaceBasePath(cu)+base+suffix);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
@@ -9966,7 +9981,7 @@ function App(){
     if(!taskId){const t=byName(tasks,['title','name']); if(t)taskId=String(t.id);}
     if(entityType==='task'||taskId||['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)||contentLow.includes('task')){
       if(taskId)setInitialTaskId(String(taskId));
-      _setView('tasks');
+      _setView(taskId?'tasks:'+String(taskId):'tasks');
       return;
     }
 
@@ -9975,7 +9990,7 @@ function App(){
     if(!projectId){const p=byName(projects,['name','title']); if(p)projectId=String(p.id);}
     if(entityType==='project'||projectId||['project_added','project_updated','project.created','project.updated','project'].includes(type)||contentLow.includes('project')){
       if(projectId)setInitialProjectId(String(projectId));
-      _setView('projects');
+      _setView(projectId?'projects:'+String(projectId):'projects');
       return;
     }
 
