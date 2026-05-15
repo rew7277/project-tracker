@@ -9829,7 +9829,7 @@ function App(){
       }catch(e){}
     };
     const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
-    const id=setInterval(()=>{if(!document.hidden)check();},15000);
+    const id=setInterval(()=>{if(!document.hidden)check();},60000);
     return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
@@ -9965,13 +9965,13 @@ function App(){
     };
     const fetchPresence=()=>{
       const now=Date.now();
-      if(presenceBusy||now-lastFetched<25000)return Promise.resolve();
+      if(presenceBusy||now-lastFetched<60000)return Promise.resolve();
       presenceBusy=true;lastFetched=now;
       return api.get('/api/presence',{quiet:true,timeoutMs:6000}).then(applyPresenceLite).catch(()=>{}).finally(()=>{presenceBusy=false;});
     };
     const beat=()=>{
       const now=Date.now();
-      if(now-lastPosted<25000)return fetchPresence();
+      if(now-lastPosted<60000)return fetchPresence();
       lastPosted=now;
       return api.post('/api/presence',{}, {quiet:true,timeoutMs:6000}).then(fetchPresence).catch(fetchPresence);
     };
@@ -10252,7 +10252,7 @@ function App(){
     const startDelay=5000; // stagger away from cold-start stampede
     const startTimer=setTimeout(()=>pollOnce(),startDelay);
     triggerPollRef.current=pollOnce;
-    const id=setInterval(pollOnce,10000); // SSE is primary; poll is a fallback only
+    const id=setInterval(()=>{if(!document.hidden)pollOnce();},60000); // SSE is primary; poll is a fallback only
     return()=>{clearTimeout(startTimer);clearInterval(id);if(triggerPollRef.current===pollOnce)triggerPollRef.current=null;};
   },[cu,addToast]); // intentionally omit data.users — sender name is best-effort
 
@@ -10337,7 +10337,7 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      const due=await api.get('/api/reminders/due');
+      const due=await api.get('/api/reminders/due',{quiet:true,timeoutMs:8000}).catch(()=>[]);
       const rems=upcomingReminders;
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
@@ -10375,7 +10375,7 @@ function App(){
     // Startup jitter: delay 10–20 s so reminders/due doesn't fire at t=0 with bootstrap
     const remStartDelay=10000+Math.random()*10000;
     const remStartTimer=setTimeout(()=>checkDue(),remStartDelay);
-    const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
+    const id=setInterval(()=>{if(!document.hidden)checkDue();},120000); // SSE handles most updates; fallback only
     return()=>{clearTimeout(remStartTimer);clearInterval(id);};
   },[cu,addToast]);
 

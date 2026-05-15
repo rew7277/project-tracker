@@ -546,9 +546,10 @@ import queue as _queue, threading as _poollock
 # Pool sized for: gunicorn workers × gevent greenlets per worker.
 # With POOL_SIZE env var support so Railway can tune without redeploy.
 import os as _os_pool
-_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "6"))
+_PG_POOL_SIZE = int(_os_pool.environ.get("PG_POOL_SIZE", "4"))
 _PG_POOL      = _queue.Queue(maxsize=_PG_POOL_SIZE)
 _PG_POOL_LOCK = _poollock.Lock()
+_PG_CREATED   = 0      # number of live PostgreSQL sessions owned by this worker
 _PG_KWARGS    = None   # cached once after first parse
 
 def _pg_kwargs():
@@ -561,17 +562,55 @@ def _make_conn():
     from pg8000.native import Connection as _PGConn
     return _PGConn(**_pg_kwargs())
 
-def _get_pool_conn():
-    """Get a healthy pooled DB connection without creating unlimited new
-    PostgreSQL sessions. The old fallback opened a fresh connection whenever
-    the pool was empty; under DM/presence polling this exhausted Postgres with
-    "too many clients already" and caused 499/500 responses.
-    """
+def _discard_pool_conn(conn):
+    """Close a broken pooled connection and release its slot."""
+    global _PG_CREATED
     try:
-        return _PG_POOL.get(timeout=float(_os_pool.environ.get("PG_POOL_WAIT_SECONDS", "3")))
+        conn.close()
+    except Exception:
+        pass
+    with _PG_POOL_LOCK:
+        _PG_CREATED = max(0, _PG_CREATED - 1)
+
+def _get_pool_conn():
+    """Borrow a DB connection without stampeding Postgres.
+
+    The previous patch only pre-warmed 1-2 connections and then waited on the
+    queue forever. Under normal startup load (/auth/me + /presence + /poll +
+    reminders + DM history) those 2 slots were exhausted, which caused 500s on
+    /api/auth/me, /api/auth/login, /api/reminders/due, and /api/dm/*.
+
+    This version grows lazily up to PG_POOL_SIZE per worker, then waits briefly.
+    It never opens unlimited sessions, and it does not fail while capacity is
+    still available.
+    """
+    global _PG_CREATED
+    try:
+        return _PG_POOL.get_nowait()
     except _queue.Empty:
-        # Hard cap: fail fast instead of stampeding Postgres with new clients.
-        raise RuntimeError("Database connection pool exhausted; reduce polling or increase PG_POOL_SIZE/Postgres max_connections")
+        pass
+
+    with _PG_POOL_LOCK:
+        if _PG_CREATED < _PG_POOL_SIZE:
+            _PG_CREATED += 1
+            make_new = True
+        else:
+            make_new = False
+
+    if make_new:
+        try:
+            return _make_conn()
+        except Exception:
+            with _PG_POOL_LOCK:
+                _PG_CREATED = max(0, _PG_CREATED - 1)
+            raise
+
+    try:
+        return _PG_POOL.get(timeout=float(_os_pool.environ.get("PG_POOL_WAIT_SECONDS", "8")))
+    except _queue.Empty:
+        raise RuntimeError(
+            "Database connection pool exhausted; reduce frontend polling or increase PG_POOL_SIZE/Postgres max_connections"
+        )
 
 def _validate_conn(conn):
     """Light ping — called only when a query fails, not on every borrow."""
@@ -579,17 +618,15 @@ def _validate_conn(conn):
         conn.run("SELECT 1")
         return True
     except Exception:
-        try: conn.close()
-        except: pass
+        _discard_pool_conn(conn)
         return False
 
 def _return_pool_conn(conn):
-    """Return connection to pool, or close if pool is full."""
+    """Return connection to pool, or close/release if pool is full."""
     try:
         _PG_POOL.put_nowait(conn)
     except _queue.Full:
-        try: conn.close()
-        except: pass
+        _discard_pool_conn(conn)
 
 def _pool_conn_with_retry():
     """Get a pool connection; if the first real query fails due to a dead
@@ -599,9 +636,12 @@ def _pool_conn_with_retry():
 
 def _prewarm_pool(n=max(1, min(2, _PG_POOL_SIZE))):
     """Open n connections at startup so first requests don't stall."""
+    global _PG_CREATED
     for _ in range(n):
         try:
             conn = _make_conn()
+            with _PG_POOL_LOCK:
+                _PG_CREATED += 1
             _return_pool_conn(conn)
         except Exception as _e:
             log.warning("[pool prewarm] %s", _e)
@@ -630,8 +670,7 @@ def _raw_pg(sql, params=(), fetch=False):
             _return_pool_conn(conn)
             return result
         except Exception as _e:
-            try: conn.close()
-            except: pass
+            _discard_pool_conn(conn)
             if attempt == 1:
                 raise
             # first attempt failed — pool conn was stale; retry with fresh conn

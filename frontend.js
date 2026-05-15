@@ -9724,7 +9724,7 @@ function App(){
       }catch(e){}
     };
     const startId=setTimeout(()=>{ if(!stopped) check(); },8000); // delay avoids cold-start stampede
-    const id=setInterval(check,15000);
+    const id=setInterval(()=>{if(!document.hidden)check();},60000);
     return()=>{stopped=true;clearTimeout(startId);clearInterval(id);};
   },[cu,showGlobalCallPopup]);
 
@@ -9878,13 +9878,13 @@ function App(){
     };
     const fetchPresence=()=>{
       const now=Date.now();
-      if(presenceBusy||now-lastFetched<25000)return Promise.resolve();
+      if(presenceBusy||now-lastFetched<60000)return Promise.resolve();
       presenceBusy=true;lastFetched=now;
       return api.get('/api/presence',{quiet:true,timeoutMs:6000}).then(applyPresenceLite).catch(()=>{}).finally(()=>{presenceBusy=false;});
     };
     const beat=()=>{
       const now=Date.now();
-      if(now-lastPosted<25000)return fetchPresence();
+      if(now-lastPosted<60000)return fetchPresence();
       lastPosted=now;
       return api.post('/api/presence',{}, {quiet:true,timeoutMs:6000}).then(fetchPresence).catch(fetchPresence);
     };
@@ -10186,7 +10186,7 @@ function App(){
 
     triggerPollRef.current=pollOnce;
 
-    const id=setInterval(()=>{if(!document.hidden)pollOnce();}, 30000); // fallback only — SSE is primary
+    const id=setInterval(()=>{if(!document.hidden)pollOnce();}, 60000); // fallback only — SSE is primary
     return()=>{ clearInterval(id); if(triggerPollRef.current===pollOnce) triggerPollRef.current=null; };
   },[cu,addToast]);
 
@@ -10267,7 +10267,7 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const checkDue=async()=>{
-      const due=await api.get('/api/reminders/due');
+      const due=await api.get('/api/reminders/due',{quiet:true,timeoutMs:8000}).catch(()=>[]);
       const rems=upcomingReminders;
       if(Array.isArray(due)&&due.length>0){
         due.forEach(r=>{
@@ -10303,7 +10303,7 @@ function App(){
       }
     };
     checkDue();
-    const id=setInterval(checkDue,60000); // SSE handles most updates; fallback only
+    const id=setInterval(()=>{if(!document.hidden)checkDue();},120000); // SSE handles most updates; fallback only
     return()=>clearInterval(id);
   },[cu,addToast]);
 
