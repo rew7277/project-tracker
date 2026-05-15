@@ -60,13 +60,32 @@ if('serviceWorker' in navigator){
           window.focus();
           var tag=e.data.tag;
           var handled=false;
+          var dmUser='';
+          try{
+            var clickUrl=String(e.data.url||'');
+            var clickQ=new URLSearchParams((clickUrl.split('?')[1])||'');
+            dmUser=String(clickQ.get('user')||clickQ.get('sender')||clickQ.get('peer')||e.data.sender||'').trim();
+            var clickPath=(clickUrl.split('?')[0]||'');
+            var clickKind=String(e.data.kind||'').toLowerCase();
+            var isDmClick=clickKind==='dm'||clickPath.indexOf('/dm')>=0||clickQ.get('action')==='dm';
+            if(isDmClick){
+              sessionStorage.removeItem('pt_dm_manual_lock');
+              if(dmUser){
+                sessionStorage.setItem('pt_open_dm_user',dmUser);
+                sessionStorage.setItem('pt_dm_notification_target',dmUser);
+                sessionStorage.removeItem('pt_dm_resolve_next');
+                window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:dmUser,source:'sw-notification'}}));
+              }else{
+                sessionStorage.setItem('pt_dm_resolve_next','1');
+                sessionStorage.setItem('pt_dm_route_opened_at',String(Date.now()));
+              }
+            }
+          }catch(_pre){}
           if(tag&&window._pfNotifHandlers&&window._pfNotifHandlers[tag]){
             try{window._pfNotifHandlers[tag]();handled=true;}catch(err){}
             delete window._pfNotifHandlers[tag];
           }
-          /* If handler was gone (page refreshed since notification was shown),
-             fall back to URL-based navigation via the same custom event */
-          if(!handled&&e.data.url){
+          if(e.data.url){
             try{
               var fbQ=new URLSearchParams((e.data.url.split('?')[1])||'');
               var fbParams=Object.fromEntries(fbQ);
@@ -5615,6 +5634,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     if(id===String(activeToRef.current||'')){
       setToId(id);
+      try{onDmRead&&onDmRead(id);}catch(_){}
       try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
       return;
     }
@@ -5640,7 +5660,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList,onClearInitial,resolvePeerId,users]);
+    try{onDmRead&&onDmRead(id);}catch(_){}
+  },[normalizeDmList,onClearInitial,resolvePeerId,users,onDmRead]);
+  useEffect(()=>{
+    const open=(peer,source='external')=>{
+      const raw=String(peer||'').trim();
+      if(!raw)return;
+      try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_){}
+      switchToUser(raw, source==='sw-notification'?'sw-notification':(source==='notification'?'notification':'url'));
+    };
+    window.__ptOpenDmPeer=open;
+    const h=e=>open(e&&e.detail&&e.detail.user, e&&e.detail&&e.detail.source||'external');
+    window.addEventListener('pt:open-dm-user',h);
+    return()=>{if(window.__ptOpenDmPeer===open)window.__ptOpenDmPeer=null;window.removeEventListener('pt:open-dm-user',h);};
+  },[switchToUser]);
   useEffect(()=>{
     const target=String(initialUserId||'');
     if(!target)return;
@@ -5876,6 +5909,11 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       if(msg&&msg.type==='dm_created'&&data&&data.message){
         let m=data.message;
         const peer=(String(m.sender)===String(cu.id))?String(m.recipient):String(m.sender);
+        if(!toId && String(m.sender)!==String(cu.id) && String(m.recipient)===String(cu.id)){
+          try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);}catch(_){}
+          switchToUser(peer,'notification');
+          return;
+        }
         const belongs=String(peer)===String(toId) || String(data.sender)===String(toId) || String(data.recipient)===String(toId);
         if(belongs){
           if(String(m.sender)!==String(cu.id))m={...m,read:1};
@@ -5953,7 +5991,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   }
   const send=async()=>{
-    if(!txt.trim()||!toId||sending)return;
+    if(!txt.trim()||!toId)return;
     const recipient=toId;
     const c=txt.trim();
     if(editingId){
@@ -5972,7 +6010,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true,_instant:true};
     setTxt('');setReplyTo(null);
     setSending(true);
-    setTimeout(()=>setSending(false),250);
+    setTimeout(()=>setSending(false),120);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -10495,6 +10533,7 @@ function App(){
       if(dmPeer){
         try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));}catch(_e){}
         setDmTargetUser(String(dmPeer));
+        try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(dmPeer),source:'notification'}}));}catch(_){}
         _setView('dm:'+String(dmPeer));
       }else{
         try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_e){}
@@ -10615,6 +10654,7 @@ function App(){
           sessionStorage.setItem('pt_open_dm_user',peer);
           sessionStorage.setItem('pt_dm_notification_target',peer);
           setDmTargetUser(peer);
+          try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source:'notification'}}));}catch(_){}
           _setView('dm:'+peer);
           try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
         }
@@ -10643,7 +10683,7 @@ function App(){
         else if(action==='dm'||page==='dm'){
           if(user){
             setDmTargetUser(user);
-            try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',user);sessionStorage.setItem('pt_dm_notification_target',user);}catch(_){}
+            try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',user);sessionStorage.setItem('pt_dm_notification_target',user);window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user,source:'sw-notification'}}));}catch(_){}
             _setView('dm:'+user);
           }else{
             try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_dm_resolve_next','1');sessionStorage.setItem('pt_dm_route_opened_at',String(Date.now()));}catch(_){}
@@ -11286,14 +11326,15 @@ function App(){
   },[cu,addToast]);
 
   const onDmRead=useCallback(sid=>{
-    setDmUnread(prev=>prev.filter(x=>x.sender!==sid));
-    // Also clear DM notifications from this sender in the panel
+    const sidS=String(sid||'');
+    const peerOf=x=>String((x&& (x.sender||x.sender_id||x.peer_id||x.user_id||x.dm_user_id||x.from_user_id))||'');
+    setDmUnread(prev=>prev.filter(x=>peerOf(x)!==sidS));
     setData(prev=>{
-      const toDelete=prev.notifs.filter(n=>n.type==='dm'&&(n.sender_id===sid||n.sender===sid));
-      toDelete.forEach(n=>{
-        api.del('/api/notifications/'+n.id).catch(()=>{});
-      });
-      return {...prev,notifs:prev.notifs.filter(n=>!(n.type==='dm'&&(n.sender_id===sid||n.sender===sid)))};
+      const notifs=Array.isArray(prev.notifs)?prev.notifs:[];
+      const isDmFrom=n=>String(n&&n.type||'').toLowerCase()==='dm'&&(String(n.sender_id||n.sender||n.from_user_id||n.user_id||'')===sidS);
+      const toDelete=notifs.filter(isDmFrom);
+      toDelete.forEach(n=>{api.del('/api/notifications/'+n.id).catch(()=>{});});
+      return {...prev,notifs:notifs.filter(n=>!isDmFrom(n))};
     });
   },[]);
   const logout=async()=>{

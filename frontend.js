@@ -4823,6 +4823,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     if(id===String(activeToRef.current||'')){
       setToId(id);
+      try{onDmRead&&onDmRead(id);}catch(_){}
       try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
       return;
     }
@@ -4848,7 +4849,20 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       setLoadingThread(id);
     }
     setToId(id);
-  },[normalizeDmList,onClearInitial,resolvePeerId,users]);
+    try{onDmRead&&onDmRead(id);}catch(_){}
+  },[normalizeDmList,onClearInitial,resolvePeerId,users,onDmRead]);
+  useEffect(()=>{
+    const open=(peer,source='external')=>{
+      const raw=String(peer||'').trim();
+      if(!raw)return;
+      try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_){}
+      switchToUser(raw, source==='sw-notification'?'sw-notification':(source==='notification'?'notification':'url'));
+    };
+    window.__ptOpenDmPeer=open;
+    const h=e=>open(e&&e.detail&&e.detail.user, e&&e.detail&&e.detail.source||'external');
+    window.addEventListener('pt:open-dm-user',h);
+    return()=>{if(window.__ptOpenDmPeer===open)window.__ptOpenDmPeer=null;window.removeEventListener('pt:open-dm-user',h);};
+  },[switchToUser]);
   useEffect(()=>{
     const target=String(initialUserId||'');
     if(!target)return;
@@ -5176,7 +5190,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(peer===activeToRef.current)setMsgs(prev=>patchList(prev));
   }
   const send=async()=>{
-    if(!txt.trim()||!toId||sending)return;
+    if(!txt.trim()||!toId)return;
     const recipient=toId;
     const c=txt.trim();
     if(editingId){
@@ -5195,7 +5209,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     const optimistic={id:tempId,client_msg_id:clientMsgId,sender:cu.id,recipient,content:c,read:0,ts:new Date().toISOString(),reply_to:replyTo&&replyTo.id||'',_pending:true};
     setTxt('');setReplyTo(null);
     setSending(true);
-    setTimeout(()=>setSending(false),250);
+    setTimeout(()=>setSending(false),120);
     setMsgThreadId(recipient);
     setMsgs(prev=>{
       const next=[...prev.filter(m=>m.id!==tempId),optimistic];
@@ -9721,6 +9735,7 @@ function App(){
       if(dmPeer){
         try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));sessionStorage.setItem('pt_dm_notification_target',String(dmPeer));}catch(_e){}
         setDmTargetUser(String(dmPeer));
+        try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:String(dmPeer),source:'notification'}}));}catch(_){}
         _setView('dm:'+String(dmPeer));
       }else{
         try{sessionStorage.setItem('pt_dm_resolve_next','1');}catch(_e){}
@@ -9840,6 +9855,7 @@ function App(){
           sessionStorage.setItem('pt_open_dm_user',peer);
           sessionStorage.setItem('pt_dm_notification_target',peer);
           setDmTargetUser(peer);
+          try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source:'notification'}}));}catch(_){}
           _setView('dm:'+peer);
           try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
         }
@@ -10494,14 +10510,15 @@ function App(){
   },[cu,addToast]);
 
   const onDmRead=useCallback(sid=>{
-    setDmUnread(prev=>prev.filter(x=>x.sender!==sid));
-    // Also clear DM notifications from this sender in the panel
+    const sidS=String(sid||'');
+    const peerOf=x=>String((x&& (x.sender||x.sender_id||x.peer_id||x.user_id||x.dm_user_id||x.from_user_id))||'');
+    setDmUnread(prev=>prev.filter(x=>peerOf(x)!==sidS));
     setData(prev=>{
-      const toDelete=prev.notifs.filter(n=>n.type==='dm'&&(n.sender_id===sid||n.sender===sid));
-      toDelete.forEach(n=>{
-        api.del('/api/notifications/'+n.id).catch(()=>{});
-      });
-      return {...prev,notifs:prev.notifs.filter(n=>!(n.type==='dm'&&(n.sender_id===sid||n.sender===sid)))};
+      const notifs=Array.isArray(prev.notifs)?prev.notifs:[];
+      const isDmFrom=n=>String(n&&n.type||'').toLowerCase()==='dm'&&(String(n.sender_id||n.sender||n.from_user_id||n.user_id||'')===sidS);
+      const toDelete=notifs.filter(isDmFrom);
+      toDelete.forEach(n=>{api.del('/api/notifications/'+n.id).catch(()=>{});});
+      return {...prev,notifs:notifs.filter(n=>!isDmFrom(n))};
     });
   },[]);
   const logout=async()=>{

@@ -6758,14 +6758,46 @@ def dm_typing():
 @app.route("/api/dm/unread")
 @login_required
 def dm_unread():
+    # Always hit DB for unread counts. Caching this caused a bad UX where a user
+    # opened/read a DM, then the sidebar refreshed and showed the same message as
+    # new again. This endpoint is intentionally tiny (GROUP BY sender only).
     ws, uid = wid(), session["user_id"]
-    data, found = _appdata_cache_get(ws, uid, "dm_unread")
-    if found: return jsonify(data)
     with get_db() as db:
         rows = db.execute("""SELECT sender,COUNT(*) as cnt FROM direct_messages
-            WHERE workspace_id=? AND recipient=? AND read=0 GROUP BY sender""",
+            WHERE workspace_id=? AND recipient=? AND read=0 AND COALESCE(deleted,0)=0 GROUP BY sender""",
             (ws, uid)).fetchall()
-        return jsonify([dict(r) for r in rows])
+    resp=jsonify([dict(r) for r in rows])
+    resp.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
+# ── Workspace-scoped API aliases for email/deep-link integrations ───────────
+@app.route("/api/<workspace_name>/<workspace_id>/dm/<other_id>")
+@login_required
+def get_dm_workspace_alias(workspace_name, workspace_id, other_id):
+    if str(workspace_id or "") != str(wid() or ""):
+        return jsonify({"error":"Workspace mismatch"}), 403
+    return get_dm(other_id)
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm/unread")
+@login_required
+def dm_unread_workspace_alias(workspace_name, workspace_id):
+    if str(workspace_id or "") != str(wid() or ""):
+        return jsonify({"error":"Workspace mismatch"}), 403
+    return dm_unread()
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm/previews")
+@login_required
+def dm_previews_workspace_alias(workspace_name, workspace_id):
+    if str(workspace_id or "") != str(wid() or ""):
+        return jsonify({"error":"Workspace mismatch"}), 403
+    return dm_previews()
+
+@app.route("/api/<workspace_name>/<workspace_id>/dm", methods=["POST"])
+@login_required
+def send_dm_workspace_alias(workspace_name, workspace_id):
+    if str(workspace_id or "") != str(wid() or ""):
+        return jsonify({"error":"Workspace mismatch"}), 403
+    return send_dm()
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 @app.route("/api/reminders", methods=["GET"])
@@ -8087,7 +8119,7 @@ def service_worker():
     slows navigations without adding offline behavior. This script activates immediately
     and intentionally avoids intercepting network requests.
     """
-    js = """/* Project Tracker service worker v8: exact DM notification deep routing */
+    js = """/* Project Tracker service worker v9: in-page exact DM notification routing */
 self.addEventListener('install', event => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil((async()=>{try{const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));}catch(e){} await self.clients.claim();})()));
 self.addEventListener('push', event => {
