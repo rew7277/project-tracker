@@ -2492,7 +2492,16 @@ def push_notification_to_user(db_ignored, user_id, title, body, nav_url="/", tag
     except Exception as e:
         print(f"push_notification DB error: {e}")
         return
-    payload = {"title": title, "body": body, "url": nav_url, "tag": tag or title}
+    _nav = str(nav_url or "")
+    _sender = ""
+    try:
+        from urllib.parse import urlparse, parse_qs
+        _sender = (parse_qs(urlparse(_nav).query).get("user") or [""])[0]
+    except Exception:
+        _sender = ""
+    payload = {"title": title, "body": body, "url": nav_url, "tag": tag or title,
+               "kind": "dm" if _nav.startswith("/dm") or "action=dm" in _nav else "",
+               "sender": _sender}
     dead_ids = []
     for sub in (subs or []):
         sub_info = {
@@ -6585,6 +6594,44 @@ def _get_dm_message_with_reactions(db, ws_id, mid):
     return _attach_dm_reactions(db, ws_id, rows)[0] if rows else None
 
 
+
+@app.route("/api/dm/route-target")
+@login_required
+def dm_route_target():
+    """Resolve the exact DM peer for a notification that opened plain /dm.
+
+    This is used only by the frontend after a notification click without ?user=.
+    It first prefers unread DMs. If an older/background fetch already marked the
+    unread row as read, it falls back to the latest DM notification/message for
+    the current user so the click still opens the sender's tab.
+    """
+    ws_id = wid()
+    me = session["user_id"]
+    with get_db() as db:
+        r = db.execute("""
+            SELECT sender AS user, 'unread' AS source, ts
+            FROM direct_messages
+            WHERE workspace_id=? AND recipient=? AND read=0 AND COALESCE(deleted,0)=0
+            ORDER BY ts DESC LIMIT 1
+        """, (ws_id, me)).fetchone()
+        if not r:
+            r = db.execute("""
+                SELECT sender AS user, 'latest_dm' AS source, ts
+                FROM direct_messages
+                WHERE workspace_id=? AND recipient=? AND COALESCE(deleted,0)=0
+                ORDER BY ts DESC LIMIT 1
+            """, (ws_id, me)).fetchone()
+        if not r:
+            r = db.execute("""
+                SELECT sender_id AS user, 'notification' AS source, ts
+                FROM notifications
+                WHERE workspace_id=? AND user_id=?
+                  AND (type IN ('dm','direct_message','message_received','new_message') OR entity_type IN ('dm','direct_message','message','chat'))
+                  AND COALESCE(sender_id,'')<>''
+                ORDER BY ts DESC LIMIT 1
+            """, (ws_id, me)).fetchone()
+    return jsonify(dict(r) if r else {"user":"", "source":"none"})
+
 @app.route("/api/dm/latest-unread")
 @login_required
 def latest_unread_dm():
@@ -8012,7 +8059,7 @@ self.addEventListener('push', event => {
     icon: data.icon || '/icon-192.png',
     badge: data.badge || '/icon-192.png',
     tag: data.tag || ('pt-' + Date.now()),
-    data: { url: data.url || data.nav_url || '/', tag: data.tag || '' },
+    data: { url: data.url || data.nav_url || '/', tag: data.tag || '', title, body: data.body || '', kind: data.kind || '', sender: data.sender || data.sender_id || '' },
     renotify: true
   };
   event.waitUntil(self.registration.showNotification(title, options));
@@ -8022,6 +8069,10 @@ self.addEventListener('notificationclick', event => {
   const data = (event.notification && event.notification.data) || {};
   const url = data.url || '/';
   const tag = data.tag || '';
+  const title = data.title || '';
+  const body = data.body || '';
+  const sender = data.sender || '';
+  const kind = data.kind || '';
   event.waitUntil((async()=>{
     const allClients = await clients.matchAll({type:'window', includeUncontrolled:true});
     for (const client of allClients) {
@@ -8030,7 +8081,7 @@ self.addEventListener('notificationclick', event => {
         /* Send PF_NOTIF_CLICK so the stored onClick handler fires in-app
            without a full page reload. Include url as a fallback in case
            the handler is gone (e.g. page was refreshed since notif was shown). */
-        client.postMessage({type:'PF_NOTIF_CLICK', tag, url});
+        client.postMessage({type:'PF_NOTIF_CLICK', tag, url, title, body, sender, kind});
         return;
       } catch(e) {}
     }

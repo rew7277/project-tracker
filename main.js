@@ -4898,6 +4898,18 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     // No saved/unread auto-open. Leaving /dm empty is safer than changing a user
     // away from the chat they just clicked.
   },[toId,initialUserId,switchToUser]);
+  useEffect(()=>{
+    // One-shot notification target passed through sessionStorage by SW before React mounted.
+    if(toId||initialUserId)return;
+    try{
+      const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
+      const target=sessionStorage.getItem('pt_open_dm_user')||sessionStorage.getItem('pt_dm_notification_target')||'';
+      if(shouldResolve&&target){
+        sessionStorage.removeItem('pt_dm_resolve_next');
+        switchToUser(String(target),'notification');
+      }
+    }catch(_e){}
+  },[toId,initialUserId,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     id=String(id||'');
     if(!id)return;
@@ -5009,7 +5021,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },5000);
+    },8000);
     try{window.__ptDmActivePollTimer=id;window.__ptDmActivePollUser=String(toId);}catch(_){}
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
@@ -7617,7 +7629,7 @@ async function showBrowserNotif(title,body,onClick,opts={}){
   if(!('Notification' in window)||Notification.permission!=='granted')return;
   if(window._pfSWReg){
     try{
-      await window._pfSWReg.showNotification(title,{body,icon:NOTIF_ICON,badge:NOTIF_ICON,tag,vibrate:[200,100,200],requireInteraction:opts.requireInteraction||false,data:{tag}});
+      await window._pfSWReg.showNotification(title,{body,icon:NOTIF_ICON,badge:NOTIF_ICON,tag,vibrate:[200,100,200],requireInteraction:opts.requireInteraction||false,data:{tag,url:opts.url||'/',title:String(title||''),body:String(body||''),kind:opts.kind||'',sender:opts.sender||opts.user||opts.peer||''}});
       return;
     }catch(e){}
   }
@@ -9508,6 +9520,43 @@ function ptRouteInfo(){
     return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx};
   }catch(_){return {page:'',user:'',id:'',action:'',seg:[],idx:0};}
 }
+
+function ptDmPeerFromUnreadRows(rows, cuId){
+  try{
+    const arr=Array.isArray(rows)?rows:[];
+    const candidates=arr.map(x=>{
+      const sender=x&&(x.sender_id||x.sender||x.from_user_id||x.user_id||x.peer_id||x.dm_user_id);
+      const recipient=x&&(x.recipient||x.to_user_id);
+      const peer=String(sender||'')===String(cuId)?recipient:sender;
+      const cnt=Number((x&&(x.cnt||x.count||x.unread||x.unread_count))||1);
+      return peer?{peer:String(peer),cnt}:null;
+    }).filter(Boolean);
+    if(candidates.length===1)return candidates[0].peer;
+    candidates.sort((a,b)=>b.cnt-a.cnt);
+    return candidates[0]&&candidates[0].peer||'';
+  }catch(_){return '';}
+}
+async function ptResolveDmNotificationTarget(cuId, dmUnread){
+  // Used only after a notification opens plain /dm without ?user=.
+  // It is intentionally NOT used for normal manual /dm navigation.
+  const fromUnread=ptDmPeerFromUnreadRows(dmUnread,cuId);
+  if(fromUnread)return fromUnread;
+  try{
+    const latest=await api.get('/api/dm/route-target',{quiet:true,timeoutMs:5000});
+    const peer=latest&&(latest.user||latest.peer||latest.sender||latest.sender_id);
+    if(peer)return String(peer);
+  }catch(_e){}
+  try{
+    const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:5000});
+    if(Array.isArray(latest)&&latest.length){
+      const m=latest.find(x=>x&&(String(x.sender)!==String(cuId)))||latest[0];
+      const peer=String(m.sender)===String(cuId)?m.recipient:m.sender;
+      if(peer)return String(peer);
+    }
+  }catch(_e){}
+  return '';
+}
+
 function ptDmUrl(user){
   const u=user?('?user='+encodeURIComponent(String(user))):'';
   try{
@@ -9644,11 +9693,7 @@ function App(){
         // Some old notification rows / push payloads only contain /dm with no user id.
         // Resolve exactly from the latest unread DM once, then deep-link to that sender.
         try{
-          const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:4500});
-          if(Array.isArray(latest)&&latest.length){
-            const m=latest.find(x=>x&&(String(x.sender)!==String(cu&&cu.id)))||latest[0];
-            dmPeer=s(String(m.sender)===String(cu&&cu.id)?m.recipient:m.sender);
-          }
+          dmPeer=s(await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread));
         }catch(_e){}
       }
       try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_e){}
@@ -9738,9 +9783,8 @@ function App(){
   },[cu]);
   const [dmUnread,setDmUnread]=useState([]);
   useEffect(()=>{
-    // Notification fallback only: older browser-push payloads sometimes navigate to plain /dm
-    // without ?user=. In that one case, resolve latest unread once and then clear the flag.
-    // Normal manual navigation to /dm still shows "Select someone".
+    // Notification fallback only: older push payloads sometimes open plain /dm.
+    // Resolve one exact sender, then clear the flag. Manual /dm still shows Select someone.
     let cancelled=false;
     const run=async()=>{
       try{
@@ -9748,24 +9792,22 @@ function App(){
         if(base!=='dm'||dmTargetUser)return;
         const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
         if(!shouldResolve)return;
-        sessionStorage.removeItem('pt_dm_resolve_next');
-        const latest=await api.get('/api/dm/latest-unread',{quiet:true,timeoutMs:4500});
+        const openedAt=Number(sessionStorage.getItem('pt_dm_route_opened_at')||Date.now());
+        if(Date.now()-openedAt>30000){sessionStorage.removeItem('pt_dm_resolve_next');return;}
+        const peer=await ptResolveDmNotificationTarget(cu&&cu.id, dmUnread);
         if(cancelled)return;
-        if(Array.isArray(latest)&&latest.length){
-          const m=latest.find(x=>x&&(String(x.sender)!==String(cu&&cu.id)))||latest[0];
-          const peer=String(String(m.sender)===String(cu&&cu.id)?m.recipient:m.sender||'');
-          if(peer){
-            sessionStorage.setItem('pt_open_dm_user',peer);
-            sessionStorage.setItem('pt_dm_notification_target',peer);
-            setDmTargetUser(peer);
-            _setView('dm:'+peer);
-          }
+        sessionStorage.removeItem('pt_dm_resolve_next');
+        if(peer){
+          sessionStorage.setItem('pt_open_dm_user',peer);
+          sessionStorage.setItem('pt_dm_notification_target',peer);
+          setDmTargetUser(peer);
+          _setView('dm:'+peer);
         }
       }catch(_e){}
     };
     run();
     return()=>{cancelled=true;};
-  },[view,dmTargetUser,cu&&cu.id,_setView]);
+  },[view,dmTargetUser,cu&&cu.id,dmUnread,_setView]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
@@ -9966,7 +10008,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} setDmTargetUser&&setDmTargetUser(String(n.sender)); _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?ptDmUrl(n.sender||''):(n.url||'/')});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} setDmTargetUser&&setDmTargetUser(String(n.sender)); _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?ptDmUrl(n.sender||''):(n.url||'/'),kind:n.kind||'',sender:n.sender||''});
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
@@ -10001,7 +10043,7 @@ function App(){
                     const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
                     const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
                     window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-                    showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||'')});
+                    showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
                     playSound('notif');
                   }
                 }
@@ -10322,7 +10364,7 @@ function App(){
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
               window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-              showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||'')});
+              showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||''),kind:'dm',sender:m.sender||''});
               playSound('notif');
             }
           });
