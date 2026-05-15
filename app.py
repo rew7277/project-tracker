@@ -5924,7 +5924,7 @@ def get_dm(other_id):
     it on subsequent polls so only new messages are transferred.
     Example: GET /api/dm/u123?since=1715000000000
 
-    On the first load (no since param) the last 1000 messages are returned
+    On the first load (no since param) the last 300 messages are returned
     so older conversation history is available immediately while still bounding response size.
     """
     me=session["user_id"]
@@ -5973,7 +5973,7 @@ def get_dm(other_id):
                    WHERE workspace_id=?
                      AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))
                    ORDER BY ts DESC
-                   LIMIT 1000""",
+                   LIMIT 300""",
                 (ws_id, me, other_id, other_id, me)
             ).fetchall()
             rows = list(reversed(rows))  # restore chronological order
@@ -8073,7 +8073,12 @@ self.addEventListener('notificationclick', event => {
   const body = data.body || '';
   const sender = data.sender || '';
   const kind = data.kind || '';
-  try { if ((kind === 'dm' || (url || '').indexOf('/dm') >= 0) && sender && (url || '').indexOf('user=') < 0) url = '/dm?user=' + encodeURIComponent(sender); } catch(e) {}
+  try {
+    if ((kind === 'dm' || (url || '').indexOf('/dm') >= 0) && (url || '').indexOf('user=') < 0) {
+      if (sender) url = '/dm?user=' + encodeURIComponent(sender);
+      else url = '/dm?notif=dm';
+    }
+  } catch(e) {}
   event.waitUntil((async()=>{
     const allClients = await clients.matchAll({type:'window', includeUncontrolled:true});
     for (const client of allClients) {

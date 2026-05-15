@@ -4150,7 +4150,7 @@ function MessagesView({projects,users,cu,tasks}){
           });
         }
       });
-    },30000); // reduced 2s->15s: channel message poll
+    },60000); // reduced 2s->15s: channel message poll
     return()=>clearInterval(id);
   },[pid]);
 
@@ -4726,7 +4726,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const switchToUser=useCallback((id,source='click')=>{
     const rawId=String(id||'').trim();
     if(!rawId)return;
-    const id2=resolvePeerId(rawId);
+    // Manual sidebar clicks are authoritative: the clicked user object already
+    // came from the rendered users list, so do an exact id match instead of any
+    // fuzzy/session/unread resolution. This prevents a stale notification target
+    // from keeping the UI on the previous conversation.
+    const clickedPeer=(source==='click')?(safe(users).find(u=>u&&String(u.id)===rawId)||null):null;
+    const id2=clickedPeer?String(clickedPeer.id):resolvePeerId(rawId);
     if(!id2){
       console.warn('[DM] blocked invalid peer target', {target:rawId,source});
       if(source!=='click'){
@@ -4754,7 +4759,13 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       try{window.__ptActiveDmUser=String(id);window.__ptActiveDmSource=source;window.__ptActiveDmAt=Date.now();}catch(_){}
     }
     if(isUserClick){
-      try{window.__ptDmManualLock={id:String(id),at:Date.now()};sessionStorage.setItem('pt_dm_manual_lock',JSON.stringify(window.__ptDmManualLock));}catch(_){}
+      try{
+        window.__ptDmManualLock={id:String(id),at:Date.now()};
+        sessionStorage.setItem('pt_dm_manual_lock',JSON.stringify(window.__ptDmManualLock));
+        sessionStorage.removeItem('pt_dm_notification_target');
+        sessionStorage.removeItem('pt_dm_resolve_next');
+        sessionStorage.removeItem('pt_dm_route_opened_at');
+      }catch(_){}
       // Manual click is the source of truth. A stale notification target,
       // saved target, unread fallback, or delayed API response must never
       // move the chat to somebody else after this.
@@ -4818,22 +4829,25 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(onClearInitial)onClearInitial();
   },[initialUserId,switchToUser,onClearInitial,resolvePeerId,users]);
   useEffect(()=>{
-    // Notification/plain-/dm recovery: if the DM page was opened from a notification
-    // without ?user=, select the exact unread sender. This only runs while no chat is
-    // selected, so it cannot steal a manual click.
+    // Notification/plain-/dm recovery only. Normal manual navigation to /dm must
+    // remain on "Select someone" and must not auto-open the latest unread chat.
     if(toId||initialUserId)return;
+    let shouldResolve=false;
+    try{shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1'||!!sessionStorage.getItem('pt_dm_notification_target');}catch(_){}
+    if(!shouldResolve)return;
     const peer=ptFirstValidDmPeer([ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id)],users,cu&&cu.id);
     if(peer){
-      try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);}catch(_){}
+      try{sessionStorage.setItem('pt_open_dm_user',peer);sessionStorage.setItem('pt_dm_notification_target',peer);sessionStorage.removeItem('pt_dm_resolve_next');}catch(_){}
       switchToUser(peer,'notification');
     }
-  },[toId,initialUserId,dmUnread,cu&&cu.id,switchToUser]);
+  },[toId,initialUserId,dmUnread,cu&&cu.id,users,switchToUser]);
   useEffect(()=>{
     // One-shot notification target passed through sessionStorage by SW before React mounted.
     if(toId||initialUserId)return;
     try{
       const shouldResolve=sessionStorage.getItem('pt_dm_resolve_next')==='1';
       const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
+      if(!shouldResolve&&!stored)return;
       const openStored=shouldResolve?(sessionStorage.getItem('pt_open_dm_user')||''):'';
       const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
       const target=ptFirstValidDmPeer([stored,openStored,unreadPeer],users,cu&&cu.id);
@@ -4842,7 +4856,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         if(target) switchToUser(String(target),'notification');
       }
     }catch(_e){}
-  },[toId,initialUserId,switchToUser]);
+  },[toId,initialUserId,dmUnread,users,cu&&cu.id,switchToUser]);
   const loadMsgs=useCallback(async(id,reason='load')=>{
     id=String(id||'');
     if(!id)return;
@@ -4861,7 +4875,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     // Subtract 1 s so messages at the exact same second as the last known message
     // are not excluded by the strict ts > ? comparison on the server.
     const sinceParam=(lastMsg&&lastMsg.ts&&reason!=='load')?'?since='+(new Date(lastMsg.ts).getTime()-1000):'';
-    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true});
+    const d=await api.get('/api/dm/'+id+sinceParam,{quiet:true,timeoutMs:20000});
     if(seq!==reqSeq.current||id!==activeToRef.current){
       console.debug('[DM] stale response ignored', {id,active:activeToRef.current,seq,current:reqSeq.current});
       return;
@@ -4934,7 +4948,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
         // Subtract 1s so same-second messages are not excluded by strict > on the server.
         const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
-        const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
+        const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:20000});
         if(requestedTo!==String(activeToRef.current||''))return;
         try{if(window.__ptDmActivePollUser&&String(window.__ptDmActivePollUser)!==requestedTo)return;}catch(_){}
         if(Array.isArray(d)){
@@ -4965,7 +4979,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },30000);
+    },60000);
     try{window.__ptDmActivePollTimer=id;window.__ptDmActivePollUser=String(toId);}catch(_){}
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
@@ -9682,13 +9696,16 @@ function App(){
       else if((action==='ticket'||ri.page==='tickets')&&id){setInitialTicketId(String(id));_setView('tickets');}
       else if(action==='dm'||ri.page==='dm'){
         const target=user||'';
+        let fromNotif=false;
+        try{const q=new URLSearchParams(window.location.search);fromNotif=q.get('notif')==='dm'||q.get('notification')==='dm'||action==='dm';}catch(_){}
         if(target){
           setDmTargetUser(String(target));
-          try{sessionStorage.setItem('pt_open_dm_user',String(target));sessionStorage.setItem('pt_dm_notification_target',String(target));}catch(_){}
+          try{sessionStorage.setItem('pt_open_dm_user',String(target));sessionStorage.setItem('pt_dm_notification_target',String(target));sessionStorage.removeItem('pt_dm_resolve_next');}catch(_){}
           _setView('dm:'+String(target));
         }else{
-          // Plain /dm can happen when an older push payload misses ?user=. Resolve latest unread once.
-          try{sessionStorage.setItem('pt_dm_resolve_next','1');sessionStorage.setItem('pt_dm_route_opened_at',String(Date.now()));}catch(_){}
+          // Plain /dm from sidebar/direct navigation stays unselected. Only a
+          // notification-marked /dm?notif=dm may resolve latest unread.
+          if(fromNotif){try{sessionStorage.setItem('pt_dm_resolve_next','1');sessionStorage.setItem('pt_dm_route_opened_at',String(Date.now()));}catch(_){}}
           _setView('dm');
         }
       }
@@ -9732,7 +9749,7 @@ function App(){
         const stored=sessionStorage.getItem('pt_dm_notification_target')||'';
         const openStored=shouldResolve?(sessionStorage.getItem('pt_open_dm_user')||''):'';
         const unreadPeer=ptDmPeerFromUnreadRows(dmUnread,cu&&cu.id);
-        if(!shouldResolve&&!stored&&!unreadPeer)return;
+        if(!shouldResolve&&!stored)return;
         const openedAt=Number(sessionStorage.getItem('pt_dm_route_opened_at')||Date.now());
         if(shouldResolve&&Date.now()-openedAt>120000){sessionStorage.removeItem('pt_dm_resolve_next');}
         let peer=ptFirstValidDmPeer([stored,openStored,unreadPeer],data.users,cu&&cu.id);
@@ -9750,7 +9767,7 @@ function App(){
     };
     run();
     return()=>{cancelled=true;};
-  },[view,dmTargetUser,cu&&cu.id,dmUnread,_setView]);
+  },[view,dmTargetUser,cu&&cu.id,dmUnread,data.users,_setView]);
   const [globalSearch,setGlobalSearch]=useState('');
   const [showGlobalSearch,setShowGlobalSearch]=useState(false);
   const [searchSubtasks,setSearchSubtasks]=useState([]);const [wsName,setWsName]=useState('');const [wsDmEnabled,setWsDmEnabled]=useState(true);
