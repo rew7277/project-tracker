@@ -9296,6 +9296,34 @@ function VaultView({cu}){
 
 
 
+
+function ptRouteInfo(){
+  try{
+    const VALID=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault','notifs'];
+    const seg=window.location.pathname.split('/').filter(Boolean);
+    const q=new URLSearchParams(window.location.search||'');
+    let idx=0;
+    if(seg.length>=3 && /^ws/i.test(seg[1])) idx=2;
+    let page=(seg[idx]||'').trim();
+    if(page==='kanban') page='tasks';
+    if(page==='channels') page='messages';
+    if(!VALID.includes(page)) page='';
+    const action=String(q.get('action')||'').toLowerCase();
+    if(!page && VALID.includes(action)) page=action;
+    const user=q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||(page==='dm'?(seg[idx+1]||''):'');
+    const id=q.get('id')||q.get('entity_id')||(page&&seg[idx+1]&&page!=='dm'?seg[idx+1]:'');
+    return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx};
+  }catch(_){return {page:'',user:'',id:'',action:'',seg:[],idx:0};}
+}
+function ptDmUrl(user){
+  const u=user?('?user='+encodeURIComponent(String(user))):'';
+  try{
+    const seg=window.location.pathname.split('/').filter(Boolean);
+    if(seg.length>=2 && /^ws/i.test(seg[1])) return '/'+seg[0]+'/'+seg[1]+'/dm'+u;
+  }catch(_){ }
+  return '/dm'+u;
+}
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -9325,8 +9353,8 @@ function App(){
   },[]);
   const [view,setView]=useState(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
-      if(p&&VALID_VIEWS.includes(p)) return p;
+      const ri=ptRouteInfo();
+      if(ri.page&&VALID_VIEWS.includes(ri.page)) return ri.page;
       const sp=new URLSearchParams(window.location.search).get('page');
       if(sp&&VALID_VIEWS.includes(sp)) return sp;
     }catch(e){}
@@ -9336,8 +9364,8 @@ function App(){
   // This prevents /tasks or /dashboard from staying stuck on the previous Ops view after cache/hydration.
   useEffect(()=>{
     try{
-      const p=window.location.pathname.replace(/^\//,'').split('/')[0].trim();
-      if(p&&VALID_VIEWS.includes(p)&&p!==view) setView(p);
+      const ri=ptRouteInfo();
+      if(ri.page&&VALID_VIEWS.includes(ri.page)&&ri.page!==view) setView(ri.page);
     }catch(e){}
   },[]);
   // Keep browser URL in sync with current view
@@ -9362,9 +9390,10 @@ function App(){
   useEffect(()=>{
     const onPop=()=>{
       try{
-        const p=window.location.pathname.replace(/^\//, '').split('/')[0].trim();
-        if(p&&VALID_VIEWS.includes(p)) setView(p);
+        const ri=ptRouteInfo();
+        if(ri.page&&VALID_VIEWS.includes(ri.page)) setView(ri.page);
         else setView('dashboard');
+        if(ri.page==='dm'&&ri.user)setDmTargetUser(String(ri.user));
       }catch(e){}
     };
     window.addEventListener('popstate',onPop);
@@ -9447,14 +9476,19 @@ function App(){
 
   useEffect(()=>{
     try{
-      const q=new URLSearchParams(window.location.search);
-      const action=String(q.get('action')||'').toLowerCase();
-      const id=q.get('id')||q.get('entity_id')||'';
-      const user=q.get('user')||q.get('sender')||'';
-      if(action==='task'&&id){setInitialTaskId(String(id));_setView('tasks');}
-      else if(action==='project'&&id){setInitialProjectId(String(id));_setView('projects');}
-      else if(action==='ticket'&&id){setInitialTicketId(String(id));_setView('tickets');}
-      else if((action==='dm'||window.location.pathname.replace(/^\//,'').split('/')[0]==='dm')&&user){setDmTargetUser(String(user));_setView('dm');}
+      const ri=ptRouteInfo();
+      const action=ri.action;
+      const id=ri.id||'';
+      const user=ri.user||'';
+      const savedDm=sessionStorage.getItem('pt_open_dm_user')||'';
+      if((action==='task'||ri.page==='tasks')&&id){setInitialTaskId(String(id));_setView('tasks');}
+      else if((action==='project'||ri.page==='projects')&&id){setInitialProjectId(String(id));_setView('projects');}
+      else if((action==='ticket'||ri.page==='tickets')&&id){setInitialTicketId(String(id));_setView('tickets');}
+      else if(action==='dm'||ri.page==='dm'){
+        const target=user||savedDm;
+        if(target)setDmTargetUser(String(target));
+        _setView('dm');
+      }
     }catch(e){}
   },[_setView]);
   useEffect(()=>{
@@ -10246,7 +10280,10 @@ function App(){
       setTeamCtx(myTeams[0].id,true); // forceDev=true bypasses lock
     } else {
       const valid=myTeams.find(t=>t.id===teamCtx);
-      if(!valid)setTeamCtx(myTeams[0].id,true);setView('dashboard');
+      if(!valid){
+        setTeamCtx(myTeams[0].id,true);
+        if(!view || view==='dashboard')setView('dashboard');
+      }
     }
   },[cu,isDevRole,data.teams,teamCtx,setTeamCtx]);
 

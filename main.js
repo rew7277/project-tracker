@@ -9428,6 +9428,34 @@ function deepLinkFromSearch(){
   return {};
 }
 
+
+function ptRouteInfo(){
+  try{
+    const VALID=['dashboard','ops','projects','tasks','messages','dm','tickets','timeline','reminders','settings','team','productivity','ai-docs','timesheet','password-generator','vault','notifs'];
+    const seg=window.location.pathname.split('/').filter(Boolean);
+    const q=new URLSearchParams(window.location.search||'');
+    let idx=0;
+    if(seg.length>=3 && /^ws/i.test(seg[1])) idx=2;
+    let page=(seg[idx]||'').trim();
+    if(page==='kanban') page='tasks';
+    if(page==='channels') page='messages';
+    if(!VALID.includes(page)) page='';
+    const action=String(q.get('action')||'').toLowerCase();
+    if(!page && VALID.includes(action)) page=action;
+    const user=q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||(page==='dm'?(seg[idx+1]||''):'');
+    const id=q.get('id')||q.get('entity_id')||(page&&seg[idx+1]&&page!=='dm'?seg[idx+1]:'');
+    return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx};
+  }catch(_){return {page:'',user:'',id:'',action:'',seg:[],idx:0};}
+}
+function ptDmUrl(user){
+  const u=user?('?user='+encodeURIComponent(String(user))):'';
+  try{
+    const seg=window.location.pathname.split('/').filter(Boolean);
+    if(seg.length>=2 && /^ws/i.test(seg[1])) return '/'+seg[0]+'/'+seg[1]+'/dm'+u;
+  }catch(_){ }
+  return '/dm'+u;
+}
+
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -10324,7 +10352,10 @@ function App(){
       setTeamCtx(myTeams[0].id,true); // forceDev=true bypasses lock
     } else {
       const valid=myTeams.find(t=>t.id===teamCtx);
-      if(!valid)setTeamCtx(myTeams[0].id,true);setView('dashboard');
+      if(!valid){
+        setTeamCtx(myTeams[0].id,true);
+        if(!view || view==='dashboard')setView('dashboard');
+      }
     }
   },[cu,isDevRole,data.teams,teamCtx,setTeamCtx]);
 
