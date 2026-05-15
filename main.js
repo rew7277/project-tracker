@@ -4676,6 +4676,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
   const typingTimerRef=useRef(null);
   const ref=useRef(null);
   const activeToRef=useRef('');
+  const dmSelectionSourceRef=useRef('none');
   const manualDmSelectionRef=useRef(false);
   const lastInitialUserIdRef=useRef('');
   const autoOpenDoneRef=useRef(false);
@@ -4818,6 +4819,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(!id2)return;
     id=id2;
     const isUserClick=source==='click';
+    const isAuthoritativeSelection=(isUserClick||source==='notification'||source==='sw-notification'||source==='url');
     if(!isUserClick&&source!=='notification'&&source!=='sw-notification'){
       try{
         const lock=window.__ptDmManualLock||JSON.parse(sessionStorage.getItem('pt_dm_manual_lock')||'null');
@@ -4826,6 +4828,10 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return;
         }
       }catch(_){}
+    }
+    if(isAuthoritativeSelection){
+      dmSelectionSourceRef.current=source;
+      try{window.__ptActiveDmUser=String(id);window.__ptActiveDmSource=source;window.__ptActiveDmAt=Date.now();}catch(_){}
     }
     if(isUserClick){
       try{window.__ptDmManualLock={id:String(id),at:Date.now()};sessionStorage.setItem('pt_dm_manual_lock',JSON.stringify(window.__ptDmManualLock));}catch(_){}
@@ -4880,6 +4886,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }catch(_){}
     lastInitialUserIdRef.current=target;
     manualDmSelectionRef.current=false;
+    try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;}catch(_){}
     autoOpenDoneRef.current=true;
     // Notification URLs carry ids as strings; DB/user ids may be numeric.
     // Open the exact sender thread directly and let fetch/cache load it.
@@ -4948,6 +4955,15 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     }
     else setLoadingThread(toId);
     loadMsgs(toId,'selected');
+    // SINGLE ACTIVE DM THREAD OWNER:
+    // Only the currently selected/notification-targeted chat is allowed to poll /api/dm/:id.
+    // Older DM components/effects from previous renders were leaving timers alive, so several
+    // /api/dm/<user> calls raced and the slowest response could repaint the wrong thread.
+    try{
+      if(window.__ptDmActivePollTimer){clearInterval(window.__ptDmActivePollTimer);}
+      window.__ptDmActivePollTimer=null;
+      window.__ptDmActivePollUser=String(toId);
+    }catch(_){}
     let dmPollBusy=false;
     const id=setInterval(async()=>{
       if(dmPollBusy)return;
@@ -4960,7 +4976,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
         const lastMsgAtStart=cachedAtStart.length?cachedAtStart[cachedAtStart.length-1]:null;
         const sinceParam=lastMsgAtStart&&lastMsgAtStart.ts?'?since='+(new Date(lastMsgAtStart.ts).getTime()-1000):'';
         const d=await api.get('/api/dm/'+requestedTo+sinceParam,{quiet:true,timeoutMs:6000});
-        if(requestedTo!==activeToRef.current)return;
+        if(requestedTo!==String(activeToRef.current||''))return;
+        try{if(window.__ptDmActivePollUser&&String(window.__ptDmActivePollUser)!==requestedTo)return;}catch(_){}
         if(Array.isArray(d)){
           if(sinceParam&&d.length===0)return;
           // Use freshCached (post-await) so confirmed messages written during network roundtrip are included
@@ -4985,7 +5002,8 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           onDmRead(requestedTo);
         }
       }finally{dmPollBusy=false;}
-    },3000);
+    },5000);
+    try{window.__ptDmActivePollTimer=id;window.__ptDmActivePollUser=String(toId);}catch(_){}
     const onDmRefresh=(ev)=>{
       const msg=ev&&ev.detail;
       const data=msg&&msg.data;
@@ -5068,10 +5086,16 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
           return;
         }
       }
-      loadMsgs(toId,'sse');
+      // Do not refetch the active thread for unrelated DM/sidebar events. These events
+      // are allowed to update badges/previews only; they must not create extra /api/dm/:id
+      // requests that race with the active conversation.
     };
     window.addEventListener('dm_refresh',onDmRefresh);
-    return()=>{clearInterval(id);window.removeEventListener('dm_refresh',onDmRefresh);};
+    return()=>{
+      clearInterval(id);
+      try{if(window.__ptDmActivePollTimer===id){window.__ptDmActivePollTimer=null;window.__ptDmActivePollUser='';}}catch(_){}
+      window.removeEventListener('dm_refresh',onDmRefresh);
+    };
   },[toId,loadMsgs,onDmRead,mergePendingReactionState,incomingCall,cu.id,users,stopRingtone,setThreadMessages,normalizeDmList]);
   // Prefetch DM threads as soon as the DM screen opens, so clicking a member
   // Do not prefetch every DM thread. It caused DB pressure and, worse, slow
@@ -9500,8 +9524,13 @@ function App(){
   const [dmTargetUser,setDmTargetUser]=useState(()=>{
     try{
       const dl=deepLinkFromSearch();
+      // Only explicit URL/deep-link selection may choose a DM on first render.
+      // Never restore sessionStorage here; it was re-opening stale chats and
+      // overriding the user-selected conversation after notifications/polls.
       if(dl.dmUser)return String(dl.dmUser);
-      return sessionStorage.getItem('pt_open_dm_user')||null;
+      const ri=ptRouteInfo();
+      if(ri.page==='dm'&&ri.user)return String(ri.user);
+      return null;
     }catch(_){return null;}
   });
   useEffect(()=>{
@@ -9592,8 +9621,8 @@ function App(){
     if(!dmPeer&&(looksDm||looksCall)) dmPeer=rawEntityId||s(userFromText&&userFromText.id);
     if(looksDm||looksCall){
       if(dmPeer){
+        try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(dmPeer));}catch(_e){}
         setDmTargetUser(String(dmPeer));
-        try{sessionStorage.setItem('pt_open_dm_user',String(dmPeer));}catch(_e){}
       }
       _setView(dmPeer?('dm:'+String(dmPeer)):'dm');
       return;
@@ -9877,7 +9906,7 @@ function App(){
             if(msg.type==='web_notification'&&msg.data){
               const n=msg.data||{};
               if(String(n.recipient||'')===String(cu.id)&&String(n.sender||'')!==String(cu.id)){
-                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{setDmTargetUser&&setDmTargetUser(n.sender);sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now())});
+                showBrowserNotif(n.title||'ProjectTracker', n.body||'', ()=>{window.focus(); if(n.kind==='dm'){try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(n.sender));}catch(_){} setDmTargetUser&&setDmTargetUser(String(n.sender)); _setView&&_setView('dm:'+String(n.sender));}}, {tag:n.tag||('pt-'+Date.now()),url:n.kind==='dm'?ptDmUrl(n.sender||''):(n.url||'/')});
               }
             }
             if(['dm','dm_created','dm_reaction','dm_updated','dm_deleted','dm_pinned','dm_seen','dm_typing','call_status'].includes(msg.type)){
@@ -9912,7 +9941,7 @@ function App(){
                     const sname=m.sender_name||((data.users||[]).find(u=>u.id===m.sender)||{}).name||'Someone';
                     const body=raw.replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
                     window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-                    showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);try{sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id});
+                    showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||'')});
                     playSound('notif');
                   }
                 }
@@ -10233,7 +10262,7 @@ function App(){
             const body=String(m.content||'').replace(/CALL_[A-Z_]+:[^\n]+/g,'').trim().slice(0,90)||'Sent you a message';
             if(!String(m.content||'').includes('CALL_INVITE:')){
               window._pfToast&&window._pfToast('dm','💬 New message from '+sname,body);
-              showBrowserNotif('💬 '+sname,body,()=>{setDmTargetUser(m.sender);try{sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id});
+              showBrowserNotif('💬 '+sname,body,()=>{try{sessionStorage.removeItem('pt_dm_manual_lock');window.__ptDmManualLock=null;sessionStorage.setItem('pt_open_dm_user',String(m.sender));}catch(_){} setDmTargetUser(String(m.sender)); _setView('dm:'+String(m.sender));window.focus();},{tag:'dm-'+m.id,url:ptDmUrl(m.sender||'')});
               playSound('notif');
             }
           });
@@ -10476,7 +10505,7 @@ function App(){
             if(v==='vault'||v==='password-generator'){_setView(v);}
             return;
           }
-          if(typeof v==='string'&&v.startsWith('dm:')){const uid=v.slice(3);setDmTargetUser(uid);_setView('dm');}
+          if(typeof v==='string'&&v.startsWith('dm:')){const uid=v.slice(3);setDmTargetUser(uid);_setView('dm:'+uid);}
           else _setView(v);
         }} onLogout=${logout} unread=${unread} dmUnread=${dmUnread} col=${col} setCol=${v=>{setCol(v);try{localStorage.setItem('pf_col',v?'1':'0');}catch{}}} wsName=${cu&&cu._offline?'Offline Mode':wsName}
         dark=${dark} setDark=${setDark} wsDmEnabled=${wsDmEnabled} onlineUsers=${onlineUsers}
