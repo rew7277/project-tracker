@@ -9524,7 +9524,19 @@ def admin_api_workspace_detail(ws_id):
             ).fetchall()
             usage = _workspace_admin_usage(db, ws_id)
             limits = _workspace_limits_from_db(db, ws_id)
-        return jsonify({"ok": True, "workspace": dict(ws), "usage": usage, "limits": limits, "members": [dict(m) for m in members], "tickets": [dict(t) for t in tickets]})
+        feature_cfg = _workspace_feature_config(db, ws_id)
+        return jsonify({
+            "ok": True,
+            "workspace": dict(ws),
+            "usage": usage,
+            "limits": limits,
+            "features": feature_cfg["features"],
+            "feature_catalog": feature_cfg["catalog"],
+            "addons": feature_cfg["addons"],
+            "plan_feature_defaults": PLAN_FEATURE_MATRIX,
+            "members": [dict(m) for m in members],
+            "tickets": [dict(t) for t in tickets],
+        })
     except Exception as e:
         log.exception("admin workspace detail failed")
         return jsonify({"error": str(e)}), 500
@@ -9645,7 +9657,9 @@ def admin_api_set_plan():
             db.execute("UPDATE workspaces SET plan=?, storage_limit_mb=?, custom_limits_json=? WHERE id=?", (plan, storage_limit_mb, json.dumps(clean_limits), ws_id))
             db.commit()
         _audit("set_plan", ws_id, f"Plan changed to {plan}; storage override {storage_limit_mb or 'default'} MB; custom limits {clean_limits}")
-        return jsonify({"ok": True, "limits": _limits_for_plan(plan, json.dumps(clean_limits), storage_limit_mb)})
+        with get_db() as db:
+            feature_cfg = _workspace_feature_config(db, ws_id)
+        return jsonify({"ok": True, "limits": _limits_for_plan(plan, json.dumps(clean_limits), storage_limit_mb), "features": feature_cfg["features"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -9740,6 +9754,37 @@ def admin_api_toggle_2fa():
             db.commit()
         _audit("toggle_2fa", ws_id, f"2FA requirement {'enabled' if enabled else 'disabled'}")
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/workspace/features", methods=["POST"])
+def admin_api_workspace_features():
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    ws_id = data.get("workspace_id")
+    features = data.get("features") or {}
+    if not ws_id or not isinstance(features, dict):
+        return jsonify({"error": "workspace_id and features are required"}), 400
+    try:
+        with get_db() as db:
+            ws = db.execute("SELECT id FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+            if not ws:
+                return jsonify({"error": "Workspace not found"}), 404
+            for key, enabled in features.items():
+                if key not in WORKSPACE_FEATURE_CATALOG:
+                    continue
+                existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (ws_id, key)).fetchone()
+                if existing:
+                    db.execute("UPDATE feature_flags SET enabled=?, updated=? WHERE id=?", (1 if enabled else 0, ts(), existing["id"]))
+                else:
+                    db.execute("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
+                               (secrets.token_hex(6), ws_id, key, 1 if enabled else 0, "{}", ts()))
+            db.commit()
+        _audit("set_workspace_features", ws_id, f"Feature overrides changed: {features}")
+        with get_db() as db:
+            cfg = _workspace_feature_config(db, ws_id)
+        return jsonify({"ok": True, "features": cfg["features"], "catalog": cfg["catalog"], "addons": cfg["addons"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -10396,6 +10441,89 @@ WORKSPACE_PLAN_USAGE_LIMITS = {
     "business":   {"workspaces": 3, "members": 250, "projects": 750, "tasks": 5000, "invoices": 1500, "storage_mb": 100 * 1024},
     "enterprise": {"workspaces": 9999, "members": 9999, "projects": 9999, "tasks": 99999,"invoices": 9999, "storage_mb": 500 * 1024},
 }
+
+WORKSPACE_FEATURE_CATALOG = {
+    "core_projects": {"label": "Projects, tasks & Kanban", "category": "Core workspace", "addon_price": 0, "description": "Core planning, tracking and Kanban boards."},
+    "channels_dm": {"label": "Channels & direct messages", "category": "Collaboration", "addon_price": 0, "description": "Workspace chat, project channels and direct messages."},
+    "reminders": {"label": "Reminders & notifications", "category": "Productivity", "addon_price": 0, "description": "Personal reminders, assignment alerts and follow-ups."},
+    "tickets": {"label": "Tickets / Ops center", "category": "Support", "addon_price": 0, "description": "Internal issue tracking and workspace support tickets."},
+    "time_tracking": {"label": "Timesheet & time tracking", "category": "Productivity", "addon_price": 299, "description": "Timesheets, time logs and delivery reporting."},
+    "billing_invoices": {"label": "Billing & invoices", "category": "Finance", "addon_price": 299, "description": "Company billing profile, invoice creation and invoice history."},
+    "ai_docs": {"label": "AI Docs", "category": "AI", "addon_price": 499, "description": "AI-assisted documents, notes and summaries."},
+    "vault": {"label": "Vault & password tools", "category": "Security", "addon_price": 299, "description": "Team vault, password generator and secure records."},
+    "advanced_analytics": {"label": "Advanced analytics", "category": "Analytics", "addon_price": 799, "description": "Portfolio insights, workload views and productivity reporting."},
+    "integrations": {"label": "GitHub / Slack integrations", "category": "Integrations", "addon_price": 799, "description": "Connect external developer and collaboration tools."},
+    "incident_approvals": {"label": "Incidents & approvals", "category": "Governance", "addon_price": 999, "description": "Incident tracking, approvals and operational governance."},
+    "public_api": {"label": "Public API access", "category": "Integrations", "addon_price": 999, "description": "API access for customer integrations and automation."},
+    "sso_security": {"label": "SSO, enforced 2FA & audit controls", "category": "Security", "addon_price": 1499, "description": "Enterprise-grade security controls for managed customers."},
+    "custom_branding": {"label": "Custom branding", "category": "Enterprise", "addon_price": 999, "description": "Custom branding, customer workspace identity and hosted options."},
+}
+
+PLAN_FEATURE_MATRIX = {
+    "starter": {
+        "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
+        "time_tracking": False, "billing_invoices": False, "ai_docs": False, "vault": False,
+        "advanced_analytics": False, "integrations": False, "incident_approvals": False,
+        "public_api": False, "sso_security": False, "custom_branding": False,
+    },
+    "team": {
+        "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
+        "time_tracking": True, "billing_invoices": True, "ai_docs": True, "vault": True,
+        "advanced_analytics": False, "integrations": False, "incident_approvals": False,
+        "public_api": False, "sso_security": False, "custom_branding": False,
+    },
+    "business": {
+        "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
+        "time_tracking": True, "billing_invoices": True, "ai_docs": True, "vault": True,
+        "advanced_analytics": True, "integrations": True, "incident_approvals": True,
+        "public_api": True, "sso_security": False, "custom_branding": False,
+    },
+    "enterprise": {k: True for k in WORKSPACE_FEATURE_CATALOG.keys()},
+}
+
+ADD_ON_CATALOG = {
+    "extra_storage_50gb": {"label": "Extra storage pack", "price_inr": 299, "unit": "50 GB / month"},
+    "ai_docs": {"label": "AI Docs add-on", "price_inr": 499, "unit": "workspace / month"},
+    "billing_invoices": {"label": "Billing & invoices add-on", "price_inr": 299, "unit": "workspace / month"},
+    "advanced_analytics": {"label": "Advanced analytics add-on", "price_inr": 799, "unit": "workspace / month"},
+    "integrations": {"label": "GitHub / Slack integrations", "price_inr": 799, "unit": "workspace / month"},
+    "sso_security": {"label": "SSO & advanced security", "price_inr": 1499, "unit": "workspace / month"},
+}
+
+def _feature_defaults_for_plan(plan):
+    plan_key = str(plan or "starter").lower()
+    return dict(PLAN_FEATURE_MATRIX.get(plan_key, PLAN_FEATURE_MATRIX["starter"]))
+
+def _workspace_feature_config(db, workspace_id):
+    """Return plan-based workspace features plus owner-panel overrides.
+    Overrides are intentionally workspace-specific so plan upgrades/downgrades
+    instantly reflect while paid add-ons can still be enabled separately."""
+    row = db.execute("SELECT COALESCE(plan,'starter') AS plan FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+    plan = (row["plan"] if row else "starter") or "starter"
+    features = _feature_defaults_for_plan(plan)
+    try:
+        rows = db.execute("SELECT flag_name, enabled FROM feature_flags WHERE workspace_id=?", (workspace_id,)).fetchall()
+        for r in rows:
+            key = r["flag_name"]
+            if key in WORKSPACE_FEATURE_CATALOG:
+                features[key] = bool(r["enabled"])
+            # Backward-compatible aliases from older code
+            if key == "billing":
+                features["billing_invoices"] = bool(r["enabled"])
+            if key in ("github_integration", "slack_integration"):
+                features["integrations"] = bool(r["enabled"])
+            if key == "ai_assistant":
+                features["ai_docs"] = bool(r["enabled"])
+            if key == "approval_workflows":
+                features["incident_approvals"] = bool(r["enabled"])
+    except Exception:
+        pass
+    return {
+        "plan": str(plan).lower(),
+        "features": features,
+        "catalog": WORKSPACE_FEATURE_CATALOG,
+        "addons": ADD_ON_CATALOG,
+    }
 
 def _limits_for_plan(plan, custom_limits_json='', storage_limit_mb=0):
     """Return commercial limits for a workspace. Admin panel can increase
@@ -11686,43 +11814,61 @@ def gdpr_delete():
     return jsonify({"ok": True, "message": "Your data has been anonymized."})
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FEATURE FLAGS
+# FEATURE FLAGS / PLAN ENTITLEMENTS
 # ═══════════════════════════════════════════════════════════════════════════════
-DEFAULT_FLAGS = {
-    "github_integration": True, "slack_integration": True,
-    "incident_management": True, "approval_workflows": True,
-    "recurring_tasks": True, "smart_search": True, "time_tracking": True,
-    "public_api": True, "ai_assistant": True, "billing": False, "public_roadmap": False,
-}
+# These capabilities are plan-based by default and can be overridden from the
+# company Management Panel per workspace when a customer pays for an add-on.
+DEFAULT_FLAGS = {k: False for k in WORKSPACE_FEATURE_CATALOG.keys()}
 
 @app.route("/api/feature-flags", methods=["GET"])
 @login_required
 def get_feature_flags():
-    flags = dict(DEFAULT_FLAGS)
     try:
         with get_db() as db:
-            rows = db.execute("SELECT flag_name,enabled FROM feature_flags WHERE workspace_id=?", (wid(),)).fetchall()
-            for r in rows:
-                flags[r["flag_name"]] = bool(r["enabled"])
-    except Exception: pass
-    return jsonify(flags)
+            cfg = _workspace_feature_config(db, wid())
+        flags = dict(cfg["features"])
+        # Backward-compatible aliases used by older frontend code.
+        flags.update({
+            "billing": flags.get("billing_invoices", False),
+            "github_integration": flags.get("integrations", False),
+            "slack_integration": flags.get("integrations", False),
+            "ai_assistant": flags.get("ai_docs", False),
+            "incident_management": flags.get("incident_approvals", False),
+            "approval_workflows": flags.get("incident_approvals", False),
+            "smart_search": True,
+            "public_roadmap": flags.get("advanced_analytics", False),
+        })
+        return jsonify({"ok": True, "plan": cfg["plan"], "features": flags, "catalog": cfg["catalog"], "addons": cfg["addons"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "features": _feature_defaults_for_plan("starter")}), 200
 
 @app.route("/api/feature-flags", methods=["PUT"])
 @login_required
 def update_feature_flags():
-    if get_user_role() not in ("Admin", "Owner"): return jsonify({"error": "Admin only"}), 403
+    if get_user_role() not in ("Admin", "Owner", "Manager"):
+        return jsonify({"error": "Admin only"}), 403
     d = request.json or {}
+    allowed = set(WORKSPACE_FEATURE_CATALOG.keys()) | {"billing", "github_integration", "slack_integration", "ai_assistant", "incident_management", "approval_workflows"}
     with get_db() as db:
         for flag_name, enabled in d.items():
-            if flag_name not in DEFAULT_FLAGS: continue
-            existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (wid(), flag_name)).fetchone()
+            if flag_name not in allowed:
+                continue
+            canonical = {
+                "billing": "billing_invoices",
+                "github_integration": "integrations",
+                "slack_integration": "integrations",
+                "ai_assistant": "ai_docs",
+                "incident_management": "incident_approvals",
+                "approval_workflows": "incident_approvals",
+            }.get(flag_name, flag_name)
+            existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (wid(), canonical)).fetchone()
             if existing:
                 db.execute("UPDATE feature_flags SET enabled=?,updated=? WHERE id=?", (1 if enabled else 0, ts(), existing["id"]))
             else:
-                _raw_pg("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
-                        (secrets.token_hex(6), wid(), flag_name, 1 if enabled else 0, "{}", ts()))
+                db.execute("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
+                           (secrets.token_hex(6), wid(), canonical, 1 if enabled else 0, "{}", ts()))
+        db.commit()
     return jsonify({"ok": True})
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # RELEASE CALENDAR
 # ═══════════════════════════════════════════════════════════════════════════════
