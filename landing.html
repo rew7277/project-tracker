@@ -266,7 +266,7 @@ h2.st{font-family:var(--font);font-size:clamp(32px,5vw,58px);font-weight:800;let
 .tc-role{font-size:12px;color:var(--tx3);font-family:var(--body)}
 
 /* ── Pricing ── */
-.plan-g{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;align-items:start}
+.plan-g{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;align-items:start}
 .plan{background:var(--bg3);border:1px solid var(--b2);border-radius:22px;padding:36px 32px;position:relative;transition:transform .3s,box-shadow .3s}
 .plan:hover{transform:translateY(-6px);box-shadow:0 28px 70px rgba(0,0,0,.5)}
 .plan.best{background:linear-gradient(180deg,rgba(90,140,255,.07) 0%,var(--bg3) 50%);border-color:rgba(90,140,255,.45)}
@@ -389,6 +389,7 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
 }
 
 /* ── Responsive ── */
+@media(max-width:1180px){.plan-g{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:980px){
   .feat-g{grid-template-columns:repeat(2,1fr)}
   .plan-g{grid-template-columns:1fr}
@@ -1452,12 +1453,12 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     </div>
     <div class="compare-table" style="margin-top:32px;display:block;overflow:hidden">
       <table style="width:100%;border-collapse:collapse">
-        <thead><tr><th>Plan</th><th>Members</th><th>Projects</th><th>Tasks</th><th>Invoices</th></tr></thead>
+        <thead><tr><th>Plan</th><th>Best for</th><th>Members</th><th>Projects</th><th>Tasks</th><th>Invoices</th><th>Support</th></tr></thead>
         <tbody>
-          <tr><td class="feat-name">Starter</td><td>38</td><td>75</td><td>375</td><td>150</td></tr>
-          <tr><td class="feat-name">Team</td><td>100</td><td>250</td><td>1,500</td><td>500</td></tr>
-          <tr><td class="feat-name">Business</td><td>250</td><td>750</td><td>5,000</td><td>1,500</td></tr>
-          <tr><td class="feat-name">Enterprise</td><td>Custom</td><td>Custom</td><td>Custom</td><td>Custom</td></tr>
+          <tr><td class="feat-name">Starter</td><td>Small teams getting started</td><td>25</td><td>50</td><td>350</td><td>150</td><td>Email</td></tr>
+          <tr><td class="feat-name">Team</td><td>Growing delivery teams</td><td>100</td><td>250</td><td>1,500</td><td>500</td><td>Priority</td></tr>
+          <tr><td class="feat-name">Business</td><td>Departments and client teams</td><td>250</td><td>750</td><td>5,000</td><td>1,500</td><td>Priority SLA</td></tr>
+          <tr><td class="feat-name">Enterprise</td><td>Large/private deployments</td><td>Custom</td><td>Custom</td><td>Custom</td><td>Custom</td><td>Dedicated</td></tr>
         </tbody>
       </table>
     </div>
@@ -1473,7 +1474,7 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     <div class="plan-g">
       <div class="plan reveal stagger-1">
         <div class="plan-name">Starter</div>
-        <div class="plan-tagline">For small teams, side projects and solo founders who want pro-grade tooling at zero cost.</div>
+        <div class="plan-tagline">For small teams starting with structured project tracking, support tickets and basic workspace operations.</div>
         <div class="plan-price"><sup>₹</sup>0<small>/mo</small></div>
         <div class="plan-period">Free forever · No credit card required</div>
         <a href="/?action=register" class="plan-cta out">Create free workspace →</a>
@@ -1481,64 +1482,74 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
         <div class="plan-fhead">What's included</div>
         <ul class="plan-feats">
           <li><div class="ck">✓</div>1 workspace</li>
-          <li><div class="ck">✓</div>Up to 38 team members</li>
-          <li><div class="ck">✓</div>75 projects, 375 tasks and 150 invoices</li>
-          <li><div class="ck">✓</div>Kanban board with sprint planning</li>
-          <li><div class="ck">✓</div>Gantt timeline tracker</li>
-          <li><div class="ck">✓</div>Support ticket system</li>
-          <li><div class="ck">✓</div>Direct messages &amp; project channels</li>
-          <li><div class="ck">✓</div>Desktop push notifications</li>
-          <li><div class="ck">✓</div>Claude AI assistant (bring your key)</li>
-          <li><div class="ck">✓</div>File attachments up to 150 MB each</li>
+          <li><div class="ck">✓</div><b>25 members</b>, 50 projects</li>
+          <li><div class="ck">✓</div>350 tasks and 150 invoices</li>
+          <li><div class="ck">✓</div>Kanban, tickets, channels and DMs</li>
+          <li><div class="ck">✓</div>Timeline and reminders</li>
+          <li><div class="ck">✓</div>Basic workspace analytics</li>
           <li><div class="ck">✓</div>Google Authenticator 2FA</li>
+          <li><div class="ck">✓</div>Community / email support</li>
         </ul>
       </div>
       <div class="plan best reveal stagger-2">
         <div class="plan-badge-row"><div class="plan-badge">Most Popular</div></div>
         <div class="plan-name">Team</div>
-        <div class="plan-tagline">For growing teams who need unlimited members, deep analytics and managed email.</div>
+        <div class="plan-tagline">For growing teams that need stronger collaboration, reporting, team management and monthly billing.</div>
         <div class="plan-price"><sup>₹</sup>499<small>/mo</small></div>
         <div class="plan-period">Per workspace · Billed monthly</div>
         <a href="/?action=register" class="plan-cta fill">Start 14-day free trial →</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">Everything in Starter, plus</div>
         <ul class="plan-feats">
-          <li><div class="ck">✓</div><b>Up to 100 team members</b></li>
-          <li><div class="ck">✓</div>250 projects, 1,500 tasks and 500 invoices</li>
-          <li><div class="ck">✓</div>Multiple workspaces</li>
+          <li><div class="ck">✓</div><b>100 members</b>, 250 projects</li>
+          <li><div class="ck">✓</div>1,500 tasks and 500 invoices</li>
           <li><div class="ck">✓</div>Teams &amp; sub-team management</li>
-          <li><div class="ck">✓</div>Role-based access control (6 roles)</li>
+          <li><div class="ck">✓</div>Role-based permissions</li>
           <li><div class="ck">✓</div>Developer productivity analytics</li>
-          <li><div class="ck">✓</div>Velocity &amp; sprint burn-down charts</li>
-          <li><div class="ck">✓</div>Custom SMTP &amp; Resend email</li>
-          <li><div class="ck">✓</div>Task labels, story points &amp; sprints</li>
-          <li><div class="ck">✓</div>EOD report automation via AI</li>
-          <li><div class="ck">✓</div>Priority email support</li>
+          <li><div class="ck">✓</div>Sprint and velocity reporting</li>
+          <li><div class="ck">✓</div>Custom SMTP / Resend email</li>
+          <li><div class="ck">✓</div>Priority support</li>
         </ul>
       </div>
       <div class="plan reveal stagger-3">
-        <div class="plan-name">Enterprise</div>
-        <div class="plan-tagline">Custom solutions for large organisations, regulated industries or teams needing on-premise deployment.</div>
-        <div class="plan-custom">Custom</div>
-        <div class="plan-period">Volume pricing · Annual billing</div>
-        <a href="mailto:sales@projecttracker.in" class="plan-cta out">Contact Sales →</a>
+        <div class="plan-name">Business</div>
+        <div class="plan-tagline">For departments and client-service teams running multiple projects with heavier usage and stronger governance.</div>
+        <div class="plan-price"><sup>₹</sup>1,499<small>/mo</small></div>
+        <div class="plan-period">Per workspace · Best for scale-up teams</div>
+        <a href="/?action=register&plan=business" class="plan-cta out">Upgrade to Business →</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">Everything in Team, plus</div>
         <ul class="plan-feats">
-          <li><div class="ck">✓</div>Dedicated hosted instance</li>
-          <li><div class="ck">✓</div>On-premise / self-hosted deployment</li>
-          <li><div class="ck">✓</div>Custom integrations &amp; webhooks</li>
-          <li><div class="ck">✓</div>99.9% SLA uptime guarantee</li>
-          <li><div class="ck">✓</div>SSO / SAML authentication</li>
-          <li><div class="ck">✓</div>Advanced audit logs</li>
-          <li><div class="ck">✓</div>Dedicated account manager</li>
-          <li><div class="ck">✓</div>Custom onboarding &amp; training</li>
-          <li><div class="ck">✓</div>White-label branding option</li>
-          <li><div class="ck">✓</div>24/7 priority support</li>
+          <li><div class="ck">✓</div><b>250 members</b>, 750 projects</li>
+          <li><div class="ck">✓</div>5,000 tasks and 1,500 invoices</li>
+          <li><div class="ck">✓</div>Advanced portfolio dashboards</li>
+          <li><div class="ck">✓</div>Billing controls and invoice history</li>
+          <li><div class="ck">✓</div>Audit-ready activity tracking</li>
+          <li><div class="ck">✓</div>Higher attachment and usage capacity</li>
+          <li><div class="ck">✓</div>Business onboarding checklist</li>
+          <li><div class="ck">✓</div>Priority SLA support</li>
         </ul>
       </div>
-    </div>
-    <div class="plan-note reveal">
+      <div class="plan reveal stagger-4">
+        <div class="plan-name">Enterprise</div>
+        <div class="plan-tagline">For large organisations, regulated industries, private deployment and custom operational requirements.</div>
+        <div class="plan-custom">Custom</div>
+        <div class="plan-period">Annual contract · Volume pricing</div>
+        <a href="mailto:sales@projecttracker.in" class="plan-cta out">Contact Sales →</a>
+        <div class="plan-div"></div>
+        <div class="plan-fhead">Everything in Business, plus</div>
+        <ul class="plan-feats">
+          <li><div class="ck">✓</div>Custom members, projects, tasks and invoices</li>
+          <li><div class="ck">✓</div>Dedicated hosted instance</li>
+          <li><div class="ck">✓</div>On-premise / self-hosted deployment</li>
+          <li><div class="ck">✓</div>SSO / SAML authentication</li>
+          <li><div class="ck">✓</div>Advanced audit logs and controls</li>
+          <li><div class="ck">✓</div>Custom integrations and webhooks</li>
+          <li><div class="ck">✓</div>99.9% SLA uptime target</li>
+          <li><div class="ck">✓</div>Dedicated account manager</li>
+        </ul>
+      </div>
+    </div>    <div class="plan-note reveal">
       💡 <b>Pricing note:</b> The Claude AI assistant requires your own Anthropic API key — paste it once in Workspace Settings. You pay Anthropic only for what you use. All other platform features work fully without it.
     </div>
   </div>
@@ -1562,10 +1573,10 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     <div class="faq">
       <div class="faq-i"><button class="faq-q" >Do I need a credit card to start?<span class="arr">▾</span></button><div class="faq-a">No. The Starter plan is completely free forever. Create a workspace, invite your team and use all 12 modules with zero payment required. You only need billing details when upgrading to Team or Enterprise.</div></div>
       <div class="faq-i"><button class="faq-q" >How does the AI assistant work?<span class="arr">▾</span></button><div class="faq-a">Project Tracker's AI assistant is powered by Anthropic Claude. You provide your own API key in Workspace Settings → AI Key. Once set, the assistant can create tasks, update statuses, generate EOD reports and answer questions about your projects in natural language.</div></div>
-      <div class="faq-i"><button class="faq-q" >How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan supports up to 5 team members. If your team is larger, upgrade to the Team plan for unlimited members. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
+      <div class="faq-i"><button class="faq-q" >How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan supports up to 25 team members. If your team is larger, upgrade to Team for 100 members or Business for 250 members. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
       <div class="faq-i"><button class="faq-q" >Is my data secure?<span class="arr">▾</span></button><div class="faq-a">Yes. Project Tracker uses bcrypt password hashing, session-based auth, Google Authenticator TOTP 2FA, HTTPS-only sessions and tenant-isolated database queries — no workspace can access another's data. Enterprise customers can opt for on-premise deployment for complete data sovereignty.</div></div>
       <div class="faq-i"><button class="faq-q" >What does "bring your own AI key" mean?<span class="arr">▾</span></button><div class="faq-a">Get an API key from Anthropic (anthropic.com) and paste it once in Project Tracker's Workspace Settings. Project Tracker calls the Claude API directly from your server — you pay Anthropic only for actual usage, and we never store your key outside your workspace settings.</div></div>
-      <div class="faq-i"><button class="faq-q" >Can I upgrade or downgrade anytime?<span class="arr">▾</span></button><div class="faq-a">Yes. Upgrade from Starter to Team at any time and your data is preserved exactly as-is. Downgrades take effect at the end of your billing period. Contact <a href="mailto:sales@projecttracker.in" style="color:var(--blue)">sales@projecttracker.in</a> for Enterprise custom billing arrangements.</div></div>
+      <div class="faq-i"><button class="faq-q" >Can I upgrade or downgrade anytime?<span class="arr">▾</span></button><div class="faq-a">Yes. Upgrade from Starter to Team, Business, or Enterprise at any time and your data is preserved exactly as-is. Downgrades take effect at the end of your billing period. Contact <a href="mailto:sales@projecttracker.in" style="color:var(--blue)">sales@projecttracker.in</a> for Enterprise custom billing arrangements.</div></div>
       <div class="faq-i"><button class="faq-q" >Does Project Tracker work for non-technical teams?<span class="arr">▾</span></button><div class="faq-a">Absolutely. While Project Tracker has deep features for dev teams (story points, sprint planning, velocity tracking), the core Kanban, ticket system, AI assistant and messaging work perfectly for any team — product, marketing, operations, or support.</div></div>
       <div class="faq-i"><button class="faq-q" >What happens to my data if I cancel?<span class="arr">▾</span></button><div class="faq-a">Your data remains accessible for 30 days after cancellation. You can export your projects, tasks and attachments at any time via Settings → Export. We never delete data without notice.</div></div>
       <div class="faq-i"><button class="faq-q" >Does Project Tracker have a public API?<span class="arr">▾</span></button><div class="faq-a">Yes. Every workspace can generate scoped API keys from Settings → API Keys. Use the REST API to read and create tasks, projects, and tickets programmatically. Perfect for Zapier, n8n, or your own integrations.</div></div>

@@ -7433,13 +7433,13 @@ function WorkspacePlanUsageCard({cu}){
     if(!allowed)return;
     setLoading(true);setErr('');
     try{
-      const cached=(()=>{try{return JSON.parse(localStorage.getItem('pt_plan_usage_cache')||'null');}catch(_){return null;}})();
+      const cached=(()=>{try{return JSON.parse(localStorage.getItem('pt_plan_usage_cache_'+String((cu&&cu.workspace_id)||(cu&&cu.workspace)||'default'))||'null');}catch(_){return null;}})();
       if(cached&&!data)setData(cached);
       const r=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:15000});
-      if(r&&r.error){setErr(r.error);}else{setData(r);try{localStorage.setItem('pt_plan_usage_cache',JSON.stringify(r));}catch(_){}}
+      if(r&&r.error){setErr(r.error);}else{setData(r);try{localStorage.setItem('pt_plan_usage_cache_'+String((cu&&cu.workspace_id)||(cu&&cu.workspace)||'default'),JSON.stringify(r));}catch(_){}}
     }catch(e){setErr('Could not load workspace plan usage.');}
     setLoading(false);
-  },[allowed]);
+  },[allowed,cu&&cu.workspace_id,cu&&cu.workspace]);
   useEffect(()=>{load();},[load]);
   const plan=String((data&&data.plan)||'starter').toUpperCase();
   const usage=(data&&data.usage)||{};

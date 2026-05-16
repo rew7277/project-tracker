@@ -9828,12 +9828,49 @@ def _table_exists(db, table_name):
     except Exception:
         return False
 
+def _table_columns(db, table_name):
+    """Return column names for a table without throwing. Used by fast read APIs.
+    This prevents count widgets from returning 0 just because older deployments
+    do not have optional columns like deleted_at yet."""
+    try:
+        if not _table_exists(db, table_name):
+            return set()
+        return {str(r["name"]) for r in db.execute("PRAGMA table_info(" + str(table_name) + ")").fetchall()}
+    except Exception:
+        return set()
+
 def _safe_count(db, table_name, where_sql="", params=()):
     try:
         if not _table_exists(db, table_name):
             return 0
         sql = "SELECT COUNT(*) AS c FROM " + table_name + (" WHERE " + where_sql if where_sql else "")
         row = db.execute(sql, tuple(params or ())).fetchone()
+        return int(row["c"] if row and "c" in row.keys() else 0)
+    except Exception:
+        return 0
+
+def _safe_workspace_count(db, table_name, workspace_id):
+    """Fast workspace-scoped count that adapts to old/new schemas.
+    Counts should never silently become 0 because a soft-delete column is absent.
+    """
+    try:
+        cols = _table_columns(db, table_name)
+        if not cols:
+            return 0
+        where = []
+        params = []
+        if "workspace_id" in cols:
+            where.append("workspace_id=?")
+            params.append(workspace_id)
+        # Apply soft-delete filters only when the column exists.
+        if "deleted_at" in cols:
+            where.append("COALESCE(deleted_at,'')='' ")
+        elif "deleted" in cols:
+            where.append("COALESCE(deleted,0)=0")
+        elif "is_deleted" in cols:
+            where.append("COALESCE(is_deleted,0)=0")
+        sql = "SELECT COUNT(*) AS c FROM " + table_name + ((" WHERE " + " AND ".join(where)) if where else "")
+        row = db.execute(sql, tuple(params)).fetchone()
         return int(row["c"] if row and "c" in row.keys() else 0)
     except Exception:
         return 0
@@ -10145,7 +10182,7 @@ PLAN_LIMITS = {
 # Workspace settings Plan & Usage quotas. Starter caps were reduced to 75% of
 # the previous workspace-display limits. Higher tiers keep the next pricing config.
 WORKSPACE_PLAN_USAGE_LIMITS = {
-    "starter": {"members": 38, "projects": 75, "tasks": 375, "invoices": 150},
+    "starter": {"members": 25, "projects": 50, "tasks": 350, "invoices": 150},
     "team": {"members": 100, "projects": 250, "tasks": 1500, "invoices": 500},
     "business": {"members": 250, "projects": 750, "tasks": 5000, "invoices": 1500},
     "enterprise": {"members": 9999, "projects": 9999, "tasks": 99999, "invoices": 9999},
@@ -10177,11 +10214,13 @@ def workspace_plan_usage():
         with get_db() as db:
             # Read-only endpoint. Never run schema migrations/ALTER here.
             ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+            # Use schema-aware counters. Some older production databases do not
+            # have deleted_at on every table; the previous query failed and showed 0/limit.
             usage = {
-                "members": _safe_count(db, "users", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
-                "projects": _safe_count(db, "projects", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
-                "tasks": _safe_count(db, "tasks", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
-                "invoices": _safe_count(db, "invoices", "workspace_id=?", (wid(),)),
+                "members": _safe_workspace_count(db, "users", wid()),
+                "projects": _safe_workspace_count(db, "projects", wid()),
+                "tasks": _safe_workspace_count(db, "tasks", wid()),
+                "invoices": _safe_workspace_count(db, "invoices", wid()),
             }
         plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
         limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])
