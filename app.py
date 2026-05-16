@@ -562,7 +562,14 @@ def set_csrf_cookie(response):
 # Frontend hiding is UX only. These checks stop disabled paid features from
 # being used through direct URLs/API calls.
 FEATURE_API_PREFIXES = (
-    ("time_tracking", ("/api/timelogs", "/api/timesheet")),
+    ("time_tracking", ("/api/timelogs", "/api/timesheet", "/api/time-entries")),
+    ("timesheet_approvals", ("/api/timesheet/approval",)),
+    ("timesheet_billable_rates", ("/api/timelogs/rates", "/api/time-rates")),
+    ("timesheet_invoicing", ("/api/timelogs/invoice", "/api/timesheet/invoice")),
+    ("leave_management", ("/api/time-off", "/api/holidays")),
+    ("ticket_sla", ("/api/tickets/sla",)),
+    ("ticket_automation", ("/api/tickets/automation",)),
+    ("ai_ticket_assistant", ("/api/tickets/ai",)),
     ("billing_invoices", ("/api/billing", "/api/invoices")),
     ("ai_docs", ("/api/ai-docs", "/api/ai/")),
     ("vault", ("/api/vault", "/api/password")),
@@ -1107,6 +1114,60 @@ def ensure_timelog_schema():
     ]:
         _run_ddl(ddl)
 
+
+
+def ensure_ticket_timesheet_enhancements():
+    """Commercial ticketing + timesheet upgrades.
+    Safe migration: adds missing columns/tables only, and never blocks app boot."""
+    # Ticketing: split customer/vendor enquiries from workspace functionality tickets.
+    for ddl in [
+        "ALTER TABLE tickets ADD COLUMN scope TEXT DEFAULT 'workspace'",
+        "ALTER TABLE tickets ADD COLUMN request_type TEXT DEFAULT 'functional'",
+        "ALTER TABLE tickets ADD COLUMN source TEXT DEFAULT 'workspace'",
+        "ALTER TABLE tickets ADD COLUMN sla_hours INTEGER DEFAULT 24",
+        "ALTER TABLE tickets ADD COLUMN first_response_due TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN resolution_due_at TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN resolved_at TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN customer_visible INTEGER DEFAULT 1",
+        "ALTER TABLE tickets ADD COLUMN internal_priority TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN assigned_agent TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN watchers_json TEXT DEFAULT '[]'",
+        "ALTER TABLE tickets ADD COLUMN last_customer_reply_at TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN last_agent_reply_at TEXT DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN escalation_level INTEGER DEFAULT 0",
+        "ALTER TABLE ticket_comments ADD COLUMN visibility TEXT DEFAULT 'public'",
+        "ALTER TABLE ticket_comments ADD COLUMN is_internal INTEGER DEFAULT 0",
+        "ALTER TABLE time_logs ADD COLUMN status TEXT DEFAULT 'draft'",
+        "ALTER TABLE time_logs ADD COLUMN billable INTEGER DEFAULT 1",
+        "ALTER TABLE time_logs ADD COLUMN start_time TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN end_time TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN tags TEXT DEFAULT '[]'",
+        "ALTER TABLE time_logs ADD COLUMN submitted_at TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN approved_by TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN approved_at TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN rejected_reason TEXT DEFAULT ''",
+        "ALTER TABLE time_logs ADD COLUMN hourly_rate REAL DEFAULT 0"
+    ]:
+        _run_ddl(ddl)
+    for ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_tickets_ws_scope_status ON tickets(workspace_id, scope, status)",
+        "CREATE INDEX IF NOT EXISTS idx_tickets_ws_sla ON tickets(workspace_id, resolution_due_at, status)",
+        "CREATE INDEX IF NOT EXISTS idx_timelogs_ws_status ON time_logs(workspace_id, status, date)",
+        "CREATE TABLE IF NOT EXISTS ticket_activity (id TEXT PRIMARY KEY, workspace_id TEXT, ticket_id TEXT, actor_id TEXT DEFAULT '', action TEXT, details TEXT DEFAULT '', visibility TEXT DEFAULT 'public', created TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_ticket_activity_ticket ON ticket_activity(workspace_id, ticket_id, created)",
+        "CREATE TABLE IF NOT EXISTS ticket_watchers (id TEXT PRIMARY KEY, workspace_id TEXT, ticket_id TEXT, user_id TEXT, created TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_ticket_watchers_ticket ON ticket_watchers(workspace_id, ticket_id)",
+        "CREATE TABLE IF NOT EXISTS ticket_automation_rules (id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT, trigger_type TEXT, conditions_json TEXT DEFAULT '{}', actions_json TEXT DEFAULT '{}', enabled INTEGER DEFAULT 1, created TEXT, updated TEXT)",
+        "CREATE TABLE IF NOT EXISTS timesheet_weeks (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, week_start TEXT, week_end TEXT, total_minutes INTEGER DEFAULT 0, billable_minutes INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', submitted_at TEXT DEFAULT '', approved_by TEXT DEFAULT '', approved_at TEXT DEFAULT '', rejected_reason TEXT DEFAULT '', locked INTEGER DEFAULT 0, invoiced INTEGER DEFAULT 0, created TEXT, updated TEXT)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_timesheet_weeks_unique ON timesheet_weeks(workspace_id, user_id, week_start)",
+        "CREATE TABLE IF NOT EXISTS timesheet_approvals (id TEXT PRIMARY KEY, workspace_id TEXT, week_id TEXT, approver_id TEXT, status TEXT, note TEXT DEFAULT '', created TEXT)",
+        "CREATE TABLE IF NOT EXISTS time_rates (id TEXT PRIMARY KEY, workspace_id TEXT, entity_type TEXT, entity_id TEXT, hourly_rate REAL DEFAULT 0, currency TEXT DEFAULT 'INR', billable INTEGER DEFAULT 1, created TEXT, updated TEXT)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_time_rates_entity ON time_rates(workspace_id, entity_type, entity_id)",
+        "CREATE TABLE IF NOT EXISTS time_off_requests (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, start_date TEXT, end_date TEXT, reason TEXT DEFAULT '', status TEXT DEFAULT 'pending', approver_id TEXT DEFAULT '', created TEXT, updated TEXT)",
+        "CREATE TABLE IF NOT EXISTS holiday_calendars (id TEXT PRIMARY KEY, workspace_id TEXT, holiday_date TEXT, name TEXT, created TEXT)",
+        "CREATE TABLE IF NOT EXISTS customer_enquiries (id TEXT PRIMARY KEY, workspace_id TEXT, type TEXT, title TEXT, description TEXT DEFAULT '', status TEXT DEFAULT 'new', priority TEXT DEFAULT 'medium', requester_id TEXT DEFAULT '', owner_note TEXT DEFAULT '', created TEXT, updated TEXT)"
+    ]:
+        _run_ddl(ddl)
 
 def get_user_role():
     """Fetch current user role from DB — role is not stored in session."""
@@ -7335,6 +7396,36 @@ def team_dashboard(tid):
             }
         })
 
+OWNER_TICKET_TYPES = {"billing_issue", "upgrade_request", "addon_request", "server_issue", "workspace_enquiry", "payment_issue", "security_issue"}
+FUNCTIONAL_TICKET_TYPES = {"bug", "support_request", "feature", "improvement", "task", "question", "access_request", "incident", "change_request"}
+TICKET_STATUS_FLOW = ("open", "in_review", "waiting_for_customer", "in_progress", "resolved", "closed")
+TICKET_PRIORITY_SLA_HOURS = {
+    "urgent": {"first": 2, "resolution": 24},
+    "critical": {"first": 2, "resolution": 24},
+    "high": {"first": 8, "resolution": 48},
+    "medium": {"first": 24, "resolution": 120},
+    "low": {"first": 48, "resolution": 240},
+}
+
+def _ticket_scope_for_type(ticket_type):
+    return "owner" if str(ticket_type or "").lower() in OWNER_TICKET_TYPES else "workspace"
+
+def _ticket_sla_dates(priority, created=None):
+    created = created or ts()
+    try:
+        dt = datetime.fromisoformat(str(created).replace("Z", ""))
+    except Exception:
+        dt = datetime.utcnow()
+    cfg = TICKET_PRIORITY_SLA_HOURS.get(str(priority or "medium").lower(), TICKET_PRIORITY_SLA_HOURS["medium"])
+    return cfg["first"], cfg["resolution"], (dt + timedelta(hours=cfg["first"])).isoformat(), (dt + timedelta(hours=cfg["resolution"])).isoformat()
+
+def _ticket_activity(db, workspace_id, ticket_id, action, details="", visibility="public"):
+    try:
+        db.execute("INSERT INTO ticket_activity(id,workspace_id,ticket_id,actor_id,action,details,visibility,created) VALUES (?,?,?,?,?,?,?,?)",
+                   (secrets.token_hex(8), workspace_id, ticket_id, session.get("user_id", ""), action, str(details or "")[:1000], visibility, ts()))
+    except Exception:
+        pass
+
 # ── Tickets ───────────────────────────────────────────────────────────────────
 @app.route("/api/tickets", methods=["GET"])
 @login_required
@@ -7372,29 +7463,47 @@ def create_ticket():
     if not d.get("title"): return jsonify({"error":"title required"}),400
     tid=f"tkt{int(datetime.now().timestamp()*1000)}"
     now=ts()
+    ticket_type=str(d.get("type") or "bug").lower()
+    scope=_ticket_scope_for_type(ticket_type)
+    request_type="owner_enquiry" if scope=="owner" else "functional"
+    status=str(d.get("status") or "open").lower()
+    priority=str(d.get("priority") or "medium").lower()
+    sla_hours,resolution_hours,first_due,res_due=_ticket_sla_dates(priority, now)
     with get_db() as db:
-        db.execute("INSERT INTO tickets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (tid,wid(),d["title"],d.get("description",""),d.get("type","bug"),
-                    d.get("priority","medium"),d.get("status","open"),d.get("assignee",""),
-                    session["user_id"],d.get("project",""),json.dumps(d.get("tags",[])),now,now,
-                    d.get("team_id","")))
+        # Explicit columns make this safe after adding commercial ticketing columns.
+        cols=["id","workspace_id","title","description","type","priority","status","assignee","reporter","project","tags","created","updated","team_id"]
+        vals=[tid,wid(),d["title"],d.get("description",""),ticket_type,priority,status,d.get("assignee",""),session["user_id"],d.get("project",""),json.dumps(d.get("tags",[])),now,now,d.get("team_id","")]
+        extra={"scope":scope,"request_type":request_type,"source":"workspace","sla_hours":sla_hours,"first_response_due":first_due,"resolution_due_at":res_due,"customer_visible":1,"watchers_json":json.dumps(d.get("watchers",[]))}
+        try:
+            existing_cols=set(_table_columns(db,"tickets"))
+            for k,v in extra.items():
+                if k in existing_cols:
+                    cols.append(k); vals.append(v)
+        except Exception:
+            pass
+        db.execute("INSERT INTO tickets("+",".join(cols)+") VALUES ("+",".join(["?"]*len(cols))+")", tuple(vals))
+        _ticket_activity(db, wid(), tid, "created", f"Ticket created as {request_type}; priority {priority}")
+        if scope=="owner":
+            try:
+                db.execute("INSERT INTO customer_enquiries(id,workspace_id,type,title,description,status,priority,requester_id,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (tid,wid(),ticket_type,d["title"],d.get("description",""),"new",priority,session["user_id"],now,now))
+            except Exception:
+                pass
         if d.get("assignee"):
             nid=f"n{int(datetime.now().timestamp()*1000)}"
             reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
             rname=reporter["name"] if reporter else "Someone"
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                        (nid,wid(),"ticket_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
-            # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_tkt and assignee_tkt["email"]:
                 threading.Thread(target=send_ticket_assigned_email,
                     args=(assignee_tkt["email"],assignee_tkt["name"],d["title"],
-                          rname,tid,d.get("priority","medium"),wid()),
+                          rname,tid,priority,wid()),
                     daemon=True).start()
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
-    # Targeted bust: only tickets + appdata. Avoids wiping user/project/task caches.
     _cache_bust(wid(), "tickets", "notifications", "notifs", "appdata")
-    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
+    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created", "scope": scope})
     _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
 @app.route("/api/tickets/<tid>", methods=["PUT"])
@@ -7458,6 +7567,49 @@ def delete_ticket(tid):
     _cache_bust(wid(), "tickets", "appdata")
     return jsonify({"ok":True})
 
+
+@app.route("/api/tickets/queues", methods=["GET"])
+@login_required
+def ticket_queues():
+    now=ts()
+    with get_db() as db:
+        rows=db.execute("SELECT * FROM tickets WHERE workspace_id=? ORDER BY updated DESC LIMIT 500", (wid(),)).fetchall()
+    tickets=[dict(r) for r in rows]
+    def unresolved(t): return t.get("status") not in ("resolved","closed")
+    queues={
+        "my_tickets":[t for t in tickets if t.get("assignee")==session.get("user_id") and unresolved(t)],
+        "unassigned":[t for t in tickets if not t.get("assignee") and unresolved(t)],
+        "urgent":[t for t in tickets if t.get("priority") in ("urgent","critical") and unresolved(t)],
+        "sla_at_risk":[t for t in tickets if t.get("resolution_due_at") and t.get("resolution_due_at")>=now and unresolved(t)],
+        "overdue":[t for t in tickets if t.get("resolution_due_at") and t.get("resolution_due_at")<now and unresolved(t)],
+        "waiting_for_customer":[t for t in tickets if t.get("status")=="waiting_for_customer"],
+        "owner_enquiries":[t for t in tickets if t.get("scope")=="owner"],
+    }
+    return jsonify({k:len(v) for k,v in queues.items()})
+
+@app.route("/api/tickets/<tid>/activity", methods=["GET"])
+@login_required
+def get_ticket_activity(tid):
+    with get_db() as db:
+        rows=db.execute("SELECT * FROM ticket_activity WHERE workspace_id=? AND ticket_id=? ORDER BY created DESC LIMIT 100", (wid(), tid)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/tickets/<tid>/internal-notes", methods=["GET", "POST"])
+@login_required
+def ticket_internal_notes(tid):
+    if get_user_role() not in ("Admin","Manager","TeamLead"):
+        return jsonify({"error":"Forbidden"}),403
+    if request.method=="GET":
+        with get_db() as db:
+            rows=db.execute("SELECT * FROM ticket_activity WHERE workspace_id=? AND ticket_id=? AND visibility='internal' ORDER BY created DESC LIMIT 100", (wid(), tid)).fetchall()
+        return jsonify([dict(r) for r in rows])
+    d=request.json or {}
+    note=str(d.get("note") or d.get("content") or "").strip()
+    if not note: return jsonify({"error":"note required"}),400
+    with get_db() as db:
+        _ticket_activity(db,wid(),tid,"internal_note",note,"internal")
+    return jsonify({"ok":True})
+
 @app.route("/api/tickets/<tid>/comments", methods=["GET"])
 @login_required
 def get_ticket_comments(tid):
@@ -7471,9 +7623,19 @@ def add_ticket_comment(tid):
     d=request.json or {}
     if not d.get("content"): return jsonify({"error":"content required"}),400
     cid=f"tc{int(datetime.now().timestamp()*1000)}"
+    visibility="internal" if d.get("internal") else "public"
     with get_db() as db:
-        db.execute("INSERT INTO ticket_comments VALUES (?,?,?,?,?,?)",
-                   (cid,wid(),tid,session["user_id"],d["content"],ts()))
+        cols=["id","workspace_id","ticket_id","user_id","content","created"]
+        vals=[cid,wid(),tid,session["user_id"],d["content"],ts()]
+        try:
+            existing_cols=set(_table_columns(db,"ticket_comments"))
+            if "visibility" in existing_cols:
+                cols.append("visibility"); vals.append(visibility)
+            if "is_internal" in existing_cols:
+                cols.append("is_internal"); vals.append(1 if visibility=="internal" else 0)
+        except Exception: pass
+        db.execute("INSERT INTO ticket_comments("+",".join(cols)+") VALUES ("+",".join(["?"]*len(cols))+")", tuple(vals))
+        _ticket_activity(db,wid(),tid,"comment",d["content"],visibility)
         return jsonify(dict(db.execute("SELECT * FROM ticket_comments WHERE id=?",(cid,)).fetchone()))
 
 # ── Calls (Huddle) ────────────────────────────────────────────────────────────
@@ -7602,39 +7764,38 @@ def get_timelogs():
 def create_timelog():
     d   = request.json or {}
     lid = f"tl{int(datetime.now().timestamp()*1000)}"
-    values = (
-        lid,
-        wid(),
-        session["user_id"],
-        d.get("team_id", "") or "",
-        d.get("date", now_ist().strftime("%Y-%m-%d")),
-        d.get("task_name", "") or "",
-        d.get("project_id", "") or "",
-        d.get("task_id", "") or "",
-        float(d.get("hours") or 0),
-        int(d.get("minutes") or 0),
-        d.get("comments", "") or "",
-        ts()
-    )
-    sql = """INSERT INTO time_logs
-             (id, workspace_id, user_id, team_id, date, task_name,
-              project_id, task_id, hours, minutes, comments, created)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
+    now_created=ts()
+    row = {
+        "id": lid, "workspace_id": wid(), "user_id": session["user_id"],
+        "team_id": d.get("team_id", "") or "", "date": d.get("date", now_ist().strftime("%Y-%m-%d")),
+        "task_name": d.get("task_name", "") or "", "project_id": d.get("project_id", "") or "", "task_id": d.get("task_id", "") or "",
+        "hours": float(d.get("hours") or 0), "minutes": int(d.get("minutes") or 0), "comments": d.get("comments", "") or "", "created": now_created,
+        "status": d.get("status", "draft") or "draft", "billable": 1 if d.get("billable", True) else 0,
+        "start_time": d.get("start_time", "") or "", "end_time": d.get("end_time", "") or "", "tags": json.dumps(d.get("tags", [])) if not isinstance(d.get("tags", "[]"), str) else d.get("tags", "[]"),
+        "hourly_rate": float(d.get("hourly_rate") or 0)
+    }
     try:
-        _raw_pg(sql, values)
-        return jsonify({"id": lid, "ok": True})
+        with get_db() as db:
+            cols=set(_table_columns(db,"time_logs"))
+            use=[k for k in row.keys() if k in cols]
+            db.execute("INSERT INTO time_logs("+",".join(use)+") VALUES ("+",".join(["?"]*len(use))+")", tuple(row[k] for k in use))
+            user=db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            row["user_name"]=user["name"] if user else ""
+        _cache_bust(wid(), "timelogs", "appdata")
+        return jsonify(row)
     except Exception as e:
         log.error("[timelog create] %s: %s", type(e).__name__, e)
-        # Run schema fix then retry
-        ensure_timelog_schema()
+        ensure_timelog_schema(); ensure_ticket_timesheet_enhancements()
         try:
-            _raw_pg(sql, values)
-            log.info("[timelog] retry succeeded: %s", lid)
-            return jsonify({"id": lid, "ok": True})
+            with get_db() as db:
+                cols=set(_table_columns(db,"time_logs"))
+                use=[k for k in row.keys() if k in cols]
+                db.execute("INSERT INTO time_logs("+",".join(use)+") VALUES ("+",".join(["?"]*len(use))+")", tuple(row[k] for k in use))
+            _cache_bust(wid(), "timelogs", "appdata")
+            return jsonify(row)
         except Exception as e2:
             log.error("[timelog retry failed] %s: %s", type(e2).__name__, e2)
             return jsonify({"error": str(e2)}), 500
-
 
 @app.route("/api/timelogs/<log_id>", methods=["DELETE"])
 @login_required
@@ -7646,6 +7807,7 @@ def delete_timelog(log_id):
     if rows[0]["user_id"] != session["user_id"] and get_user_role() not in ("Admin","Manager"):
         return jsonify({"error": "Forbidden"}), 403
     _raw_pg("DELETE FROM time_logs WHERE id=?", (log_id,))
+    _cache_bust(wid(), "timelogs", "appdata")
     return jsonify({"ok": True})
 
 
@@ -7662,8 +7824,100 @@ def update_timelog(log_id):
     _raw_pg("UPDATE time_logs SET hours=?, minutes=?, comments=? WHERE id=?",
             (float(d.get("hours") or 0), int(d.get("minutes") or 0),
              d.get("comments", "") or "", log_id))
+    _cache_bust(wid(), "timelogs", "appdata")
     return jsonify({"ok": True, "id": log_id})
 
+
+
+def _week_bounds(date_str=None):
+    try:
+        d=datetime.fromisoformat(str(date_str or now_ist().strftime("%Y-%m-%d"))[:10])
+    except Exception:
+        d=now_ist()
+    start=d - timedelta(days=d.weekday())
+    end=start + timedelta(days=6)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+@app.route("/api/timesheet/weeks/current", methods=["GET"])
+@login_required
+def current_timesheet_week():
+    user_id=request.args.get("user_id") or session["user_id"]
+    if user_id!=session["user_id"] and get_user_role() not in ("Admin","Manager"):
+        return jsonify({"error":"Forbidden"}),403
+    ws=wid(); week_start,week_end=_week_bounds(request.args.get("date"))
+    with get_db() as db:
+        rows=db.execute("SELECT * FROM time_logs WHERE workspace_id=? AND user_id=? AND date>=? AND date<=? ORDER BY date DESC", (ws,user_id,week_start,week_end)).fetchall()
+        total=sum(int(float(r["hours"] or 0)*60)+int(r["minutes"] or 0) for r in rows)
+        billable=sum((int(float(r["hours"] or 0)*60)+int(r["minutes"] or 0)) for r in rows if int(r["billable"] or 1)==1) if rows and "billable" in rows[0].keys() else total
+        week=db.execute("SELECT * FROM timesheet_weeks WHERE workspace_id=? AND user_id=? AND week_start=?", (ws,user_id,week_start)).fetchone()
+        if not week:
+            wid2="tw"+secrets.token_hex(6)
+            now=ts()
+            db.execute("INSERT INTO timesheet_weeks(id,workspace_id,user_id,week_start,week_end,total_minutes,billable_minutes,status,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?)", (wid2,ws,user_id,week_start,week_end,total,billable,"draft",now,now))
+            week=db.execute("SELECT * FROM timesheet_weeks WHERE id=?", (wid2,)).fetchone()
+        else:
+            db.execute("UPDATE timesheet_weeks SET total_minutes=?, billable_minutes=?, updated=? WHERE id=?", (total,billable,ts(),week["id"]))
+            week=db.execute("SELECT * FROM timesheet_weeks WHERE id=?", (week["id"],)).fetchone()
+    return jsonify({"week":dict(week),"logs":[dict(r) for r in rows]})
+
+@app.route("/api/timesheet/weeks/<week_id>/submit", methods=["POST"])
+@login_required
+def submit_timesheet_week(week_id):
+    with get_db() as db:
+        week=db.execute("SELECT * FROM timesheet_weeks WHERE id=? AND workspace_id=?", (week_id,wid())).fetchone()
+        if not week: return jsonify({"error":"Not found"}),404
+        if week["user_id"]!=session["user_id"] and get_user_role() not in ("Admin","Manager"):
+            return jsonify({"error":"Forbidden"}),403
+        db.execute("UPDATE timesheet_weeks SET status='submitted', submitted_at=?, updated=? WHERE id=?", (ts(),ts(),week_id))
+        db.execute("UPDATE time_logs SET status='submitted', submitted_at=? WHERE workspace_id=? AND user_id=? AND date>=? AND date<=?", (ts(),wid(),week["user_id"],week["week_start"],week["week_end"]))
+    _cache_bust(wid(),"timelogs","appdata")
+    return jsonify({"ok":True,"status":"submitted"})
+
+@app.route("/api/timesheet/weeks/<week_id>/approve", methods=["POST"])
+@login_required
+def approve_timesheet_week(week_id):
+    try:
+        with get_db() as db:
+            if not _workspace_feature_config(db, wid()).get("features", {}).get("timesheet_approvals"):
+                return jsonify({"error":"Timesheet approvals are not enabled on this workspace plan", "upgrade_required": True}),403
+    except Exception:
+        pass
+    if get_user_role() not in ("Admin","Manager"):
+        return jsonify({"error":"Forbidden"}),403
+    d=request.json or {}; status=str(d.get("status") or "approved").lower(); note=str(d.get("note") or "")
+    if status not in ("approved","rejected","locked"):
+        return jsonify({"error":"Invalid status"}),400
+    with get_db() as db:
+        week=db.execute("SELECT * FROM timesheet_weeks WHERE id=? AND workspace_id=?", (week_id,wid())).fetchone()
+        if not week: return jsonify({"error":"Not found"}),404
+        approved_at=ts() if status in ("approved","locked") else ""
+        rejected_reason=note if status=="rejected" else ""
+        db.execute("UPDATE timesheet_weeks SET status=?, approved_by=?, approved_at=?, rejected_reason=?, locked=?, updated=? WHERE id=?", (status,session["user_id"],approved_at,rejected_reason,1 if status=="locked" else 0,ts(),week_id))
+        db.execute("UPDATE time_logs SET status=?, approved_by=?, approved_at=?, rejected_reason=? WHERE workspace_id=? AND user_id=? AND date>=? AND date<=?", (status,session["user_id"],approved_at,rejected_reason,wid(),week["user_id"],week["week_start"],week["week_end"]))
+        db.execute("INSERT INTO timesheet_approvals(id,workspace_id,week_id,approver_id,status,note,created) VALUES (?,?,?,?,?,?,?)", (secrets.token_hex(8),wid(),week_id,session["user_id"],status,note,ts()))
+    _cache_bust(wid(),"timelogs","appdata")
+    return jsonify({"ok":True,"status":status})
+
+@app.route("/api/time-rates", methods=["GET","POST"])
+@login_required
+def time_rates():
+    if get_user_role() not in ("Admin","Manager"):
+        return jsonify({"error":"Forbidden"}),403
+    if request.method=="GET":
+        with get_db() as db:
+            rows=db.execute("SELECT * FROM time_rates WHERE workspace_id=? ORDER BY entity_type, entity_id", (wid(),)).fetchall()
+        return jsonify([dict(r) for r in rows])
+    d=request.json or {}; entity_type=str(d.get("entity_type") or "user"); entity_id=str(d.get("entity_id") or "")
+    rate=float(d.get("hourly_rate") or 0); currency=str(d.get("currency") or "INR")
+    rid=secrets.token_hex(8); now=ts()
+    with get_db() as db:
+        existing=db.execute("SELECT id FROM time_rates WHERE workspace_id=? AND entity_type=? AND entity_id=?", (wid(),entity_type,entity_id)).fetchone()
+        if existing:
+            db.execute("UPDATE time_rates SET hourly_rate=?, currency=?, billable=?, updated=? WHERE id=?", (rate,currency,1 if d.get("billable",True) else 0,now,existing["id"]))
+            rid=existing["id"]
+        else:
+            db.execute("INSERT INTO time_rates(id,workspace_id,entity_type,entity_id,hourly_rate,currency,billable,created,updated) VALUES (?,?,?,?,?,?,?,?,?)", (rid,wid(),entity_type,entity_id,rate,currency,1 if d.get("billable",True) else 0,now,now))
+    return jsonify({"ok":True,"id":rid})
 
 @app.route("/api/timelogs/required-hours", methods=["GET", "POST"])
 @login_required
@@ -10222,6 +10476,7 @@ try:
     os.makedirs(JS_DIR, exist_ok=True)
     init_db()
     ensure_timelog_schema()   # always run — adds any missing time_log columns
+    ensure_ticket_timesheet_enhancements()
     _ensure_logout_column()    # add logged_out_at if upgrading from older deploy
     _close_ddl_conn()         # release shared DDL connection after all migrations
     _prewarm_pool(8)          # pre-open 8 pool connections so first requests are fast
@@ -10709,7 +10964,14 @@ WORKSPACE_FEATURE_CATALOG = {
     "channels_dm": {"label": "Channels & direct messages", "category": "Collaboration", "addon_price": 0, "description": "Workspace chat, project channels and direct messages."},
     "reminders": {"label": "Reminders & notifications", "category": "Productivity", "addon_price": 0, "description": "Personal reminders, assignment alerts and follow-ups."},
     "tickets": {"label": "Tickets / Ops center", "category": "Support", "addon_price": 0, "description": "Internal issue tracking and workspace support tickets."},
-    "time_tracking": {"label": "Timesheet & time tracking", "category": "Productivity", "addon_price": 299, "description": "Timesheets, time logs and delivery reporting."},
+    "ticket_sla": {"label": "Ticket SLA tracking", "category": "Support", "addon_price": 799, "description": "First-response and resolution SLA timers, breach tracking and queues."},
+    "ticket_automation": {"label": "Ticket automation rules", "category": "Support", "addon_price": 499, "description": "Automated routing, escalation, status updates and reminders."},
+    "ai_ticket_assistant": {"label": "AI ticket assistant", "category": "AI", "addon_price": 999, "description": "Summaries, suggested replies, duplicate detection and priority suggestions."},
+    "time_tracking": {"label": "Timesheet & time tracking", "category": "Productivity", "addon_price": 799, "description": "Timers, weekly timesheets and delivery reporting."},
+    "timesheet_approvals": {"label": "Timesheet approvals", "category": "Productivity", "addon_price": 499, "description": "Submit, approve, reject and lock weekly timesheets."},
+    "timesheet_billable_rates": {"label": "Billable rates", "category": "Finance", "addon_price": 999, "description": "User/project rates, billable utilization and margin reporting."},
+    "timesheet_invoicing": {"label": "Timesheet to invoice", "category": "Finance", "addon_price": 999, "description": "Generate invoices from approved billable time."},
+    "leave_management": {"label": "Leave & time-off", "category": "HR", "addon_price": 799, "description": "Time off requests, holiday calendar and missing-timesheet alerts."},
     "billing_invoices": {"label": "Billing & invoices", "category": "Finance", "addon_price": 299, "description": "Company billing profile, invoice creation and invoice history."},
     "ai_docs": {"label": "AI Docs", "category": "AI", "addon_price": 499, "description": "AI-assisted documents, notes and summaries."},
     "vault": {"label": "Vault & password tools", "category": "Security", "addon_price": 299, "description": "Team vault, password generator and secure records."},
@@ -10724,19 +10986,25 @@ WORKSPACE_FEATURE_CATALOG = {
 PLAN_FEATURE_MATRIX = {
     "starter": {
         "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
-        "time_tracking": False, "billing_invoices": False, "ai_docs": False, "vault": False,
+        "ticket_sla": False, "ticket_automation": False, "ai_ticket_assistant": False,
+        "time_tracking": False, "timesheet_approvals": False, "timesheet_billable_rates": False, "timesheet_invoicing": False, "leave_management": False,
+        "billing_invoices": False, "ai_docs": False, "vault": False,
         "advanced_analytics": False, "integrations": False, "incident_approvals": False,
         "public_api": False, "sso_security": False, "custom_branding": False,
     },
     "team": {
         "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
-        "time_tracking": True, "billing_invoices": True, "ai_docs": True, "vault": True,
+        "ticket_sla": False, "ticket_automation": False, "ai_ticket_assistant": False,
+        "time_tracking": True, "timesheet_approvals": False, "timesheet_billable_rates": False, "timesheet_invoicing": False, "leave_management": False,
+        "billing_invoices": True, "ai_docs": True, "vault": True,
         "advanced_analytics": False, "integrations": False, "incident_approvals": False,
         "public_api": False, "sso_security": False, "custom_branding": False,
     },
     "business": {
         "core_projects": True, "channels_dm": True, "reminders": True, "tickets": True,
-        "time_tracking": True, "billing_invoices": True, "ai_docs": True, "vault": True,
+        "ticket_sla": True, "ticket_automation": True, "ai_ticket_assistant": True,
+        "time_tracking": True, "timesheet_approvals": True, "timesheet_billable_rates": True, "timesheet_invoicing": True, "leave_management": True,
+        "billing_invoices": True, "ai_docs": True, "vault": True,
         "advanced_analytics": True, "integrations": True, "incident_approvals": True,
         "public_api": True, "sso_security": False, "custom_branding": False,
     },
@@ -10749,6 +11017,13 @@ ADD_ON_CATALOG = {
     "extra_25_users": {"label": "Extra 25 users", "price_inr": 499, "unit": "workspace / month", "limit_key": "members", "limit_add": 25},
     "extra_workspace": {"label": "Extra workspace", "price_inr": 999, "unit": "month", "limit_key": "workspaces", "limit_add": 1},
     "time_tracking": {"label": "Timesheet module", "price_inr": 799, "unit": "workspace / month", "feature": "time_tracking"},
+    "timesheet_approvals": {"label": "Timesheet approval workflow", "price_inr": 499, "unit": "workspace / month", "feature": "timesheet_approvals"},
+    "timesheet_billable_rates": {"label": "Billable rates + margin reports", "price_inr": 999, "unit": "workspace / month", "feature": "timesheet_billable_rates"},
+    "timesheet_invoicing": {"label": "Generate invoices from timesheets", "price_inr": 999, "unit": "workspace / month", "feature": "timesheet_invoicing"},
+    "leave_management": {"label": "Leave and time-off module", "price_inr": 799, "unit": "workspace / month", "feature": "leave_management"},
+    "ticket_sla": {"label": "Advanced ticket SLA pack", "price_inr": 799, "unit": "workspace / month", "feature": "ticket_sla"},
+    "ticket_automation": {"label": "Ticket automation rules", "price_inr": 499, "unit": "workspace / month", "feature": "ticket_automation"},
+    "ai_ticket_assistant": {"label": "AI ticket assistant", "price_inr": 999, "unit": "workspace / month", "feature": "ai_ticket_assistant"},
     "ai_docs": {"label": "AI Docs add-on", "price_inr": 999, "unit": "workspace / month", "feature": "ai_docs"},
     "billing_invoices": {"label": "Billing & invoices add-on", "price_inr": 499, "unit": "workspace / month", "feature": "billing_invoices"},
     "advanced_analytics": {"label": "Advanced analytics add-on", "price_inr": 999, "unit": "workspace / month", "feature": "advanced_analytics"},
@@ -12628,6 +12903,7 @@ if __name__=="__main__":
     init_db()
     print("  Ensuring timelog schema...")
     ensure_timelog_schema()
+    ensure_ticket_timesheet_enhancements()
     print("  Checking JS libraries...")
     if not download_js():
         print("  ⚠ Some libraries failed. Check your internet connection.")

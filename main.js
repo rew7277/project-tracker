@@ -1061,6 +1061,8 @@ function AuthScreen({onLogin}){
 /* ─── TeamSidePanel ────────────────────────────────────────────────────────── */
 function TeamSidePanel({cu,onClose,onSelectTeam,selectedTeam,teams,users,projects,tasks,onSetView,onReloadTeams,teamCtx,setTeamCtx,activeTeam}){
   const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
+  const ownerTypes=new Set(['billing_issue','upgrade_request','addon_request','server_issue','workspace_enquiry','payment_issue','security_issue']);
+  const slaText=t=>{if(!t.resolution_due_at||['resolved','closed'].includes(t.status))return ''; const ms=new Date(t.resolution_due_at).getTime()-Date.now(); if(Number.isNaN(ms))return ''; const mins=Math.max(0,Math.round(ms/60000)); if(ms<0)return 'SLA breached'; if(mins<60)return 'SLA '+mins+'m'; return 'SLA '+Math.round(mins/60)+'h';};
   const [search,setSearch]=useState('');
   const [dashboard,setDashboard]=useState(null); // loaded team dashboard data
   const [loadingDash,setLoadingDash]=useState(false);
@@ -6305,6 +6307,8 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   const canEdit=cu&&cu.role!=='Developer'&&cu.role!=='Viewer';
   const canDelete=cu&&['Admin','Manager','TeamLead'].includes(cu.role);
   const umap=safe(users).reduce((a,u)=>{a[u.id]=u;return a;},{});
+  const ownerTypes=new Set(['billing_issue','upgrade_request','addon_request','server_issue','workspace_enquiry','payment_issue','security_issue']);
+  const slaText=t=>{if(!t.resolution_due_at||['resolved','closed'].includes(t.status))return ''; const ms=new Date(t.resolution_due_at).getTime()-Date.now(); if(Number.isNaN(ms))return ''; const mins=Math.max(0,Math.round(ms/60000)); if(ms<0)return 'SLA breached'; if(mins<60)return 'SLA '+mins+'m'; return 'SLA '+Math.round(mins/60)+'h';};
 
   const TYPE_CFG={
     bug:{icon:'🐛',color:'var(--rd)',bg:'rgba(248,113,113,.12)',label:'Bug'},
@@ -6365,6 +6369,8 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   const visibleTickets=useMemo(()=>tickets.filter(t=>{
     const isResolved=t.status==='resolved'||t.status==='closed';
     if(isResolved&&!showResolved&&filterStatus!=='resolved'&&filterStatus!=='closed')return false;
+      if(filterStatus==='sla_risk'&&!(t.resolution_due_at&&t.status!=='resolved'&&t.status!=='closed'))return false;
+      if(filterStatus==='owner_enquiries'&&t.scope!=='owner')return false;
     if(filterStatus&&t.status!==filterStatus)return false;
     if(filterPriority&&t.priority!==filterPriority)return false;
     if(filterType&&t.type!==filterType)return false;
@@ -8361,6 +8367,7 @@ let _timesheetSetupDone = false; // module-level: survives view switches, cleare
 function TimesheetView({cu,teams,users,projects,tasks}){
   const isAdmin=cu&&(cu.role==='Admin'||cu.role==='Manager');
   const [logs,setLogs]=useState([]);
+  const [weekInfo,setWeekInfo]=useState(null);
   const [busy,setBusy]=useState(false);
   const [loading,setLoading]=useState(true);
 
@@ -8417,10 +8424,11 @@ function TimesheetView({cu,teams,users,projects,tasks}){
 
   // ── Load — called on mount, on focus, after saves
   const load=useCallback(async()=>{
-    const [d,h]=await Promise.all([api.get('/api/timelogs'),api.get('/api/timelogs/required-hours')]);
+    const [d,h,w]=await Promise.all([api.get('/api/timelogs'),api.get('/api/timelogs/required-hours'),api.get('/api/timesheet/weeks/current').catch(()=>null)]);
     if(Array.isArray(d)){setLogs(d);setLoading(false);}
     const hrs=Number((h&&h.hours!=null)?h.hours:8);
     setRequiredHrs(hrs);setAdminHrsInput(String(hrs));
+    if(w&&w.week)setWeekInfo(w.week);
   },[]);
 
   // Mount: setup schema (once per session) → then load immediately
@@ -8545,11 +8553,12 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     setLogs(prev=>[optimisticEntry,...prev]);
     const res=await api.post('/api/timelogs',payload);
     if(res&&res.id){
+      setLogs(prev=>prev.map(l=>l.id===tempId?{...optimisticEntry,...res}:l));
       setForm(blankForm());
       setShowForm(false);
-      setSaveMsg('✓ Hours logged!');
+      setSaveMsg('✓ Hours logged instantly');
       setTimeout(()=>setSaveMsg(''),3000);
-      load(); // refresh to get real ID and server data
+      api.get('/api/timesheet/weeks/current').then(w=>w&&w.week&&setWeekInfo(w.week)).catch(()=>{});
     } else {
       setLogs(prev=>prev.filter(l=>l.id!==tempId)); // rollback optimistic
       setSaveMsg('⚠ Save failed — please retry');
@@ -8562,7 +8571,7 @@ function TimesheetView({cu,teams,users,projects,tasks}){
     if(!confirm('Delete this log entry?'))return;
     setLogs(prev=>prev.filter(l=>l.id!==id));
     await api.del('/api/timelogs/'+id);
-    load();
+    api.get('/api/timesheet/weeks/current').then(w=>w&&w.week&&setWeekInfo(w.week)).catch(()=>{});
   };
 
   // ── Inline edit
@@ -8576,6 +8585,19 @@ function TimesheetView({cu,teams,users,projects,tasks}){
       setLogs(prev=>prev.map(x=>x.id===l.id?{...x,hours:h,minutes:Math.min(59,m),comments:editForm.comments}:x));
     }
     setEditId(null);
+  };
+
+  const submitWeek=async()=>{
+    if(!weekInfo)return;
+    const prev=weekInfo; setWeekInfo({...weekInfo,status:'submitted',submitted_at:new Date().toISOString()});
+    try{await api.post('/api/timesheet/weeks/'+weekInfo.id+'/submit',{}, {quiet:true,timeoutMs:8000});setSaveMsg('✓ Week submitted');}
+    catch(e){setWeekInfo(prev);setSaveMsg('⚠ Submit failed');}
+  };
+  const approveWeek=async(status='approved')=>{
+    if(!weekInfo)return;
+    const prev=weekInfo; setWeekInfo({...weekInfo,status,approved_at:new Date().toISOString()});
+    try{await api.post('/api/timesheet/weeks/'+weekInfo.id+'/approve',{status}, {quiet:true,timeoutMs:8000});setSaveMsg(status==='approved'?'✓ Week approved':'✓ Week rejected');}
+    catch(e){setWeekInfo(prev);setSaveMsg('⚠ Approval failed');}
   };
 
   // ── CSV export
@@ -8629,6 +8651,18 @@ function TimesheetView({cu,teams,users,projects,tasks}){
         </div>
       </div>
     </div>`:null}
+
+    <!-- ══ Weekly Approval Bar ══ -->
+    <div style=${{background:'var(--sf)',border:'1px solid var(--bd)',borderRadius:16,padding:'14px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+      <div>
+        <div style=${{fontSize:13,fontWeight:900,color:'var(--tx)'}}>Weekly timesheet</div>
+        <div style=${{fontSize:12,color:'var(--tx2)',marginTop:3}}>Status: <b>${weekInfo&&weekInfo.status?weekInfo.status:'draft'}</b> · ${weekInfo?Math.round((weekInfo.total_minutes||0)/60*10)/10:0}h total · ${weekInfo?Math.round((weekInfo.billable_minutes||0)/60*10)/10:0}h billable</div>
+      </div>
+      <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <button class="btn bg" style=${{fontSize:12,padding:'7px 12px'}} onClick=${submitWeek}>Submit week</button>
+        ${isAdmin?html`<button class="btn bp" style=${{fontSize:12,padding:'7px 12px'}} onClick=${()=>approveWeek('approved')}>Approve</button><button class="btn bg" style=${{fontSize:12,padding:'7px 12px'}} onClick=${()=>approveWeek('rejected')}>Reject</button>`:null}
+      </div>
+    </div>
 
     <!-- ══ Action Bar ══ -->
     <div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',flexWrap:'wrap',gap:8,marginBottom:16}}>
