@@ -9428,23 +9428,41 @@ def catch_all(path):
     if path.startswith("${") or "${" in path:
         return "", 400
 
-    # Validate and canonicalize /<workspace-slug>/<workspace-id>/... paths at page load.
-    # The workspace id is authoritative; slug must match the id to avoid weak,
-    # misleading URLs like /wrong-slug/ws123/dm.
+    # Validate and canonicalize /<workspace-slug>/<workspace-id>/... paths BEFORE
+    # the SPA/login screen is served. This is intentionally server-side, because
+    # the browser URL is untrusted and users can manually edit /fsbl/ws.../tasks.
+    #
+    # Rules:
+    #   1) Unknown workspace_id => 404, do NOT serve app/login with ?ws=...
+    #   2) Known workspace_id + wrong slug => redirect to canonical slug
+    #   3) Logged-in user opening another workspace => redirect to own dashboard
+    #   4) Known workspace_id + correct slug => serve SPA/login as usual
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
         supplied_slug = parts[0]
         potential_ws_id = parts[1]
         if potential_ws_id.startswith("ws"):
-            if "user_id" in session:
-                if str(potential_ws_id) != str(wid() or ""):
-                    own_slug = _canonical_workspace_slug(wid()) or "workspace"
-                    return redirect(f"/{own_slug}/{wid()}/dashboard", code=302)
-                expected_slug = _canonical_workspace_slug(potential_ws_id)
-                if expected_slug and supplied_slug != expected_slug:
-                    rest = "/".join(parts[2:]) or "dashboard"
-                    qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
-                    return redirect(f"/{expected_slug}/{potential_ws_id}/{rest}{qs}", code=302)
+            expected_slug = _canonical_workspace_slug(potential_ws_id)
+
+            # CRITICAL: invalid/truncated workspace ids must not fall through to
+            # _serve_html(), otherwise the frontend can open /?action=login&ws=...
+            # and make the bad URL look valid.
+            if not expected_slug:
+                return "Workspace not found", 404
+
+            # If the workspace exists but the slug is wrong, canonicalize it for
+            # both logged-in and logged-out users. Keep the path/query intact.
+            if supplied_slug != expected_slug:
+                rest = "/".join(parts[2:]) or "dashboard"
+                qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
+                return redirect(f"/{expected_slug}/{potential_ws_id}/{rest}{qs}", code=302)
+
+            # Authenticated users must never be allowed to browse another
+            # workspace shell, even if the slug/id pair is valid.
+            if "user_id" in session and str(potential_ws_id) != str(wid() or ""):
+                own_slug = _canonical_workspace_slug(wid()) or "workspace"
+                return redirect(f"/{own_slug}/{wid()}/dashboard", code=302)
+
             return _serve_html()
 
     # Otherwise serve the app (for client-side routing)
