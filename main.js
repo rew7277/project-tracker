@@ -1415,7 +1415,7 @@ function PersonalTwoFAToggle({cu,setCu}){
     </div>`;
 }
 
-function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set(),offlineMode=false}){
+function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dark,setDark,teams,users,projects,tasks,teamCtx,setTeamCtx,activeTeam,wsDmEnabled=true,onlineUsers=new Set(),offlineMode=false,featureFlags={}}){
   const fmtTime=s=>{const m=Math.floor(s/60);const sec=s%60;return m+':'+(sec<10?'0':'')+sec;};
   const isAdminManager=hasOpsAccess(cu);
   const baseView=(view||'dashboard').split(':')[0];
@@ -1433,7 +1433,20 @@ function Sidebar({cu,view,setView,onLogout,unread,dmUnread,col,setCol,wsName,dar
     {id:'dashboard', label:'Dashboard'}, {id:'ops', label:'Ops Center', badge:'New'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline Tracker'}, {id:'productivity',label:'Dev Productivity'}, {id:'reminders', label:'Reminders'}, {id:'team', label:'Team Management'}, {id:'billing', label:'Billing & Invoices', badge:'New'}, {id:'ai-docs', label:'AI Docs', badge:'AI'}, {id:'notes', label:'Notes', badge:'New'}, {id:'timesheet', label:'Timesheet', badge:'New', hint:'Shift+L'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
   const devNav=[
     {id:'dashboard', label:'Dashboard'}, {id:'projects', label:'Projects'}, {id:'tasks', label:'Kanban Board'}, {id:'messages', label:'Channels'}, {id:'dm', label:'Direct Messages'}, {id:'tickets', label:'Tickets'}, {id:'timeline', label:'Timeline'}, {id:'reminders', label:'Reminders'}, {id:'notes', label:'Notes'}, {id:'timesheet', label:'Timesheet'}, {id:'password-generator', label:'Password Gen', badge:'FREE'}, {id:'vault', label:'My Vault'}, ];
-  const baseNavItems=(isAdminManager?adminNav:devNav).filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager));
+  const FEATURE_NAV_MAP={
+    timesheet:'time_tracking', billing:'billing_invoices', 'ai-docs':'ai_docs',
+    vault:'vault', productivity:'advanced_analytics', ops:'advanced_analytics',
+    tickets:'tickets'
+  };
+  const isNavFeatureEnabled=(id)=>{
+    const key=FEATURE_NAV_MAP[id];
+    if(!key)return true;
+    if(id==='ops'&&isAdminManager)return !!featureFlags[key];
+    return featureFlags[key]!==false;
+  };
+  const baseNavItems=(isAdminManager?adminNav:devNav)
+    .filter(it=>it.id!=='dm'||(wsDmEnabled||isAdminManager))
+    .filter(it=>isNavFeatureEnabled(it.id));
 
   // ── Sidebar nav reorder + pin ────────────────────────────────────────────
   const roleKey=isAdminManager?'admin':'dev';
@@ -6753,6 +6766,8 @@ function WorkspacePlanUsageCard({cu}){
   const fmtStorage=(mb)=>{
     const n=Number(mb||0);
     if(n>=1024)return (Math.round((n/1024)*10)/10).toLocaleString('en-IN')+' GB';
+    if(n>0&&n<1)return (Math.round(n*100)/100).toLocaleString('en-IN')+' MB';
+    if(n>0&&n<10)return (Math.round(n*10)/10).toLocaleString('en-IN')+' MB';
     return fmtNum(Math.round(n))+' MB';
   };
   const row=(label,key,kind)=>{
@@ -10396,7 +10411,7 @@ function App(){
     }catch(e){}
     return 'dashboard';
   });
-  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+  const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[],featureFlags:{},featureCatalog:{},workspacePlan:"starter",planLimits:{}});
   // Block /dm?user=<id> from opening a user outside the current workspace/user list.
   useEffect(()=>{
     try{
@@ -11040,17 +11055,17 @@ function App(){
           console.warn('[Load] Authentication expired, clearing session');
           try{localStorage.removeItem('pf_had_session');}catch{}
           setCu(null);
-          setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+          setData({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[],featureFlags:{},featureCatalog:{},workspacePlan:"starter",planLimits:{}});
           return;
         }
         console.warn('[Load] App data failed, keeping current session/state:', d);
         return;
       }
-      const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[]}=d;
+      const {users=[],projects=[],tasks=[],notifications:notifs=[],dm_unread:dmu=[],workspace:ws={},teams:teamsRaw=[],tickets:ticketsRaw=[],reminders:rems=[],feature_flags:featureFlags={},feature_catalog:featureCatalog={},plan:workspacePlan='starter',plan_limits:planLimits={}}=d;
       const teams=Array.isArray(teamsRaw)?teamsRaw:[];
       const tickets=Array.isArray(ticketsRaw)?ticketsRaw:[];
       const _pm=parseMembers;
-      setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets});
+      setData({users:Array.isArray(users)?users:[],projects:(Array.isArray(projects)?projects:[]).map(p=>({...p,members:_pm(p.members)})),tasks:Array.isArray(tasks)?tasks:[],notifs:Array.isArray(notifs)?notifs:[],teams,tickets,featureFlags:featureFlags||{},featureCatalog:featureCatalog||{},workspacePlan:workspacePlan||'starter',planLimits:planLimits||{}});
       setDmUnread(Array.isArray(dmu)?dmu:[]);
       if(ws&&ws.name)setWsName(ws.name);
       if(ws){try{window.PT_WORKSPACE=Object.assign({},window.PT_WORKSPACE||{},ws,{workspace_id:ws.id||ws.workspace_id||ws.workspace_id_from_me||((cu&&cu.workspace_id)||''),workspace_id_from_me:ws.id||ws.workspace_id||ws.workspace_id_from_me||((cu&&cu.workspace_id)||''),workspace_slug:ws.workspace_slug||ws.slug||'',workspace_name:ws.name||ws.workspace_name||''});}catch(_){} setWsDmEnabled(ws.dm_enabled!==0);}
@@ -11433,6 +11448,18 @@ function App(){
     dashboard:{title:'Dashboard',sub:activeTeamName?activeTeamName+' Team Dashboard':'Overview of your work'}, ops:{title:'Ops Center',sub:'Realtime · performance · portfolio risk'}, projects:{title:'Projects',sub:scopedProjects.length+' projects'+(activeTeamName?' · '+activeTeamName:'')}, tasks:{title:'Kanban Board',sub:scopedTasks.filter(t=>t.stage!=='completed'&&t.stage!=='backlog').length+' active · '+scopedTasks.length+' total'+(activeTeamName?' · '+activeTeamName:'')}, messages:{title:'Channels',sub:(activeTeamName?activeTeamName+' · ':'')+'Project channels'}, dm:{title:'Direct Messages',sub:totalDm>0?totalDm+' unread':'Private conversations'}, reminders:{title:'Reminders',sub:'Upcoming task reminders'}, notifs:{title:'Notifications',sub:unread+' unread'}, team:{title:'Team Management',sub:'Members & sub-teams'}, settings:{title:'Settings',sub:wsName||'Workspace configuration'}, billing:{title:'Billing & Invoices',sub:'Plans · company details · invoice history'}, timeline:{title:'Timeline Tracker',sub:activeTeamName?activeTeamName+' project timeline':'Project schedule'}, productivity:{title:'Dev Productivity',sub:activeTeamName?activeTeamName+' performance':'Team performance analytics'}, tickets:{title:'Tickets',sub:activeTeamName?activeTeamName+' tickets':'Support tickets'}, 'ai-docs':{title:'AI Documentation',sub:'Generate docs & architecture diagrams'}, timesheet:{title:'Timesheet',sub:'Log hours · export reports · track productivity'}, };
 
   const baseView=(view||'dashboard').split(':')[0];
+  const featureFlags=data.featureFlags||{};
+  const VIEW_FEATURE_MAP={timesheet:'time_tracking',billing:'billing_invoices','ai-docs':'ai_docs',vault:'vault',productivity:'advanced_analytics',ops:'advanced_analytics',tickets:'tickets'};
+  const isFeatureEnabled=(key)=>!key || featureFlags[key]!==false;
+  const isViewFeatureAllowed=(v)=>isFeatureEnabled(VIEW_FEATURE_MAP[v]);
+  const FeatureLocked=({feature,title})=>html`<div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg)',padding:24}}>
+    <div style=${{maxWidth:520,textAlign:'center',padding:28,borderRadius:24,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 20px 70px rgba(0,0,0,.22)'}}>
+      <div style=${{fontSize:44,marginBottom:12}}>🔒</div>
+      <div style=${{fontSize:20,fontWeight:950,color:'var(--tx)',marginBottom:8}}>${title||'Feature not available on this plan'}</div>
+      <div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.6}}>This feature is disabled for your workspace plan or has been turned off from the Project Tracker owner control panel. Contact your workspace admin or upgrade the plan/add-on to enable it.</div>
+      <button class="btn bp" style=${{marginTop:18}} onClick=${()=>_setView('settings')}>View workspace plan</button>
+    </div>
+  </div>`;
   const viewParts=view.split(':');
   const taskFilterType=viewParts[1]||null;
   const taskFilterValue=viewParts[2]||null;
@@ -11461,7 +11488,7 @@ function App(){
         dark=${dark} setDark=${setDark} wsDmEnabled=${wsDmEnabled} onlineUsers=${onlineUsers}
         teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}
         teamCtx=${teamCtx} setTeamCtx=${setTeamCtx} activeTeam=${activeTeam}
-        offlineMode=${!!(cu&&cu._offline)}
+        offlineMode=${!!(cu&&cu._offline)} featureFlags=${data.featureFlags||{}}
         />
       <div style=${{flex:1,display:'flex',flexDirection:'column',overflow:'hidden',minWidth:0}}>
         <${Header} title=${info.title} sub=${info.sub} dark=${dark} setDark=${setDark} extra=${extra}
@@ -11484,7 +11511,7 @@ function App(){
           <${ErrorBoundary}>
             <div key=${baseView+'-'+(teamCtx||'all')} class="page-enter" style=${{flex:1,overflow: baseView==='vault'?'hidden':'hidden',display:'flex',flexDirection:'column',height:'100%'}}>
             ${baseView==='dashboard'?html`<${Dashboard} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} onNav=${setView} activeTeam=${activeTeam} teams=${data.teams} setTeamCtx=${setTeamCtx} tickets=${data.tickets||[]}/>`:null}
-            ${baseView==='ops'&&hasOpsAccess(cu)?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
+            ${baseView==='ops'&&hasOpsAccess(cu)&&isViewFeatureAllowed('ops')?html`<${OpsCommandCenter} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers} tickets=${data.tickets||[]} notifs=${data.notifs||[]} onNav=${setView}/>`:null}
             ${baseView==='ops'&&!hasOpsAccess(cu)?html`
               <div style=${{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg)',padding:24}}>
                 <div style=${{maxWidth:440,textAlign:'center',padding:24,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 20px 70px rgba(0,0,0,.25)'}}>
@@ -11508,18 +11535,19 @@ function App(){
             </div>
             ${baseView==='reminders'?html`<${RemindersView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onSetReminder=${t=>{setReminderTask(t);}} onReload=${load}/>`:null}
             ${baseView==='notifs'?html`<${NotifsView} notifs=${data.notifs} reload=${load} setData=${setData} onNavigate=${routeToNotification}/>`:null}
-            ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
+            ${baseView==='tickets'&&isViewFeatureAllowed('tickets')?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'?html`<${NotifPrefsPanel} cu=${cu}/>`:null}
             ${baseView==='settings'&&(cu.role==='Admin'||cu.role==='Manager'||cu.role==='TeamLead')?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
-            ${baseView==='billing'?html`<${BillingInvoicesView} cu=${cu}/>`:null}
+            ${baseView==='billing'&&isViewFeatureAllowed('billing')?html`<${BillingInvoicesView} cu=${cu}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&(cu.role==='Admin'||cu.role==='Manager')?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
             ${baseView==='notes'?html`<${NotesView} cu=${cu}/>`:null}
-            ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
-            ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
+            ${baseView==='ai-docs'&&isViewFeatureAllowed('ai-docs')?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
+            ${baseView==='timesheet'&&isViewFeatureAllowed('timesheet')?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
             ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}
-            ${baseView==='vault'?html`<${VaultView} cu=${cu}/>`:null}
+            ${baseView==='vault'&&isViewFeatureAllowed('vault')?html`<${VaultView} cu=${cu}/>`:null}
+            ${VIEW_FEATURE_MAP[baseView]&&!isViewFeatureAllowed(baseView)?html`<${FeatureLocked} title=${(TITLES[baseView]&&TITLES[baseView].title)||'Feature unavailable'}/>`:null}
             </div>
           <//>
         </div>

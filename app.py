@@ -5241,6 +5241,8 @@ def _fetch_app_data_from_db(ws, team_id, uid):
             "AND remind_at>=? ORDER BY remind_at",
             (ws, uid, now_str)
         ).fetchall()]
+        feature_cfg = _workspace_feature_config(db, ws)
+        limits = _workspace_limits_from_db(db, ws)
 
     return {
         "users": users,
@@ -5252,6 +5254,10 @@ def _fetch_app_data_from_db(ws, team_id, uid):
         "teams": teams,
         "tickets": tickets,
         "reminders": reminders,
+        "plan": feature_cfg.get("plan", "starter"),
+        "feature_flags": feature_cfg.get("features", {}),
+        "feature_catalog": feature_cfg.get("catalog", {}),
+        "plan_limits": limits,
     }
 
 def _etag_response(result):
@@ -9524,7 +9530,7 @@ def admin_api_workspace_detail(ws_id):
             ).fetchall()
             usage = _workspace_admin_usage(db, ws_id)
             limits = _workspace_limits_from_db(db, ws_id)
-        feature_cfg = _workspace_feature_config(db, ws_id)
+            feature_cfg = _workspace_feature_config(db, ws_id)
         return jsonify({
             "ok": True,
             "workspace": dict(ws),
@@ -9656,6 +9662,7 @@ def admin_api_set_plan():
         with get_db() as db:
             db.execute("UPDATE workspaces SET plan=?, storage_limit_mb=?, custom_limits_json=? WHERE id=?", (plan, storage_limit_mb, json.dumps(clean_limits), ws_id))
             db.commit()
+        _cache_bust_ws(ws_id)
         _audit("set_plan", ws_id, f"Plan changed to {plan}; storage override {storage_limit_mb or 'default'} MB; custom limits {clean_limits}")
         with get_db() as db:
             feature_cfg = _workspace_feature_config(db, ws_id)
@@ -9781,6 +9788,7 @@ def admin_api_workspace_features():
                     db.execute("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)",
                                (secrets.token_hex(6), ws_id, key, 1 if enabled else 0, "{}", ts()))
             db.commit()
+        _cache_bust_ws(ws_id)
         _audit("set_workspace_features", ws_id, f"Feature overrides changed: {features}")
         with get_db() as db:
             cfg = _workspace_feature_config(db, ws_id)
@@ -11839,6 +11847,29 @@ def get_feature_flags():
             "public_roadmap": flags.get("advanced_analytics", False),
         })
         return jsonify({"ok": True, "plan": cfg["plan"], "features": flags, "catalog": cfg["catalog"], "addons": cfg["addons"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "features": _feature_defaults_for_plan("starter")}), 200
+
+@app.route("/api/entitlements", methods=["GET"])
+@login_required
+def get_entitlements():
+    """Single source of truth for workspace plan, limits and feature access.
+    Frontend uses this to hide disabled plan features immediately; backend/admin
+    panel updates reflect here on the next refresh without code changes."""
+    try:
+        with get_db() as db:
+            cfg = _workspace_feature_config(db, wid())
+            limits = _workspace_limits_from_db(db, wid())
+        return jsonify({
+            "ok": True,
+            "workspace_id": wid(),
+            "plan": cfg.get("plan", "starter"),
+            "features": cfg.get("features", {}),
+            "catalog": cfg.get("catalog", {}),
+            "addons": cfg.get("addons", {}),
+            "limits": limits,
+            "updated_at": ts(),
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "features": _feature_defaults_for_plan("starter")}), 200
 
