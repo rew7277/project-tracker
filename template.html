@@ -5046,18 +5046,8 @@ function MessagesView({projects,users,cu,tasks}){
   const [incomingCall,setIncomingCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
 
-  const markChannelReadInstant=useCallback((id)=>{
-    if(!id)return;
-    const latest=(lastMsgTs&&lastMsgTs[id])||((msgCacheRef.current.get(id)||[]).reduce((mx,m)=>m.ts>mx?m.ts:mx,''));
-    if(latest){lastSeenMsgRef.current[id]=latest;saveLastSeen(lastSeenMsgRef.current);}
-    setChannelUnread(prev=>prev&&prev[id]?{...prev,[id]:0}:prev);
-    setNewMsgProjects(prev=>{if(!prev||!prev.has(id))return prev;const n=new Set(prev);n.delete(id);return n;});
-    try{window.dispatchEvent(new CustomEvent('pt:channel-read',{detail:{project:id}}));}catch(_){}
-  },[lastMsgTs]);
-
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
-    markChannelReadInstant(id);
     const seq=++msgReqSeq.current;
     const cached=msgCacheRef.current.get(id);
     if(cached){
@@ -5083,7 +5073,7 @@ function MessagesView({projects,users,cu,tasks}){
     }else{
       setLoadingChannel('');
     }
-  },[markChannelReadInstant]);
+  },[]);
 
   useEffect(()=>{
     safe(projects).forEach(p=>{
@@ -5316,7 +5306,7 @@ function MessagesView({projects,users,cu,tasks}){
           return html`
             <button key=${p.id} class=${'nb'+(pid===p.id?' act':'')}
               style=${{marginBottom:2,fontSize:12,alignItems:'center',height:'auto',padding:'7px 10px',width:'100%',display:'flex'}}
-              onClick=${()=>{markChannelReadInstant(p.id);setPid(p.id);}}>
+              onClick=${()=>setPid(p.id)}>
               <div style=${{display:'flex',alignItems:'center',gap:7,width:'100%'}}>
                 <div style=${{width:7,height:7,borderRadius:2,background:p.color,flexShrink:0}}></div>
                 <span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,textAlign:'left'}}># ${p.name}</span>
@@ -5749,12 +5739,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(id===String(activeToRef.current||'')){
       setToId(id);
       try{onDmRead&&onDmRead(id);}catch(_){}
-      try{sessionStorage.setItem('pt_open_dm_user',id);const _u=ptDmUrl(id);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
+      try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
       return;
     }
     try{
       sessionStorage.setItem('pt_open_dm_user',id);
-      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target'||source==='url'||source==='unread-auto'){const _u=ptDmUrl(id);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}
+      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target'||source==='url'||source==='unread-auto') history.replaceState(null,'',ptDmUrl(id));
     }catch(_e){}
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
@@ -6292,7 +6282,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       console.warn('[DM] clearing invalid selected peer', {toId});
       activeToRef.current='';
       setToId('');setMsgThreadId('');setMsgs([]);setLoadingThread('');
-      try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');const _u=ptDmUrl('');if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}catch(_e){}
+      try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');history.replaceState(null,'',ptDmUrl(''));}catch(_e){}
     }else if(valid!==String(toId)){
       switchToUser(valid,'url');
     }
@@ -6972,7 +6962,7 @@ function TeamView({users,cu,reload,projects}){
 }
 
 /* ─── TicketsView ────────────────────────────────────────────────────────── */
-function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus}){
+function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,initialStatus,initialTicketId,onClearInitialTicket}){
   const [tickets,setTickets]=useState([]);
   const [busy,setBusy]=useState(true);
   const [filterStatus,setFilterStatus]=useState(initialStatus||'');
@@ -7008,6 +6998,11 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
     setBusy(false);
   },[activeTeam]);
   useEffect(()=>{load();},[load]);
+  useEffect(()=>{
+    if(!initialTicketId)return;
+    const t=(tickets||[]).find(x=>String(x.id)===String(initialTicketId));
+    if(t){setDetailTicket(t);openDetail(t);if(onClearInitialTicket)onClearInitialTicket();}
+  },[initialTicketId,tickets]);
 
   const visibleTickets=useMemo(()=>{
     return tickets.filter(t=>{
@@ -7024,33 +7019,23 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   },[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee,ticketSearch]);
 
   const saveTicket=async()=>{
-    if(!nTitle.trim()||saving)return;
-    const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    const oldTickets=tickets;
+    if(!nTitle.trim())return;
+    const payload={title:nTitle,description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
     const now=new Date().toISOString();
-    const tempId='tmp_ticket_'+Date.now();
-    const optimistic=editTicket?{...editTicket,...payload,updated:now}:{id:tempId,workspace_id:cu&&cu.workspace_id,title:payload.title,description:payload.description,type:payload.type,priority:payload.priority,status:payload.status,assignee:payload.assignee,reporter:cu&&cu.id,project:payload.project,tags:'[]',created:now,updated:now,team_id:payload.team_id,_pending:true};
-    setSaving(true);
-    if(editTicket){
-      setTickets(prev=>prev.map(t=>t.id===editTicket.id?optimistic:t));
-      if(detailTicket&&detailTicket.id===editTicket.id)setDetailTicket(optimistic);
-    }else{
-      setTickets(prev=>[optimistic,...prev]);
-    }
-    setShowNew(false);setEditTicket(null);
+    const tempId='tmp_tkt_'+Date.now();
+    const optimistic=editTicket?{...editTicket,...payload,updated:now}:{...payload,id:tempId,workspace_id:'',reporter:cu&&cu.id,created:now,updated:now,tags:'[]'};
+    setTickets(prev=>editTicket?prev.map(t=>t.id===editTicket.id?optimistic:t):[optimistic,...prev]);
+    setShowNew(false);setEditTicket(null);setSaving(false);
     setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee(cu&&(cu.role==='Developer'||cu.role==='Tester')?cu.id:'');setNProject('');setNStatus('open');
     try{
       const saved=editTicket?await api.put('/api/tickets/'+editTicket.id,payload,{quiet:true,timeoutMs:10000}):await api.post('/api/tickets',payload,{quiet:true,timeoutMs:10000});
-      if(saved&&saved.error)throw new Error(saved.error);
-      if(saved&&saved.id){
-        setTickets(prev=>editTicket?prev.map(t=>t.id===saved.id?saved:t):prev.map(t=>t.id===tempId?saved:t));
-        if(detailTicket&&(detailTicket.id===saved.id||detailTicket.id===tempId))setDetailTicket(saved);
-      }
+      if(saved&&saved.error){throw new Error(saved.error);}
+      if(saved&&saved.id){setTickets(prev=>prev.map(t=>t.id===(editTicket?editTicket.id:tempId)?saved:t));}
+      try{window._pfToast&&window._pfToast('success','Ticket saved','Ticket updated instantly.');}catch(_e){}
     }catch(e){
-      setTickets(oldTickets);
-      setShowNew(true);setEditTicket(editTicket||null);
-      alert((e&&e.message)||'Could not save ticket. Please try again.');
-    }finally{setSaving(false);}
+      setTickets(prev=>editTicket?prev.map(t=>t.id===editTicket.id?editTicket:t):prev.filter(t=>t.id!==tempId));
+      try{window._pfToast&&window._pfToast('error','Ticket save failed',String(e&&e.message||'Please retry.'));}catch(_e){alert('Ticket save failed. Please retry.');}
+    }
   };
 
   const openEdit=(t)=>{
@@ -7076,34 +7061,26 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   };
 
   const quickStatus=async(t,status)=>{
-    if(!t||t.status===status)return;
-    const oldTickets=tickets;
+    const prevTicket={...t};
     setTickets(prev=>prev.map(x=>x.id===t.id?{...x,status,updated:new Date().toISOString()}:x));
     if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prev=>({...prev,status,updated:new Date().toISOString()}));
     try{
-      const r=await api.put('/api/tickets/'+t.id,{status},{quiet:true,timeoutMs:10000});
+      const r=await api.put('/api/tickets/'+t.id,{status},{quiet:true,timeoutMs:8000});
       if(r&&r.error)throw new Error(r.error);
-      if(r&&r.id)setTickets(prev=>prev.map(x=>x.id===r.id?r:x));
+      if(r&&r.id)setTickets(prev=>prev.map(x=>x.id===t.id?r:x));
     }catch(e){
-      setTickets(oldTickets);
-      if(detailTicket&&detailTicket.id===t.id)setDetailTicket(t);
-      alert((e&&e.message)||'Could not update ticket status.');
+      setTickets(prev=>prev.map(x=>x.id===t.id?prevTicket:x));
+      if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prevTicket);
+      try{window._pfToast&&window._pfToast('error','Status update failed','Please retry.');}catch(_e){}
     }
   };
 
   const del=async(id)=>{
     if(!window.confirm('Delete this ticket?'))return;
-    const oldTickets=tickets;
-    const oldDetail=detailTicket;
+    const old=tickets;
     setTickets(prev=>prev.filter(t=>t.id!==id));
-    if(detailTicket&&detailTicket.id===id)setDetailTicket(null);
-    try{
-      const r=await api.del('/api/tickets/'+id,{quiet:true,timeoutMs:10000});
-      if(r&&r.error)throw new Error(r.error);
-    }catch(e){
-      setTickets(oldTickets);setDetailTicket(oldDetail);
-      alert((e&&e.message)||'Could not delete ticket.');
-    }
+    setDetailTicket(null);
+    try{const r=await api.del('/api/tickets/'+id,{quiet:true,timeoutMs:8000});if(r&&r.error)throw new Error(r.error);}catch(e){setTickets(old);try{window._pfToast&&window._pfToast('error','Delete failed','Please retry.');}catch(_e){}}
   };
 
   const TYPE_CFG={
@@ -7445,29 +7422,53 @@ function TwoFASettingsCard({cu}){
 }
 
 /* ─── WorkspaceSettings ───────────────────────────────────────────────────── */
+
+function WorkspacePlanUsageCard({cu}){
+  const allowed=cu&&['Admin','Owner','Manager','Workspace Owner'].includes(String(cu.role||''));
+  const [data,setData]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState('');
+  const load=useCallback(async()=>{
+    if(!allowed)return;
+    setLoading(true);setErr('');
+    try{
+      const r=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:8000});
+      if(r&&r.error)setErr(r.error);else setData(r);
+    }catch(e){setErr('Could not load workspace plan usage.');}
+    setLoading(false);
+  },[allowed]);
+  useEffect(()=>{load();},[load]);
+  const plan=String((data&&data.plan)||'starter').toUpperCase();
+  const usage=(data&&data.usage)||{};
+  const limits=(data&&data.limits)||{};
+  const row=(label,key)=>{
+    const used=Number(usage[key]||0), max=Number(limits[key]||0);
+    const pct=max?Math.min(100,Math.round((used/max)*100)):0;
+    const warn=pct>=90?'#ef4444':pct>=75?'#f59e0b':'var(--ac)';
+    return html`<div style=${{marginBottom:13}}>
+      <div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:800,color:'var(--tx)',marginBottom:5}}><span>${label}</span><span>${used}/${max||'∞'}</span></div>
+      <div style=${{height:8,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:pct+'%',background:warn,borderRadius:999,transition:'width .25s ease'}}></div></div>
+    </div>`;
+  };
+  return html`<div class="card" style=${{marginBottom:16,borderColor:'rgba(90,140,255,.22)'}}>
+    <div style=${{display:'flex',justifyContent:'space-between',gap:12,alignItems:'flex-start',marginBottom:12}}>
+      <div><h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>📊 Workspace Plan & Usage</h3><p style=${{fontSize:12,color:'var(--tx2)',margin:0}}>Live workspace limits and current usage. This belongs under Settings, not invoice billing.</p></div>
+      <button class="btn brd" style=${{fontSize:11,padding:'5px 10px'}} onClick=${load} disabled=${loading}>${loading?'Refreshing…':'↻ Refresh'}</button>
+    </div>
+    ${!allowed?html`<div style=${{fontSize:12,color:'var(--tx3)'}}>Workspace plan and usage is available to admins/managers only</div>`:null}
+    ${allowed&&err?html`<div style=${{padding:'9px 12px',borderRadius:10,background:'rgba(185,28,28,.09)',border:'1px solid rgba(185,28,28,.18)',fontSize:12,color:'var(--rd)'}}>${err}</div>`:null}
+    ${allowed&&!err?html`<div>
+      <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><span style=${{fontSize:12,color:'var(--tx3)'}}>Current plan</span><span style=${{fontSize:11,fontWeight:900,color:'var(--ac)',padding:'5px 10px',borderRadius:999,background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.25)'}}>${plan}</span></div>
+      ${row('Team members','members')}${row('Projects','projects')}${row('Tasks','tasks')}${row('Invoices','invoices')}
+      <div style=${{fontSize:11,color:'var(--tx3)',marginTop:8}}>Last updated: ${(data&&data.updated_at)||'—'} · Role: ${(data&&data.role)||(cu&&cu.role)||'—'}</div>
+    </div>`:null}
+  </div>`;
+}
+
 function WorkspaceSettings({cu,onReload}){
   const [ws,setWs]=useState(null);const [wsName,setWsName]=useState('');const [aiKey,setAiKey]=useState('');const [showKey,setShowKey]=useState(false);const [saving,setSaving]=useState(false);const [saved,setSaved]=useState(false);
   const [emailEnabled,setEmailEnabled]=useState(true);const [smtpServer,setSmtpServer]=useState('smtp.gmail.com');const [smtpPort,setSmtpPort]=useState(587);const [smtpUsername,setSmtpUsername]=useState('');const [smtpPassword,setSmtpPassword]=useState('');const [fromEmail,setFromEmail]=useState('');const [showSmtpPass,setShowSmtpPass]=useState(false);const [testEmail,setTestEmail]=useState('');const [testingEmail,setTestingEmail]=useState(false);const [testResult,setTestResult]=useState(null);const [otpEnabled,setOtpEnabled]=useState(false);
   const [dmEnabled,setDmEnabled]=useState(true);
-  const [planUsage,setPlanUsage]=useState(null);
-  const [planUsageLoading,setPlanUsageLoading]=useState(false);
-  const [planUsageError,setPlanUsageError]=useState('');
-  const loadPlanUsage=useCallback(async()=>{
-    setPlanUsageLoading(true);setPlanUsageError('');
-    try{
-      const d=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:8000});
-      if(d&&d.error){setPlanUsageError(d.error);setPlanUsage(null);}
-      else setPlanUsage(d);
-    }catch(e){setPlanUsageError('Could not load workspace usage. Please refresh once.');}
-    finally{setPlanUsageLoading(false);}
-  },[]);
-  useEffect(()=>{loadPlanUsage();},[loadPlanUsage]);
-  const usageBar=(label,key)=>{
-    const usage=(planUsage&&planUsage.usage&&Number(planUsage.usage[key]))||0;
-    const limit=planUsage&&planUsage.limits?planUsage.limits[key]:null;
-    const pct=limit?Math.min(100,Math.round((usage/Math.max(1,limit))*100)):0;
-    return html`<div style=${{marginTop:12}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:700,color:'var(--tx)',marginBottom:6}}><span>${label}</span><span>${usage}${limit?'/'+limit:' / Unlimited'}</span></div><div style=${{height:8,borderRadius:999,background:'rgba(255,255,255,.08)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:(limit?pct:100)+'%',background:'linear-gradient(90deg,var(--ac),var(--ac2))',transition:'width .25s ease'}}></div></div></div>`;
-  };
   const PERM_DEFAULTS={
     'Create & Edit Projects':   {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Create & Assign Tasks':    {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:false,Viewer:false}, 'Edit Tasks':               {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Delete Tasks':             {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Create Tickets':           {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:false}, 'Edit Tickets':             {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Delete Tickets':           {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Close / Resolve Tickets':  {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:false,Viewer:false}, 'Delete Projects':          {Admin:true, Manager:true, TeamLead:false,Developer:false,Tester:false,Viewer:false}, 'Send Channel Messages':    {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Manage Team Members':      {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Manage Workspace Settings':{Admin:true, Manager:false,TeamLead:false,Developer:false,Tester:false,Viewer:false}, 'View All Projects':        {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Start Instant Meet Calls':       {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Delete Team Members':      {Admin:true, Manager:false,TeamLead:false,Developer:false,Tester:false,Viewer:false}, };
   const storedPerms=()=>{try{return JSON.parse(localStorage.getItem('pf_perms')||'null');}catch{return null;}};
@@ -7575,27 +7576,7 @@ function WorkspaceSettings({cu,onReload}){
         </div>
       </div>
 
-      <div class="card" style=${{marginBottom:16,border:'1px solid rgba(90,140,255,.22)',background:'linear-gradient(135deg,rgba(90,140,255,.06),var(--sf))'}}>
-        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:10}}>
-          <div>
-            <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
-            <p style=${{fontSize:12,color:'var(--tx2)'}}>Live workspace limits and current usage. This belongs under Settings, not invoice billing.</p>
-          </div>
-          <button class="btn brd" style=${{fontSize:11,padding:'6px 10px'}} disabled=${planUsageLoading} onClick=${loadPlanUsage}>${planUsageLoading?'Refreshing…':'↻ Refresh'}</button>
-        </div>
-        ${planUsageError?html`<div style=${{padding:'10px 12px',borderRadius:10,background:'rgba(245,158,11,.10)',border:'1px solid rgba(245,158,11,.24)',color:'var(--tx2)',fontSize:12}}>⚠️ ${planUsageError}</div>`:null}
-        ${planUsage?html`<div>
-          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:4}}>
-            <span style=${{fontSize:12,color:'var(--tx3)'}}>Current plan</span>
-            <span style=${{fontSize:11,fontWeight:900,letterSpacing:.5,color:'var(--ac)',background:'var(--ac3)',border:'1px solid rgba(90,140,255,.25)',borderRadius:999,padding:'5px 10px',textTransform:'uppercase'}}>${planUsage.plan||'starter'}</span>
-          </div>
-          ${usageBar('Team members','members')}
-          ${usageBar('Projects','projects')}
-          ${usageBar('Tasks','tasks')}
-          ${usageBar('Invoices','invoices')}
-          <div style=${{marginTop:10,fontSize:11,color:'var(--tx3)'}}>Last updated: ${planUsage.updated_at||'just now'} · Role: ${planUsage.role||cu.role||'—'}</div>
-        </div>`:!planUsageLoading&&!planUsageError?html`<div style=${{fontSize:12,color:'var(--tx3)',padding:'8px 0'}}>Usage will appear here after loading.</div>`:null}
-      </div>
+      <${WorkspacePlanUsageCard} cu=${cu}/>
 
       <div class="card" style=${{marginBottom:16}}>
         <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🔗 Invite Code</h3>
@@ -11105,7 +11086,8 @@ function App(){
           const entityId=raw.slice(base.length+1);
           if(entityId)suffix='/'+encodeURIComponent(String(entityId));
         }
-        const _nextUrl=workspaceBasePath(cu)+base+suffix;if((location.pathname+location.search)!==_nextUrl)history.pushState(null,'',_nextUrl);
+        const nextUrl=workspaceBasePath(cu)+base+suffix;
+        if(nextUrl !== (window.location.pathname+window.location.search)) history.pushState(null,'',nextUrl);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -11136,7 +11118,7 @@ function App(){
         console.warn('[SECURITY] Blocked invalid DM URL user', target);
         try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');}catch(_){}
         setDmTargetUser(null);
-        const _dmUrl=workspaceBasePath(cu)+'dm';if((location.pathname+location.search)!==_dmUrl)history.replaceState(null,'',_dmUrl);
+        history.replaceState(null,'',workspaceBasePath(cu)+'dm');
       }
     }catch(e){}
   },[data.users,cu&&cu.id]);
@@ -11201,8 +11183,20 @@ function App(){
       return;
     }
 
+    // Ticket notifications must be resolved before task notifications. Older backend
+    // payloads used task_assigned with entity_type=ticket, which made ticket clicks open Kanban.
+    let ticketId=s(n.ticket_id||(entityType==='ticket'?rawEntityId:''));
+    const ticketTypes=['ticket','ticket_assigned','ticket_updated','ticket_deleted','ticket.created','ticket.updated','ticket.deleted'];
+    if(!ticketId&&ticketTypes.includes(type)) ticketId=rawEntityId;
+    if(!ticketId){const tk=byName(tickets,['title','subject','name']); if(tk)ticketId=String(tk.id);}
+    if(entityType==='ticket'||ticketId||ticketTypes.includes(type)||contentLow.includes('ticket')||content.startsWith('🎫')){
+      if(ticketId)setInitialTicketId(String(ticketId));
+      _setView(ticketId?'tickets:'+String(ticketId):'tickets');
+      return;
+    }
+
     let taskId=s(n.task_id||(entityType==='task'?rawEntityId:''));
-    if(!taskId&&['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)) taskId=rawEntityId;
+    if(!taskId&&entityType!=='ticket'&&['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)) taskId=rawEntityId;
     if(!taskId){const t=byName(tasks,['title','name']); if(t)taskId=String(t.id);}
     if(entityType==='task'||taskId||['task_assigned','status_change','comment','deadline','reminder','task_updated','task.created','task.updated','task'].includes(type)||contentLow.includes('task')){
       if(taskId)setInitialTaskId(String(taskId));
@@ -11219,14 +11213,6 @@ function App(){
       return;
     }
 
-    let ticketId=s(n.ticket_id||(entityType==='ticket'?rawEntityId:''));
-    if(!ticketId&&['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)) ticketId=rawEntityId;
-    if(!ticketId){const tk=byName(tickets,['title','subject','name']); if(tk)ticketId=String(tk.id);}
-    if(entityType==='ticket'||ticketId||['ticket','ticket_assigned','ticket_updated','ticket.created','ticket.updated'].includes(type)||contentLow.includes('ticket')||content.startsWith('🎫')){
-      if(ticketId)setInitialTicketId(String(ticketId));
-      _setView(ticketId?'tickets:'+String(ticketId):'tickets');
-      return;
-    }
 
     if(entityType==='message'||entityType==='channel'||['message','channel_message','project_message'].includes(type)){
       const msgProjectId=s(n.project_id||rawEntityId);
@@ -11317,7 +11303,7 @@ function App(){
           setDmTargetUser(peer);
           try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source}}));}catch(_){}
           _setView('dm:'+peer);
-          try{const _u=ptDmUrl(peer);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}catch(_){}
+          try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
           return peer;
         }
       }catch(_e){}
@@ -12277,6 +12263,7 @@ function App(){
             ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
             ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
             ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}
+            ${baseView==='billing'?html`<${BillingInvoicesView} cu=${cu}/>`:null}
             ${baseView==='vault'?html`<${VaultView} cu=${cu}/>`:null}
             </div>
           <//>

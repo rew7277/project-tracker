@@ -4716,8 +4716,6 @@ def me():
         u = rows[0]
         if u.get("workspace_id"):
             session["workspace_id"] = u["workspace_id"]
-        if u.get("role"):
-            session["role"] = u["role"]
         result = dict(u)
         for k in ("password","plain_password","totp_secret","_ws_name","_ws_slug"):
             result.pop(k, None)
@@ -4738,7 +4736,6 @@ def me():
             u=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
             if not u: session.clear(); return jsonify({"error":"Not found"}),404
             if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
-            if u["role"]: session["role"]=u["role"]
             result = dict(u)
             for k in ("password","plain_password","totp_secret"):
                 result.pop(k, None)
@@ -7315,7 +7312,7 @@ def create_ticket():
             reporter=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
             rname=reporter["name"] if reporter else "Someone"
             db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (nid,wid(),"task_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
+                       (nid,wid(),"ticket_assigned",f"🎫 {rname} assigned ticket: {d['title']}",d["assignee"],0,now,tid,'ticket'))
             # Email the assigned person (including when self-assigned)
             assignee_tkt=db.execute("SELECT name,email FROM users WHERE id=?",(d["assignee"],)).fetchone()
             if assignee_tkt and assignee_tkt["email"]:
@@ -7329,7 +7326,6 @@ def create_ticket():
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
-
 @app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
 def update_ticket(tid):
@@ -7352,37 +7348,22 @@ def update_ticket(tid):
                     d.get("project",t["project"]),json.dumps(d.get("tags",json.loads(t["tags"] or "[]"))),now,
                     d.get("team_id",cur_team_id),tid))
         result=dict(db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=?",(tid,wid())).fetchone())
-        # In-app + email on ticket status change — notify assignee, reporter, and managers
+        # In-app + email on ticket status change — notify ONLY the assigned person.
+        # This prevents ticket create/update/delete spam going to the whole workspace.
         if d.get("status") and d["status"] != t["status"]:
             _tkt_changer = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
             _tkt_changer_name = _tkt_changer["name"] if _tkt_changer else "Someone"
-            _tkt_notified = set()
             _new_status = d["status"]
-            _ticket_priority = t["priority"] if "priority" in t.keys() else ""
-            _ticket_assignee = t["assignee"] if "assignee" in t.keys() else ""
-            _ticket_reporter = t["reporter"] if "reporter" in t.keys() else ""
-            # Notify managers on high/critical priority tickets
-            _managers = []
-            if _ticket_priority in ("high", "critical"):
-                _mgr_rows = db.execute("SELECT id FROM users WHERE workspace_id=? AND role IN ('Manager','Admin')", (wid(),)).fetchall()
-                _managers = [r["id"] for r in _mgr_rows if r["id"] != session["user_id"]]
-            _notif_targets = [_ticket_assignee, _ticket_reporter]
-            for _tkt_uid in (_notif_targets + _managers):
-                if not _tkt_uid or _tkt_uid in _tkt_notified:
-                    continue
-                _tkt_notified.add(_tkt_uid)
-                _is_manager_notif = _tkt_uid in _managers
-                # In-app notification
+            _tkt_uid = (result.get("assignee") if isinstance(result, dict) else "") or (t["assignee"] if "assignee" in t.keys() else "")
+            if _tkt_uid and _tkt_uid != session.get("user_id"):
                 if _should_notify(_tkt_uid, "ticket_updated", "inapp"):
-                    _nid2 = f"n{int(datetime.now().timestamp()*1000)}{_tkt_uid[:4]}"
-                    _msg = f"\U0001f3ab {_tkt_changer_name} updated ticket: {t['title']} → {_new_status}"
+                    _nid2 = f"n{int(datetime.now().timestamp()*1000)}{str(_tkt_uid)[:4]}"
+                    _msg = f"🎫 {_tkt_changer_name} updated ticket: {t['title']} → {_new_status}"
                     db.execute("INSERT OR IGNORE INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
                                (_nid2, wid(), "ticket_updated", _msg, _tkt_uid, 0, now, tid, "ticket"))
-                # Push notification
                 if _should_notify(_tkt_uid, "ticket_updated", "push"):
                     threading.Thread(target=push_notification_to_user,
-                        args=(None, _tkt_uid, "Ticket Updated", f"{t['title']} → {_new_status}", "/"), daemon=True).start()
-                # Email
+                        args=(None, _tkt_uid, "Ticket Updated", f"{t['title']} → {_new_status}", f"/tickets/{tid}"), daemon=True).start()
                 _tkt_user = db.execute("SELECT name,email FROM users WHERE id=?", (_tkt_uid,)).fetchone()
                 if _tkt_user and _tkt_user["email"] and _should_notify(_tkt_uid, "ticket_updated", "email"):
                     threading.Thread(target=send_ticket_status_email,
@@ -7393,7 +7374,6 @@ def update_ticket(tid):
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
     return jsonify(result)
-
 @app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
 def delete_ticket(tid):
@@ -7405,7 +7385,6 @@ def delete_ticket(tid):
         db.execute("DELETE FROM tickets WHERE id=? AND workspace_id=?",(tid,wid()))
         db.execute("DELETE FROM ticket_comments WHERE ticket_id=? AND workspace_id=?",(tid,wid()))
     _cache_bust(wid(), "tickets", "appdata")
-    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "deleted"})
     return jsonify({"ok":True})
 
 @app.route("/api/tickets/<tid>/comments", methods=["GET"])
@@ -9830,75 +9809,10 @@ def _stripe_get(path):
         return {"error":{"message":str(e)}}
 
 
-# ── Workspace plan & usage ─────────────────────────────────────────────────
-@app.route("/api/workspace/plan-usage", methods=["GET"])
-@login_required
-def workspace_plan_usage():
-    if not _role_can_manage_workspace():
-        return jsonify({"error": "Workspace plan and usage is available to admins/managers only"}), 403
-    ws_id = wid()
-    def count_rows(db, table, extra_where="1=1", params=()):
-        try:
-            return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=? AND {extra_where}", (ws_id,)+tuple(params)).fetchone()["c"] or 0)
-        except Exception:
-            try:
-                return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (ws_id,)).fetchone()["c"] or 0)
-            except Exception:
-                return 0
-    with get_db() as db:
-        ws = db.execute("SELECT id,name,plan FROM workspaces WHERE id=?", (ws_id,)).fetchone()
-        plan = (ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter"
-        plan_key = str(plan).lower()
-        limits = {
-            "free": {"members": 5, "projects": 10, "tasks": 100, "invoices": 25},
-            "starter": {"members": 50, "projects": 100, "tasks": 500, "invoices": 200},
-            "pro": {"members": 200, "projects": 500, "tasks": 5000, "invoices": 2000},
-            "business": {"members": 500, "projects": 2000, "tasks": 20000, "invoices": 10000},
-            "enterprise": {"members": None, "projects": None, "tasks": None, "invoices": None},
-        }.get(plan_key, {"members": 50, "projects": 100, "tasks": 500, "invoices": 200})
-        usage = {
-            "members": count_rows(db, "users", "COALESCE(deleted_at,'')=''"),
-            "projects": count_rows(db, "projects", "COALESCE(deleted_at,'')=''"),
-            "tasks": count_rows(db, "tasks", "COALESCE(deleted_at,'')=''"),
-            "invoices": count_rows(db, "invoices"),
-        }
-        return jsonify({
-            "workspace_id": ws_id,
-            "workspace_name": (ws["name"] if ws else ""),
-            "plan": plan,
-            "usage": usage,
-            "limits": limits,
-            "role": _current_workspace_role(),
-            "updated_at": ts(),
-        })
-
-
 # ── Workspace billing profile + professional invoice creation ───────────────
 
-def _current_workspace_role():
-    """Return the live role for the signed-in user and sync session role.
-    Session role can be stale after deployment/re-login, so DB is the source of truth.
-    """
-    uid = session.get("user_id")
-    if not uid:
-        return ""
-    try:
-        with get_db() as db:
-            row = db.execute("SELECT role, workspace_id FROM users WHERE id=?", (uid,)).fetchone()
-            if row:
-                session["role"] = row["role"] or ""
-                if row["workspace_id"]:
-                    session["workspace_id"] = row["workspace_id"]
-                return row["role"] or ""
-    except Exception:
-        pass
-    return session.get("role", "")
-
-def _role_can_manage_workspace():
-    return str(_current_workspace_role() or "").lower().replace(" ", "") in ("admin", "owner", "workspaceowner", "manager")
-
 def _billing_admin_required():
-    return _role_can_manage_workspace()
+    return session.get("role") in ("Admin", "Owner", "Manager")
 
 def _billing_profile_dict(row):
     if row: return dict(row)
@@ -10176,6 +10090,56 @@ PLAN_LIMITS = {
     "team":       {"members": 50,  "projects": 50, "ai_calls_month": 500, "storage_mb": 10000},
     "enterprise": {"members": 999, "projects": 999,"ai_calls_month": 9999,"storage_mb": 100000},
 }
+
+# Workspace settings Plan & Usage quotas. Starter caps were reduced to 75% of
+# the previous workspace-display limits. Higher tiers keep the next pricing config.
+WORKSPACE_PLAN_USAGE_LIMITS = {
+    "starter": {"members": 38, "projects": 75, "tasks": 375, "invoices": 150},
+    "team": {"members": 100, "projects": 250, "tasks": 1500, "invoices": 500},
+    "business": {"members": 250, "projects": 750, "tasks": 5000, "invoices": 1500},
+    "enterprise": {"members": 9999, "projects": 9999, "tasks": 99999, "invoices": 9999},
+}
+
+def _live_workspace_role(user_id=None, workspace_id=None):
+    try:
+        uid = user_id or session.get("user_id")
+        wsid = workspace_id or wid()
+        if not uid or not wsid:
+            return ""
+        with get_db() as db:
+            row = db.execute("SELECT role FROM users WHERE id=? AND workspace_id=?", (uid, wsid)).fetchone()
+        role = row["role"] if row else ""
+        if role:
+            session["role"] = role
+        return role
+    except Exception:
+        return str(session.get("role") or "")
+
+@app.route("/api/workspace/plan-usage", methods=["GET"])
+@login_required
+def workspace_plan_usage():
+    role = _live_workspace_role()
+    if role not in ("Admin", "Owner", "Manager", "Workspace Owner"):
+        return jsonify({"error": "Workspace plan and usage is available to admins/managers only", "role": role}), 403
+    with get_db() as db:
+        ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+        members = db.execute("SELECT COUNT(*) AS c FROM users WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
+        projects = db.execute("SELECT COUNT(*) AS c FROM projects WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
+        tasks = db.execute("SELECT COUNT(*) AS c FROM tasks WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
+        try:
+            _ensure_billing_schema(db)
+            invoices = db.execute("SELECT COUNT(*) AS c FROM invoices WHERE workspace_id=?", (wid(),)).fetchone()
+        except Exception:
+            invoices = {"c": 0}
+    plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
+    limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+    usage = {
+        "members": members["c"] if members else 0,
+        "projects": projects["c"] if projects else 0,
+        "tasks": tasks["c"] if tasks else 0,
+        "invoices": invoices["c"] if invoices else 0,
+    }
+    return jsonify({"ok": True, "plan": plan, "limits": limits, "usage": usage, "role": role, "updated_at": ts()})
 
 def _get_month_usage(workspace_id):
     month_start = datetime.now().replace(day=1,hour=0,minute=0,second=0).isoformat()
