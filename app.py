@@ -9821,8 +9821,27 @@ def _stripe_get(path):
 
 # ── Workspace billing profile + professional invoice creation ───────────────
 
+def _billing_role_key(role):
+    """Normalize user roles for billing / workspace-admin checks.
+    Handles older role labels such as Workspace Owner, Project Manager, etc."""
+    return re.sub(r"[^a-z]", "", str(role or "").lower())
+
 def _billing_admin_required():
-    return session.get("role") in ("Admin", "Owner", "Manager")
+    """Return True for workspace roles allowed to view billing and workspace usage.
+    Do not rely only on session['role']; old sessions can be stale after deployment.
+    Always prefer the current DB role and keep session in sync."""
+    allowed = {
+        "admin", "owner", "workspaceowner", "superadmin",
+        "manager", "projectmanager"
+    }
+    role = ""
+    try:
+        role = get_user_role() or ""
+        if role:
+            session["role"] = role
+    except Exception:
+        role = session.get("role", "")
+    return _billing_role_key(role) in allowed
 
 def _billing_profile_dict(row):
     if row: return dict(row)
@@ -9875,10 +9894,12 @@ def _workspace_plan_usage_payload(db):
 @login_required
 def workspace_plan_usage():
     if not _billing_admin_required():
-        return jsonify({"error":"Workspace plan and usage is available to admins/managers only"}), 403
+        return jsonify({"error":"Workspace plan and usage is available to workspace admins/managers only"}), 403
     with get_db() as db:
         _ensure_billing_schema(db)
-        return jsonify(_workspace_plan_usage_payload(db))
+        payload = _workspace_plan_usage_payload(db)
+        payload["access"] = {"can_manage_workspace_usage": True, "role": get_user_role() or session.get("role", "")}
+        return jsonify(payload)
 
 def _ensure_billing_schema(db):
     """Idempotent billing DDL for already-deployed databases.

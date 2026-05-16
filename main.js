@@ -6727,12 +6727,53 @@ function NotifPrefsPanel({cu}){
   </div>`;
 }
 
-function WorkspacePlanUsageCard(){
-  const [data,setData]=useState(null),[err,setErr]=useState('');
-  useEffect(()=>{let off=false;api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:9000}).then(r=>{if(off)return;if(r&&r.error)setErr(r.error);else setData(r);}).catch(()=>!off&&setErr('Could not load plan usage'));return()=>{off=true};},[]);
+function WorkspacePlanUsageCard({cu}){
+  const [data,setData]=useState(null),[err,setErr]=useState(''),[loading,setLoading]=useState(false);
+  const canSee=hasOpsAccess(cu);
+  const load=useCallback(()=>{
+    if(!canSee){setErr('Workspace plan and usage is available to admins/managers only');return;}
+    setLoading(true);setErr('');
+    api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:12000}).then(r=>{
+      if(r&&r.error){setErr(r.error);setData(null);}else{setData(r||{});}
+    }).catch(()=>setErr('Could not load live workspace usage. Please refresh once.')).finally(()=>setLoading(false));
+  },[canSee]);
+  useEffect(()=>{load();},[load]);
   const fmt=v=>Number(v||0)>=999999?'Unlimited':Number(v||0).toLocaleString();
-  const meter=(label,key)=>{const used=Number(data&&data.usage&&data.usage[key]||0),limit=Number(data&&data.limits&&data.limits[key]||0),pct=limit>=999999?8:Math.min(100,Math.round((used/Math.max(limit,1))*100));return html`<div style=${{marginTop:12}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:800,color:'var(--tx2)',marginBottom:6}}><span>${label}</span><span>${used.toLocaleString()} / ${fmt(limit)}</span></div><div style=${{height:7,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:pct+'%',borderRadius:999,background:'linear-gradient(90deg,var(--ac),var(--ac2))'}}></div></div></div>`;};
-  return html`<div class="card" style=${{marginBottom:16}}><div style=${{display:'flex',justifyContent:'space-between',gap:12,alignItems:'flex-start'}}><div><h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3><p style=${{fontSize:12,color:'var(--tx2)',marginBottom:0}}>Workspace-level limits and current usage. This belongs under Settings, not invoice billing.</p></div>${data?html`<span style=${{fontSize:10,fontWeight:900,color:'var(--ac)',background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.24)',padding:'6px 10px',borderRadius:999,textTransform:'uppercase'}}>${data.plan||'starter'}</span>`:null}</div>${err?html`<div style=${{marginTop:12,fontSize:12,color:'var(--tx3)'}}>${err}</div>`:!data?html`<div style=${{marginTop:14}}><span class="spin"></span></div>`:html`<div style=${{marginTop:14}}>${meter('Team members','members')}${meter('Projects','projects')}${meter('Tasks','tasks')}${meter('Invoices','invoices')}</div>`}</div>`;
+  const pct=(used,limit)=>Number(limit||0)>=999999?8:Math.min(100,Math.round((Number(used||0)/Math.max(Number(limit||1),1))*100));
+  const meter=(label,key,sub)=>{const used=Number(data&&data.usage&&data.usage[key]||0),limit=Number(data&&data.limits&&data.limits[key]||0);return html`
+    <div style=${{marginTop:14}}>
+      <div style=${{display:'flex',justifyContent:'space-between',gap:12,fontSize:12,fontWeight:800,color:'var(--tx2)',marginBottom:6}}>
+        <span>${label}</span><span>${used.toLocaleString()} / ${fmt(limit)}</span>
+      </div>
+      <div style=${{height:8,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}>
+        <div style=${{height:'100%',width:pct(used,limit)+'%',borderRadius:999,background:'linear-gradient(90deg,var(--ac),var(--ac2))',transition:'width .45s ease'}}></div>
+      </div>
+      ${sub?html`<div style=${{fontSize:10,color:'var(--tx3)',marginTop:4}}>${sub}</div>`:null}
+    </div>`;};
+  if(!canSee)return html`<div class="card" style=${{marginBottom:16,opacity:.72}}>
+    <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
+    <p style=${{fontSize:12,color:'var(--tx3)',margin:0}}>Workspace plan and usage is available to admins/managers only.</p>
+  </div>`;
+  return html`<div class="card" style=${{marginBottom:16,border:'1px solid rgba(90,140,255,.18)'}}>
+    <div style=${{display:'flex',justifyContent:'space-between',gap:12,alignItems:'flex-start',marginBottom:4}}>
+      <div>
+        <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
+        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:0}}>Live workspace limits and current usage. This is workspace administration, not invoice billing.</p>
+      </div>
+      <div style=${{display:'flex',gap:8,alignItems:'center'}}>
+        ${data?html`<span style=${{fontSize:10,fontWeight:900,color:'var(--ac)',background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.24)',padding:'6px 10px',borderRadius:999,textTransform:'uppercase'}}>${data.plan||'starter'}</span>`:null}
+        <button class="btn brd" style=${{fontSize:11,padding:'6px 10px'}} onClick=${load} disabled=${loading}>${loading?'Loading…':'↻ Refresh'}</button>
+      </div>
+    </div>
+    ${err?html`<div style=${{marginTop:12,padding:'10px 12px',borderRadius:10,border:'1px solid rgba(248,113,113,.25)',background:'rgba(248,113,113,.08)',fontSize:12,color:'var(--rd2)'}}>${err}</div>`:null}
+    ${loading&&!data?html`<div style=${{marginTop:14,fontSize:12,color:'var(--tx3)'}}><span class="spin"></span> Loading live usage…</div>`:null}
+    ${data?html`<div style=${{marginTop:14}}>
+      ${meter('Team members','members','Users active in this workspace')}
+      ${meter('Projects','projects','Projects created in this workspace')}
+      ${meter('Tasks','tasks','Tasks tracked across projects')}
+      ${meter('Invoices','invoices','Invoices created from Billing & Invoices')}
+    </div>`:null}
+  </div>`;
 }
 
 function WorkspaceSettings({cu,onReload}){
@@ -6846,7 +6887,7 @@ function WorkspaceSettings({cu,onReload}){
         </div>
       </div>
 
-      <${WorkspacePlanUsageCard}/>
+      <${WorkspacePlanUsageCard} cu=${cu}/>
 
       <div class="card" style=${{marginBottom:16}}>
         <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🔗 Invite Code</h3>
