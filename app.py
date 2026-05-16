@@ -9833,6 +9833,56 @@ def _billing_profile_dict(row):
         "tax_rate": 18, "invoice_prefix": "INV", "invoice_notes": "", "updated_at": ""
     }
 
+def _ensure_billing_schema(db):
+    """Idempotent billing DDL for already-deployed databases.
+    Older deployments may have the route before all invoice tables/columns exist;
+    keeping this here prevents blank billing pages caused by backend 500s."""
+    stmts = [
+        "CREATE TABLE IF NOT EXISTS workspace_billing_profile (workspace_id TEXT PRIMARY KEY)",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN legal_name TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN billing_email TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN tax_id TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN address_line1 TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN address_line2 TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN city TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN state TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN postal_code TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN country TEXT DEFAULT 'India'",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN currency TEXT DEFAULT 'INR'",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN tax_rate REAL DEFAULT 18",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN invoice_prefix TEXT DEFAULT 'INV'",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN invoice_notes TEXT DEFAULT ''",
+        "ALTER TABLE workspace_billing_profile ADD COLUMN updated_at TEXT DEFAULT ''",
+        "CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY)",
+        "ALTER TABLE invoices ADD COLUMN workspace_id TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN invoice_no TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN customer_name TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN customer_email TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN issue_date TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN due_date TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN status TEXT DEFAULT 'draft'",
+        "ALTER TABLE invoices ADD COLUMN currency TEXT DEFAULT 'INR'",
+        "ALTER TABLE invoices ADD COLUMN subtotal REAL DEFAULT 0",
+        "ALTER TABLE invoices ADD COLUMN tax_total REAL DEFAULT 0",
+        "ALTER TABLE invoices ADD COLUMN total REAL DEFAULT 0",
+        "ALTER TABLE invoices ADD COLUMN notes TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN created_by TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN created TEXT DEFAULT ''",
+        "ALTER TABLE invoices ADD COLUMN updated TEXT DEFAULT ''",
+        "CREATE TABLE IF NOT EXISTS invoice_items (id TEXT PRIMARY KEY)",
+        "ALTER TABLE invoice_items ADD COLUMN workspace_id TEXT DEFAULT ''",
+        "ALTER TABLE invoice_items ADD COLUMN invoice_id TEXT DEFAULT ''",
+        "ALTER TABLE invoice_items ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE invoice_items ADD COLUMN quantity REAL DEFAULT 1",
+        "ALTER TABLE invoice_items ADD COLUMN unit_price REAL DEFAULT 0",
+        "ALTER TABLE invoice_items ADD COLUMN amount REAL DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_invoices_ws_created ON invoices(workspace_id, created)",
+        "CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id)",
+    ]
+    for s in stmts:
+        try: db.execute(s)
+        except Exception: pass
+
 def _next_invoice_no(db, workspace_id, prefix="INV"):
     prefix = re.sub(r"[^A-Za-z0-9-]", "", str(prefix or "INV"))[:12] or "INV"
     year = now_ist().strftime("%Y")
@@ -9850,6 +9900,7 @@ def billing_invoices_overview():
     if not _billing_admin_required():
         return jsonify({"error":"Billing is available to workspace admins/managers only"}),403
     with get_db() as db:
+        _ensure_billing_schema(db)
         profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
         rows = db.execute("SELECT * FROM invoices WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
         invoices = [dict(r) for r in rows]
@@ -9875,6 +9926,7 @@ def billing_save_profile():
     try: vals["tax_rate"] = float(d.get("tax_rate") if d.get("tax_rate") not in (None,"") else 18)
     except Exception: vals["tax_rate"] = 18
     with get_db() as db:
+        _ensure_billing_schema(db)
         db.execute("""INSERT INTO workspace_billing_profile(workspace_id,legal_name,billing_email,tax_id,address_line1,address_line2,city,state,postal_code,country,currency,tax_rate,invoice_prefix,invoice_notes,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(workspace_id) DO UPDATE SET legal_name=excluded.legal_name,billing_email=excluded.billing_email,tax_id=excluded.tax_id,address_line1=excluded.address_line1,address_line2=excluded.address_line2,city=excluded.city,state=excluded.state,postal_code=excluded.postal_code,country=excluded.country,currency=excluded.currency,tax_rate=excluded.tax_rate,invoice_prefix=excluded.invoice_prefix,invoice_notes=excluded.invoice_notes,updated_at=excluded.updated_at""",
@@ -9892,6 +9944,7 @@ def billing_create_invoice():
     if not items:
         return jsonify({"error":"At least one invoice line item is required"}),400
     with get_db() as db:
+        _ensure_billing_schema(db)
         profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
         inv_id = f"inv{int(datetime.now().timestamp()*1000)}"
         inv_no = str(d.get("invoice_no") or "").strip() or _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")
@@ -9929,6 +9982,7 @@ def billing_update_invoice_status(invoice_id):
     if status not in ("draft","sent","paid","overdue","void"):
         return jsonify({"error":"Invalid status"}),400
     with get_db() as db:
+        _ensure_billing_schema(db)
         db.execute("UPDATE invoices SET status=?, updated=? WHERE id=? AND workspace_id=?", (status, ts(), invoice_id, wid()))
         inv = db.execute("SELECT * FROM invoices WHERE id=? AND workspace_id=?", (invoice_id, wid())).fetchone()
         if not inv: return jsonify({"error":"Invoice not found"}),404

@@ -3718,14 +3718,19 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
 
   const [celebTask,setCelebTask]=useState(null);
   const _celebTimeout=useRef(null);
-  const triggerTaskCelebration=(taskTitle,taskProjectId)=>{
-    // Show task celebration immediately, never wait for reload/API polling.
+  const _lastTaskCelebration=useRef({key:'',at:0});
+  const triggerTaskCelebration=(taskTitle,taskProjectId,taskId='')=>{
+    // Show task celebration instantly, but suppress duplicate popups from optimistic update + API echo/reload.
+    const key=String(taskId||taskTitle||'Task')+'|'+String(taskProjectId||'');
+    const now=Date.now();
+    if(_lastTaskCelebration.current.key===key && now-Number(_lastTaskCelebration.current.at||0)<8000)return;
+    _lastTaskCelebration.current={key,at:now};
     setCelebTask({title:taskTitle,projectId:taskProjectId});
     if(_celebTimeout.current)clearTimeout(_celebTimeout.current);
-    _celebTimeout.current=setTimeout(()=>setCelebTask(null),4000);
+    _celebTimeout.current=setTimeout(()=>setCelebTask(null),3200);
   };
   useEffect(()=>{
-    const h=e=>{const d=(e&&e.detail)||{};triggerTaskCelebration(d.title||'Task',d.project||'');};
+    const h=e=>{const d=(e&&e.detail)||{};triggerTaskCelebration(d.title||'Task',d.project||'',d.id||'');};
     window.addEventListener('pt:task-celebrate',h);
     return()=>window.removeEventListener('pt:task-celebrate',h);
   },[]);
@@ -3754,13 +3759,15 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
       }
     }
-    // Trigger celebration if task just completed
+    // Trigger celebration if task just completed. Do not reload immediately, because
+    // stale cache can briefly move the card back to the old stage and then forward again.
     if(p.stage==='completed'||p.stage==='production'){
       const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
-      triggerTaskCelebration(tTitle,p.project);
+      triggerTaskCelebration(tTitle,p.project,p.id||'');
     }
-    // Background reload uses normal cache (server already injected new item)
-    setTimeout(()=>reload(),2000);
+    if(r&&r.id){
+      setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===r.id?{...t,...r}:t)}));
+    }
     return r;
   };
   const delT=async id=>{
@@ -3774,10 +3781,21 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     // Celebration for quick stage change
     if(stage==='completed'||stage==='production'){
       const tk=safe(tasks).find(t=>t.id===tid);
-      if(tk)triggerTaskCelebration(tk.title,tk.project);
+      if(tk)triggerTaskCelebration(tk.title,tk.project,tid);
     }
-    setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===tid?{...t,...payload}:t)}));
-    api.put('/api/tasks/'+tid,payload).then(()=>reload()).catch(()=>reload());
+    const before=safe(tasks).find(t=>t.id===tid);
+    setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===tid?{...t,...payload,_localTs:Date.now()}:t)}));
+    api.put('/api/tasks/'+tid,payload).then(r=>{
+      if(r&&r.error&&before){
+        setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===tid?before:t)}));
+        try{window._pfToast&&window._pfToast('error','Task update failed',String(r.error||'Please retry'));}catch{}
+      }else if(r&&r.id){
+        setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===tid?{...t,...r}:t)}));
+      }
+    }).catch(()=>{
+      if(before)setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===tid?before:t)}));
+      try{window._pfToast&&window._pfToast('error','Task update failed','Please retry.');}catch{}
+    });
   };
 
   // Export filtered tasks as CSV
@@ -10554,48 +10572,97 @@ function ptDmUrl(user,u=null){
 }
 
 
+
 function BillingInvoicesView({cu}){
-  const [loading,setLoading]=useState(true);
+  const today=new Date().toISOString().slice(0,10);
+  const canManageBilling=cu&&['Admin','Owner','Manager'].includes(String(cu.role||''));
+  const [loading,setLoading]=useState(false);
   const [err,setErr]=useState('');
-  const [profile,setProfile]=useState({});
-  const [summary,setSummary]=useState({});
+  const [profile,setProfile]=useState({legal_name:'',billing_email:'',tax_id:'',address_line1:'',address_line2:'',city:'',state:'',postal_code:'',country:'India',currency:'INR',tax_rate:18,invoice_prefix:'INV',invoice_notes:''});
+  const [summary,setSummary]=useState({invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:'INR'});
   const [invoices,setInvoices]=useState([]);
-  const [nextNo,setNextNo]=useState('');
+  const [nextNo,setNextNo]=useState('INV-0001');
   const [tab,setTab]=useState('overview');
   const [saving,setSaving]=useState(false);
-  const [draft,setDraft]=useState({customer_name:'',customer_email:'',issue_date:new Date().toISOString().slice(0,10),due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
+  const [draft,setDraft]=useState({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
   const money=(v,c)=>`${c||profile.currency||summary.currency||'INR'} ${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-  const load=async()=>{setLoading(true);setErr('');const r=await api.get('/api/billing/invoices');if(r&& !r.error){setProfile(r.profile||{});setSummary(r.summary||{});setInvoices(r.invoices||[]);setNextNo(r.next_invoice_no||'');}else setErr((r&&r.error)||'Could not load billing');setLoading(false);};
-  useEffect(()=>{load();},[]);
-  const saveProfile=async()=>{setSaving(true);const r=await api.put('/api/billing/profile',profile);if(r&&!r.error){setProfile(r);await load();}else setErr((r&&r.error)||'Could not save billing profile');setSaving(false);};
+  const load=useCallback(async()=>{
+    setLoading(true);setErr('');
+    try{
+      const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
+      if(r&&!r.error){
+        setProfile({...profile,...(r.profile||{})});
+        setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
+        setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
+        setNextNo(r.next_invoice_no||'INV-0001');
+      }else{
+        setErr((r&&r.error)||'Could not load billing details');
+      }
+    }catch(e){
+      setErr('Could not load billing details. Please refresh once.');
+    }finally{setLoading(false);}
+  },[]);
+  useEffect(()=>{load();},[load]);
   const setItem=(i,k,v)=>setDraft(d=>({...d,items:d.items.map((it,idx)=>idx===i?{...it,[k]:v}:it)}));
-  const subtotal=draft.items.reduce((a,it)=>a+(Number(it.quantity||0)*Number(it.unit_price||0)),0);
+  const subtotal=(draft.items||[]).reduce((a,it)=>a+(Number(it.quantity||0)*Number(it.unit_price||0)),0);
   const taxRate=Number(profile.tax_rate||0); const tax=subtotal*taxRate/100; const total=subtotal+tax;
-  const createInvoice=async()=>{setSaving(true);setErr('');const r=await api.post('/api/billing/invoices',{...draft,currency:profile.currency||'INR',tax_rate:taxRate});if(r&&!r.error){setDraft({customer_name:'',customer_email:'',issue_date:new Date().toISOString().slice(0,10),due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});setTab('invoices');await load();}else setErr((r&&r.error)||'Could not create invoice');setSaving(false);};
-  const updateStatus=async(id,status)=>{await api.put('/api/billing/invoices/'+id+'/status',{status});load();};
-  const card=(label,val,sub,icon)=>html`<div style=${{padding:18,borderRadius:20,background:'linear-gradient(180deg,var(--sf),rgba(255,255,255,.025))',border:'1px solid var(--bd2)',boxShadow:'0 18px 50px rgba(0,0,0,.18)'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><span style=${{fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.4}}>${label}</span><span style=${{fontSize:20}}>${icon}</span></div><div style=${{fontSize:25,fontWeight:950,color:'var(--tx)',lineHeight:1}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)',marginTop:8}}>${sub}</div></div>`;
-  if(loading)return html`<div style=${{padding:24,color:'var(--tx2)'}}>Loading billing workspace…</div>`;
-  if(err&&String(err).includes('admins'))return html`<div style=${{height:'100%',display:'grid',placeItems:'center',padding:24}}><div style=${{maxWidth:460,textAlign:'center',padding:26,border:'1px solid var(--bd)',borderRadius:22,background:'var(--sf)'}}><div style=${{fontSize:42}}>🔐</div><h2 style=${{fontSize:20,color:'var(--tx)'}}>Billing is restricted</h2><p style=${{color:'var(--tx2)',fontSize:13,lineHeight:1.6}}>Only workspace Admins, Owners, and Managers can manage invoice and billing information.</p></div></div>`;
-  return html`<div style=${{height:'100%',overflow:'auto',padding:22,background:'var(--bg)'}}>
+  const saveProfile=async()=>{
+    setSaving(true);setErr('');
+    const optimistic={...profile};
+    try{
+      const r=await api.put('/api/billing/profile',optimistic);
+      if(r&&!r.error){setProfile({...optimistic,...r});try{window._pfToast&&window._pfToast('success','Billing profile saved','Company invoice details updated instantly.');}catch{}}
+      else setErr((r&&r.error)||'Could not save billing profile');
+    }catch(e){setErr('Could not save billing profile');}
+    setSaving(false);
+  };
+  const createInvoice=async()=>{
+    setSaving(true);setErr('');
+    const temp={...draft,id:'tmp_'+Date.now(),invoice_no:nextNo||'INV-0001',currency:profile.currency||'INR',subtotal,tax_total:tax,total,status:draft.status||'draft',created:new Date().toISOString(),items:draft.items};
+    setInvoices(prev=>[temp,...prev]);
+    setSummary(s=>({...s,invoice_count:Number(s.invoice_count||0)+1,outstanding_total:Number(s.outstanding_total||0)+total}));
+    setTab('invoices');
+    try{
+      const r=await api.post('/api/billing/invoices',{...draft,currency:profile.currency||'INR',tax_rate:taxRate});
+      if(r&&!r.error){
+        setInvoices(prev=>prev.map(x=>x.id===temp.id?r:x));
+        setDraft({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
+        load();
+      }else{
+        setInvoices(prev=>prev.filter(x=>x.id!==temp.id));
+        setErr((r&&r.error)||'Could not create invoice');
+      }
+    }catch(e){setInvoices(prev=>prev.filter(x=>x.id!==temp.id));setErr('Could not create invoice');}
+    setSaving(false);
+  };
+  const updateStatus=async(id,status)=>{
+    setInvoices(prev=>prev.map(i=>i.id===id?{...i,status}:i));
+    if(String(id).startsWith('tmp_'))return;
+    try{const r=await api.put('/api/billing/invoices/'+id+'/status',{status});if(r&&r.error)setErr(r.error);}catch(e){setErr('Could not update invoice status');}
+  };
+  const card=(label,val,sub,icon)=>html`<div style=${{padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 18px 50px rgba(15,23,42,.08)'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><span style=${{fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.4}}>${label}</span><span style=${{fontSize:22}}>${icon}</span></div><div style=${{fontSize:25,fontWeight:950,color:'var(--tx)',lineHeight:1}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)',marginTop:8}}>${sub}</div></div>`;
+  return html`<div style=${{height:'100%',minHeight:'calc(100vh - 112px)',overflow:'auto',padding:24,background:'var(--bg)'}}>
     <div style=${{display:'flex',justifyContent:'space-between',gap:14,alignItems:'flex-start',marginBottom:18}}>
-      <div><div style=${{fontSize:28,fontWeight:950,color:'var(--tx)',letterSpacing:-.7}}>Billing & Invoices</div><div style=${{fontSize:13,color:'var(--tx2)',marginTop:5}}>Professional workspace billing center inspired by modern SaaS billing pages: overview, company invoice details, and downloadable-ready invoice history.</div></div>
-      <button class="btn bp" onClick=${()=>setTab('create')}>+ Create invoice</button>
+      <div><div style=${{fontSize:28,fontWeight:950,color:'var(--tx)',letterSpacing:-.7}}>Billing & Invoices</div><div style=${{fontSize:13,color:'var(--tx2)',marginTop:5}}>Manage company billing details, create invoices, and track invoice history from one professional billing center.</div></div>
+      <button class="btn bp" onClick=${()=>setTab('create')} disabled=${!canManageBilling}>+ Create invoice</button>
     </div>
-    ${err?html`<div style=${{marginBottom:14,padding:12,borderRadius:14,background:'rgba(239,68,68,.10)',border:'1px solid rgba(239,68,68,.22)',color:'#fecaca',fontSize:12}}>${err}</div>`:null}
+    ${loading?html`<div style=${{marginBottom:14,padding:12,borderRadius:14,background:'rgba(90,140,255,.10)',border:'1px solid rgba(90,140,255,.20)',color:'var(--tx2)',fontSize:12}}>Loading billing details…</div>`:null}
+    ${err?html`<div style=${{marginBottom:14,padding:12,borderRadius:14,background:'rgba(239,68,68,.10)',border:'1px solid rgba(239,68,68,.22)',color:'var(--rd)',fontSize:12,fontWeight:750}}>${err}</div>`:null}
+    ${!canManageBilling?html`<div style=${{marginBottom:14,padding:14,borderRadius:16,background:'rgba(245,158,11,.10)',border:'1px solid rgba(245,158,11,.22)',color:'var(--tx2)',fontSize:13}}>Billing is visible here, but only Admins, Owners, and Managers can create invoices or update billing details.</div>`:null}
     <div style=${{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
       ${[['overview','Overview'],['invoices','Invoices'],['profile','Company details'],['create','Create invoice']].map(([id,l])=>html`<button class=${'chip '+(tab===id?'on':'')} onClick=${()=>setTab(id)}>${l}</button>`)}
     </div>
-    ${tab==='overview'?html`<>
+    ${tab==='overview'?html`<div>
       <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:13,marginBottom:16}}>
-        ${card('Total invoices',summary.invoice_count||0,'Generated in this workspace','🧾')}
+        ${card('Total invoices',summary.invoice_count||invoices.length,'Generated in this workspace','🧾')}
         ${card('Paid revenue',money(summary.paid_total),'Marked as paid','✅')}
         ${card('Outstanding',money(summary.outstanding_total),'Draft, sent, or overdue','⏳')}
-        ${card('Next invoice no.',nextNo||'—','Auto-generated from prefix','🔢')}
+        ${card('Next invoice no.',nextNo||'INV-0001','Auto-generated from prefix','🔢')}
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'1.2fr .8fr',gap:14}}>
+      <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1.2fr) minmax(280px,.8fr)',gap:14}}>
         <div style=${{padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
           <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)',marginBottom:10}}>Recent invoice history</div>
-          ${(invoices||[]).slice(0,6).length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${invoices.slice(0,6).map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr 130px 90px',gap:10,alignItems:'center',padding:12,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13}}>${inv.invoice_no}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_name||'Customer'} · ${inv.issue_date||''}</div></div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13,textAlign:'right'}}>${money(inv.total,inv.currency)}</div><span style=${{justifySelf:'end',fontSize:10,fontWeight:900,textTransform:'uppercase',padding:'5px 8px',borderRadius:999,background:'rgba(90,140,255,.12)',color:'var(--ac)'}}>${inv.status}</span></div>`)}</div>`:html`<div style=${{padding:26,textAlign:'center',color:'var(--tx3)'}}>No invoices yet. Create your first invoice to start billing history.</div>`}
+          ${(invoices||[]).slice(0,6).length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${invoices.slice(0,6).map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr 130px 90px',gap:10,alignItems:'center',padding:12,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13}}>${inv.invoice_no}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_name||'Customer'} · ${inv.issue_date||''}</div></div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13,textAlign:'right'}}>${money(inv.total,inv.currency)}</div><span style=${{justifySelf:'end',fontSize:10,fontWeight:900,textTransform:'uppercase',padding:'5px 8px',borderRadius:999,background:'rgba(90,140,255,.12)',color:'var(--ac)'}}>${inv.status||'draft'}</span></div>`)}</div>`:html`<div style=${{padding:28,textAlign:'center',color:'var(--tx3)',border:'1px dashed var(--bd)',borderRadius:16}}>No invoices yet. Create your first invoice to start billing history.</div>`}
         </div>
         <div style=${{padding:18,borderRadius:22,background:'linear-gradient(180deg,rgba(90,140,255,.12),var(--sf))',border:'1px solid var(--bd)'}}>
           <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)',marginBottom:12}}>Company invoice profile</div>
@@ -10608,39 +10675,35 @@ function BillingInvoicesView({cu}){
           <button class="btn bg" style=${{marginTop:16,width:'100%',justifyContent:'center'}} onClick=${()=>setTab('profile')}>Update invoice details</button>
         </div>
       </div>
-    </>`:null}
-    ${tab==='invoices'?html`<div style=${{border:'1px solid var(--bd)',borderRadius:22,overflow:'hidden',background:'var(--sf)'}}>
-      <div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 110px',gap:12,padding:'12px 14px',background:'var(--sf2)',borderBottom:'1px solid var(--bd)',fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase'}}> <span>Invoice</span><span>Customer</span><span>Date</span><span>Total</span><span>Status</span></div>
-      ${(invoices||[]).length?invoices.map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 110px',gap:12,padding:'13px 14px',borderBottom:'1px solid var(--bd)',alignItems:'center'}}>
-        <div style=${{fontWeight:900,color:'var(--tx)'}}>${inv.invoice_no}</div><div><div style=${{fontSize:13,color:'var(--tx)',fontWeight:800}}>${inv.customer_name||'Customer'}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_email||'No email'}</div></div><div style=${{fontSize:12,color:'var(--tx2)'}}>${inv.issue_date||'—'}</div><div style=${{fontWeight:900,color:'var(--tx)'}}>${money(inv.total,inv.currency)}</div><select class="inp" value=${inv.status} onChange=${e=>updateStatus(inv.id,e.target.value)} style=${{height:32,fontSize:11}}><option>draft</option><option>sent</option><option>paid</option><option>overdue</option><option>void</option></select>
-      </div>`):html`<div style=${{padding:30,textAlign:'center',color:'var(--tx3)'}}>No invoices created yet.</div>`}
     </div>`:null}
-    ${tab==='profile'?html`<div style=${{maxWidth:920,padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+    ${tab==='invoices'?html`<div style=${{border:'1px solid var(--bd)',borderRadius:22,overflow:'hidden',background:'var(--sf)'}}>
+      <div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 120px',gap:12,padding:'12px 14px',background:'var(--sf2)',borderBottom:'1px solid var(--bd)',fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase'}}><span>Invoice</span><span>Customer</span><span>Date</span><span>Total</span><span>Status</span></div>
+      ${(invoices||[]).length?invoices.map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 120px',gap:12,padding:'13px 14px',borderBottom:'1px solid var(--bd)',alignItems:'center'}}><div style=${{fontWeight:900,color:'var(--tx)'}}>${inv.invoice_no}</div><div><div style=${{fontSize:13,color:'var(--tx)',fontWeight:800}}>${inv.customer_name||'Customer'}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_email||'No email'}</div></div><div style=${{fontSize:12,color:'var(--tx2)'}}>${inv.issue_date||'—'}</div><div style=${{fontWeight:900,color:'var(--tx)'}}>${money(inv.total,inv.currency)}</div><select class="inp" disabled=${!canManageBilling} value=${inv.status||'draft'} onChange=${e=>updateStatus(inv.id,e.target.value)} style=${{height:34,fontSize:11}}><option>draft</option><option>sent</option><option>paid</option><option>overdue</option><option>void</option></select></div>`):html`<div style=${{padding:34,textAlign:'center',color:'var(--tx3)'}}>No invoices created yet.</div>`}
+    </div>`:null}
+    ${tab==='profile'?html`<div style=${{maxWidth:960,padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
       <div style=${{fontSize:16,fontWeight:900,color:'var(--tx)',marginBottom:14}}>Company invoice details</div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:12}}>
-        ${[['legal_name','Legal company name'],['billing_email','Billing email'],['tax_id','GST / Tax ID'],['country','Country'],['address_line1','Address line 1'],['address_line2','Address line 2'],['city','City'],['state','State'],['postal_code','Postal code'],['currency','Currency'],['invoice_prefix','Invoice prefix'],['tax_rate','Tax rate %']].map(([k,l])=>html`<label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>${l}<input class="inp" value=${profile[k]||''} onInput=${e=>setProfile({...profile,[k]:e.target.value})} style=${{marginTop:6}}/></label>`)}
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:12}}>
+        ${[['legal_name','Legal company name'],['billing_email','Billing email'],['tax_id','GST / Tax ID'],['country','Country'],['address_line1','Address line 1'],['address_line2','Address line 2'],['city','City'],['state','State'],['postal_code','Postal code'],['currency','Currency'],['invoice_prefix','Invoice prefix'],['tax_rate','Tax rate %']].map(([k,l])=>html`<label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>${l}<input class="inp" disabled=${!canManageBilling} value=${profile[k]||''} onInput=${e=>setProfile({...profile,[k]:e.target.value})} style=${{marginTop:6}}/></label>`)}
       </div>
-      <label style=${{display:'block',marginTop:12,fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>Default invoice notes<textarea class="inp" value=${profile.invoice_notes||''} onInput=${e=>setProfile({...profile,invoice_notes:e.target.value})} style=${{marginTop:6,minHeight:82}}></textarea></label>
-      <button class="btn bp" disabled=${saving} onClick=${saveProfile} style=${{marginTop:14}}>${saving?'Saving…':'Save company details'}</button>
+      <label style=${{display:'block',marginTop:12,fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>Default invoice notes<textarea class="inp" disabled=${!canManageBilling} value=${profile.invoice_notes||''} onInput=${e=>setProfile({...profile,invoice_notes:e.target.value})} style=${{marginTop:6,minHeight:82}}></textarea></label>
+      <button class="btn bp" disabled=${saving||!canManageBilling} onClick=${saveProfile} style=${{marginTop:14}}>${saving?'Saving…':'Save company details'}</button>
     </div>`:null}
     ${tab==='create'?html`<div style=${{maxWidth:980,padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
       <div style=${{display:'flex',justifyContent:'space-between',gap:12,marginBottom:14}}><div><div style=${{fontSize:16,fontWeight:900,color:'var(--tx)'}}>Create invoice</div><div style=${{fontSize:12,color:'var(--tx3)'}}>Next number: ${nextNo||'auto'}</div></div><div style=${{fontSize:18,fontWeight:950,color:'var(--tx)'}}>${money(total)}</div></div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:12,marginBottom:14}}>
-        <input class="inp" placeholder="Customer / company name" value=${draft.customer_name} onInput=${e=>setDraft({...draft,customer_name:e.target.value})}/>
-        <input class="inp" placeholder="Customer email" value=${draft.customer_email} onInput=${e=>setDraft({...draft,customer_email:e.target.value})}/>
-        <input class="inp" type="date" value=${draft.issue_date} onInput=${e=>setDraft({...draft,issue_date:e.target.value})}/>
-        <input class="inp" type="date" value=${draft.due_date} onInput=${e=>setDraft({...draft,due_date:e.target.value})}/>
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:10,marginBottom:12}}>
+        <input class="inp" disabled=${!canManageBilling} placeholder="Customer name" value=${draft.customer_name} onInput=${e=>setDraft({...draft,customer_name:e.target.value})}/>
+        <input class="inp" disabled=${!canManageBilling} placeholder="Customer email" value=${draft.customer_email} onInput=${e=>setDraft({...draft,customer_email:e.target.value})}/>
+        <input class="inp" disabled=${!canManageBilling} type="date" value=${draft.issue_date} onInput=${e=>setDraft({...draft,issue_date:e.target.value})}/>
+        <input class="inp" disabled=${!canManageBilling} type="date" value=${draft.due_date} onInput=${e=>setDraft({...draft,due_date:e.target.value})}/>
       </div>
       <div style=${{border:'1px solid var(--bd)',borderRadius:16,overflow:'hidden'}}>
-        <div style=${{display:'grid',gridTemplateColumns:'1fr 100px 140px 120px',gap:10,padding:10,background:'var(--sf2)',fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}><span>Description</span><span>Qty</span><span>Unit price</span><span>Amount</span></div>
-        ${draft.items.map((it,i)=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr 100px 140px 120px',gap:10,padding:10,borderTop:'1px solid var(--bd)'}}>
-          <input class="inp" value=${it.description} onInput=${e=>setItem(i,'description',e.target.value)}/><input class="inp" type="number" value=${it.quantity} onInput=${e=>setItem(i,'quantity',e.target.value)}/><input class="inp" type="number" value=${it.unit_price} onInput=${e=>setItem(i,'unit_price',e.target.value)}/><div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',fontWeight:900,color:'var(--tx)'}}>${money(Number(it.quantity||0)*Number(it.unit_price||0))}</div>
-        </div>`)}
+        <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 90px 130px 120px',gap:10,padding:10,background:'var(--sf2)',fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}><span>Description</span><span>Qty</span><span>Unit price</span><span>Amount</span></div>
+        ${(draft.items||[]).map((it,i)=>html`<div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 90px 130px 120px',gap:10,padding:10,borderTop:'1px solid var(--bd)'}}><input class="inp" disabled=${!canManageBilling} value=${it.description} onInput=${e=>setItem(i,'description',e.target.value)}/><input class="inp" disabled=${!canManageBilling} type="number" value=${it.quantity} onInput=${e=>setItem(i,'quantity',e.target.value)}/><input class="inp" disabled=${!canManageBilling} type="number" value=${it.unit_price} onInput=${e=>setItem(i,'unit_price',e.target.value)}/><div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',fontWeight:900,color:'var(--tx)'}}>${money(Number(it.quantity||0)*Number(it.unit_price||0))}</div></div>`)}
       </div>
-      <button class="btn bg" style=${{marginTop:10}} onClick=${()=>setDraft({...draft,items:[...draft.items,{description:'',quantity:1,unit_price:0}]})}>+ Add line item</button>
+      <button class="btn bg" disabled=${!canManageBilling} style=${{marginTop:10}} onClick=${()=>setDraft({...draft,items:[...(draft.items||[]),{description:'',quantity:1,unit_price:0}]})}>+ Add line item</button>
       <div style=${{marginTop:14,display:'flex',justifyContent:'flex-end'}}><div style=${{width:320,padding:14,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)',fontSize:13,color:'var(--tx2)'}}><div style=${{display:'flex',justifyContent:'space-between',marginBottom:6}}><span>Subtotal</span><b>${money(subtotal)}</b></div><div style=${{display:'flex',justifyContent:'space-between',marginBottom:6}}><span>Tax ${taxRate}%</span><b>${money(tax)}</b></div><div style=${{display:'flex',justifyContent:'space-between',fontSize:18,color:'var(--tx)',borderTop:'1px solid var(--bd)',paddingTop:8}}><span>Total</span><b>${money(total)}</b></div></div></div>
-      <textarea class="inp" placeholder="Invoice notes" value=${draft.notes} onInput=${e=>setDraft({...draft,notes:e.target.value})} style=${{marginTop:14,minHeight:80}}></textarea>
-      <button class="btn bp" disabled=${saving} onClick=${createInvoice} style=${{marginTop:14}}>${saving?'Creating…':'Create invoice'}</button>
+      <textarea class="inp" disabled=${!canManageBilling} placeholder="Invoice notes" value=${draft.notes} onInput=${e=>setDraft({...draft,notes:e.target.value})} style=${{marginTop:14,minHeight:80}}></textarea>
+      <button class="btn bp" disabled=${saving||!canManageBilling} onClick=${createInvoice} style=${{marginTop:14}}>${saving?'Creating…':'Create invoice'}</button>
     </div>`:null}
   </div>`;
 }
@@ -11198,8 +11261,18 @@ function App(){
           try{
             const msg=JSON.parse(e.data);
             if(msg.type==='connected')return; // initial handshake
-            if(['task_updated','project_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-              // Bust cache and reload — the server has already bust its own cache
+            if(['task_updated','task.updated','task.deleted'].includes(msg.type)){
+              const d=msg.data||{};
+              if(d.id){
+                setData&&setData(prev=>{
+                  const tasks=Array.isArray(prev.tasks)?prev.tasks:[];
+                  if(d.action==='deleted'||msg.type==='task.deleted')return {...prev,tasks:tasks.filter(t=>String(t.id)!==String(d.id))};
+                  return {...prev,tasks:tasks.map(t=>String(t.id)===String(d.id)?{...t,...(d.stage?{stage:d.stage}:{}),...(d.project?{project:d.project}:{}),...(d.assignee?{assignee:d.assignee}:{}),_localTs:Date.now()}:t)};
+                });
+              }
+              return;
+            }
+            if(['project_updated','ticket_updated','notification_updated','reminder_updated','task.created','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
               load(teamCtx);
             }
             if(msg.type==='notification'||msg.type==='notification_updated'){
@@ -11686,7 +11759,18 @@ function App(){
     const onRefresh=()=>load(undefined,{bust:true});
     const onRealtime=(e)=>{
       const msg=e.detail||{};
-      if(['project_updated','task_updated','ticket_updated','notification_updated','reminder_updated','task.created','task.updated','task.deleted','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
+      if(['task_updated','task.updated','task.deleted'].includes(msg.type)){
+        const d=msg.data||{};
+        if(d.id){
+          setData&&setData(prev=>{
+            const tasks=Array.isArray(prev.tasks)?prev.tasks:[];
+            if(d.action==='deleted'||msg.type==='task.deleted')return {...prev,tasks:tasks.filter(t=>String(t.id)!==String(d.id))};
+            return {...prev,tasks:tasks.map(t=>String(t.id)===String(d.id)?{...t,...(d.stage?{stage:d.stage}:{}),...(d.project?{project:d.project}:{}),...(d.assignee?{assignee:d.assignee}:{}),_localTs:Date.now()}:t)};
+          });
+        }
+        return;
+      }
+      if(['project_updated','ticket_updated','notification_updated','reminder_updated','task.created','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
         onRefresh();
       }
     };
