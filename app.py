@@ -2904,6 +2904,10 @@ def init_db():
             "ALTER TABLE workspaces ADD COLUMN plan_expires TEXT DEFAULT ''",
             "ALTER TABLE workspaces ADD COLUMN trial_ends TEXT DEFAULT ''",
             "ALTER TABLE workspaces ADD COLUMN seat_count INTEGER DEFAULT 5",
+            "ALTER TABLE workspaces ADD COLUMN custom_limits_json TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN storage_limit_mb INTEGER DEFAULT 0",
+            "ALTER TABLE workspaces ADD COLUMN billing_status TEXT DEFAULT 'active'",
+            "ALTER TABLE workspaces ADD COLUMN internal_notes TEXT DEFAULT ''",
             # ── User profile celebrations / personal moments ──
             "ALTER TABLE users ADD COLUMN birth_date TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN birth_date_visibility TEXT DEFAULT 'private'",
@@ -5958,9 +5962,10 @@ def upload_file():
 
     with get_db() as db:
         used=_workspace_upload_bytes(db, ws_id)
-        ws_plan_row = db.execute("SELECT plan FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+        ws_plan_row = db.execute("SELECT plan, custom_limits_json, storage_limit_mb FROM workspaces WHERE id=?", (ws_id,)).fetchone()
         ws_plan = (ws_plan_row["plan"] if ws_plan_row and "plan" in ws_plan_row.keys() else "starter") or "starter"
-        plan_quota_bytes = _workspace_storage_limit_bytes_for_plan(ws_plan)
+        limits = _limits_for_plan(ws_plan, ws_plan_row["custom_limits_json"] if ws_plan_row and "custom_limits_json" in ws_plan_row.keys() else "", ws_plan_row["storage_limit_mb"] if ws_plan_row and "storage_limit_mb" in ws_plan_row.keys() else 0)
+        plan_quota_bytes = int(limits.get("storage_mb", 0)) * 1024 * 1024
         if used + len(data) > plan_quota_bytes:
             quota_mb = int(plan_quota_bytes / (1024 * 1024))
             return jsonify({"error": f"Workspace storage limit exceeded for your {str(ws_plan).title()} plan ({quota_mb} MB)."}),413
@@ -9292,6 +9297,8 @@ def admin_api_user_change_role(uid):
 
 # ── Admin Panel ────────────────────────────────────────────────────────────────
 
+@app.route("/manage")
+@app.route("/manage/<path:workspace>")
 @app.route("/adminpanel")
 @app.route("/adminpanel/<path:workspace>")
 def admin_panel_page(workspace=None):
@@ -9350,26 +9357,61 @@ def admin_api_dashboard():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         with get_db() as db:
-            total_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            total_ws    = db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
-            # active = logged in within last 7 days (if last_active column exists)
-            try:
-                cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-                active = db.execute(
-                    "SELECT COUNT(*) FROM users WHERE last_active > ?", (cutoff,)
-                ).fetchone()[0]
-            except Exception:
-                active = total_users
-            # revenue placeholder — extend when billing is wired
-            revenue = 0
+            total_users = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+            total_ws    = db.execute("SELECT COUNT(*) AS c FROM workspaces").fetchone()["c"]
+            total_projects = _global_count(db, "projects")
+            total_tasks    = _global_count(db, "tasks")
+            open_tickets   = _global_count(db, "tickets", "status NOT IN ('closed','resolved','done')")
+            storage_bytes_row = db.execute("SELECT COALESCE(SUM(size),0) AS total FROM files").fetchone()
+            storage_bytes = int((storage_bytes_row and storage_bytes_row["total"]) or 0)
+            plans = db.execute("SELECT COALESCE(plan,'starter') AS plan, COUNT(*) AS c FROM workspaces GROUP BY COALESCE(plan,'starter')").fetchall()
+            recent = db.execute("SELECT id, name, plan, created FROM workspaces ORDER BY created DESC LIMIT 8").fetchall()
         return jsonify({
-            "total_users": total_users,
-            "total_workspaces": total_ws,
-            "active_users": active,
-            "revenue": revenue,
+            "ok": True,
+            "total_users": int(total_users or 0),
+            "total_workspaces": int(total_ws or 0),
+            "total_projects": int(total_projects or 0),
+            "total_tasks": int(total_tasks or 0),
+            "open_tickets": int(open_tickets or 0),
+            "storage_mb": round(storage_bytes / (1024*1024), 2),
+            "plan_counts": {str(r["plan"] or "starter"): int(r["c"] or 0) for r in plans},
+            "recent_workspaces": [dict(r) for r in recent],
         })
     except Exception as e:
+        log.exception("admin dashboard failed")
         return jsonify({"error": str(e)}), 500
+
+
+def _global_count(db, table, extra_where=""):
+    try:
+        cols = _table_columns(db, table)
+        if not cols:
+            return 0
+        where = []
+        if "deleted_at" in cols:
+            where.append("COALESCE(deleted_at,'')=''")
+        elif "deleted" in cols:
+            where.append("COALESCE(deleted,0)=0")
+        if extra_where:
+            where.append(extra_where)
+        sql = "SELECT COUNT(*) AS c FROM " + table + ((" WHERE " + " AND ".join(where)) if where else "")
+        row = db.execute(sql).fetchone()
+        return int((row and row["c"]) or 0)
+    except Exception:
+        return 0
+
+
+def _workspace_admin_usage(db, ws_id):
+    storage_bytes = _workspace_upload_bytes(db, ws_id)
+    return {
+        "members": _safe_workspace_count(db, "users", ws_id),
+        "projects": _safe_workspace_count(db, "projects", ws_id),
+        "tasks": _safe_workspace_count(db, "tasks", ws_id),
+        "tickets": _safe_workspace_count(db, "tickets", ws_id),
+        "invoices": _safe_workspace_count(db, "invoices", ws_id),
+        "storage_mb": round(float(storage_bytes) / (1024 * 1024), 2),
+        "storage_bytes": int(storage_bytes),
+    }
 
 @app.route("/api/admin/workspaces")
 def admin_api_workspaces():
@@ -9378,15 +9420,28 @@ def admin_api_workspaces():
     try:
         with get_db() as db:
             rows = db.execute("""
-    SELECT w.id, w.name, w.invite_code, w.plan, w.created,
+                SELECT w.id, w.name, w.invite_code, COALESCE(w.plan,'starter') AS plan, w.created,
+                       COALESCE(w.storage_limit_mb,0) AS storage_limit_mb,
+                       COALESCE(w.billing_status,'active') AS billing_status,
+                       COALESCE(w.suspended,0) AS suspended,
                        COUNT(u.id) AS member_count
                 FROM workspaces w
                 LEFT JOIN users u ON u.workspace_id = w.id
-                GROUP BY w.id, w.name, w.invite_code, w.plan, w.created
+                GROUP BY w.id, w.name, w.invite_code, w.plan, w.created, w.storage_limit_mb, w.billing_status, w.suspended
                 ORDER BY w.created DESC
             """).fetchall()
-        return jsonify({"workspaces": [dict(r) for r in rows]})
+            out=[]
+            for r in rows:
+                d=dict(r)
+                usage=_workspace_admin_usage(db, d["id"])
+                d.update({
+                    "usage": usage,
+                    "limits": _workspace_limits_from_db(db, d["id"]),
+                })
+                out.append(d)
+        return jsonify({"ok": True, "workspaces": out})
     except Exception as e:
+        log.exception("admin workspaces failed")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/workspaces/<ws_id>")
@@ -9402,8 +9457,15 @@ def admin_api_workspace_detail(ws_id):
                 "SELECT id, name, email, role, created FROM users WHERE workspace_id=? ORDER BY created",
                 (ws_id,)
             ).fetchall()
-        return jsonify({"workspace": dict(ws), "members": [dict(m) for m in members]})
+            tickets = db.execute(
+                "SELECT id, title, status, priority, assignee, created FROM tickets WHERE workspace_id=? ORDER BY created DESC LIMIT 25",
+                (ws_id,)
+            ).fetchall()
+            usage = _workspace_admin_usage(db, ws_id)
+            limits = _workspace_limits_from_db(db, ws_id)
+        return jsonify({"ok": True, "workspace": dict(ws), "usage": usage, "limits": limits, "members": [dict(m) for m in members], "tickets": [dict(t) for t in tickets]})
     except Exception as e:
+        log.exception("admin workspace detail failed")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/users")
@@ -9413,13 +9475,14 @@ def admin_api_users():
     try:
         with get_db() as db:
             rows = db.execute("""
-    SELECT u.id, u.name, u.email, u.role, u.created,
-                       w.name AS workspace_name
+                SELECT u.id, u.name, u.email, u.role, u.created, u.workspace_id,
+                       w.name AS workspace_name, COALESCE(w.plan,'starter') AS workspace_plan
                 FROM users u
                 LEFT JOIN workspaces w ON w.id = u.workspace_id
                 ORDER BY u.created DESC
+                LIMIT 500
             """).fetchall()
-        return jsonify({"users": [dict(r) for r in rows]})
+        return jsonify({"ok": True, "users": [dict(r) for r in rows]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -9445,7 +9508,7 @@ def admin_api_audit():
             rows = db.execute(
                 "SELECT * FROM audit_log ORDER BY created DESC LIMIT 200"
             ).fetchall()
-        return jsonify({"logs": [dict(r) for r in rows]})
+        return jsonify({"ok": True, "logs": [dict(r) for r in rows]})
     except Exception as e:
         return jsonify({"logs": [], "warning": str(e)}), 200
 
@@ -9455,15 +9518,26 @@ def admin_api_set_plan():
         return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
     ws_id = data.get("workspace_id")
-    plan  = data.get("plan", "starter")
-    if plan not in ("starter", "team", "enterprise"):
+    plan  = str(data.get("plan", "starter")).lower().strip()
+    if plan not in ("starter", "team", "business", "enterprise"):
         return jsonify({"error": "Invalid plan"}), 400
+    storage_limit_mb = int(float(data.get("storage_limit_mb") or 0))
+    custom_limits = data.get("custom_limits") or {}
+    if not isinstance(custom_limits, dict):
+        custom_limits = {}
+    clean_limits = {}
+    for k in ("workspaces", "members", "projects", "tasks", "invoices", "storage_mb"):
+        if str(custom_limits.get(k, "")).strip() != "":
+            try:
+                clean_limits[k] = int(float(custom_limits.get(k)))
+            except Exception:
+                pass
     try:
         with get_db() as db:
-            db.execute("UPDATE workspaces SET plan=? WHERE id=?", (plan, ws_id))
+            db.execute("UPDATE workspaces SET plan=?, storage_limit_mb=?, custom_limits_json=? WHERE id=?", (plan, storage_limit_mb, json.dumps(clean_limits), ws_id))
             db.commit()
-        _audit("set_plan", ws_id, f"Plan changed to {plan}")
-        return jsonify({"ok": True})
+        _audit("set_plan", ws_id, f"Plan changed to {plan}; storage override {storage_limit_mb or 'default'} MB; custom limits {clean_limits}")
+        return jsonify({"ok": True, "limits": _limits_for_plan(plan, json.dumps(clean_limits), storage_limit_mb)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -10214,6 +10288,36 @@ WORKSPACE_PLAN_USAGE_LIMITS = {
     "enterprise": {"workspaces": 9999, "members": 9999, "projects": 9999, "tasks": 99999,"invoices": 9999, "storage_mb": 500 * 1024},
 }
 
+def _limits_for_plan(plan, custom_limits_json='', storage_limit_mb=0):
+    """Return commercial limits for a workspace. Admin panel can increase
+    storage or other limits after payment without changing global plan defaults."""
+    plan_key = str(plan or "starter").lower()
+    limits = dict(WORKSPACE_PLAN_USAGE_LIMITS.get(plan_key, WORKSPACE_PLAN_USAGE_LIMITS["starter"]))
+    try:
+        extra = json.loads(custom_limits_json or "{}") if custom_limits_json else {}
+        if isinstance(extra, dict):
+            for k in ("workspaces", "members", "projects", "tasks", "invoices", "storage_mb"):
+                if k in extra and str(extra[k]).strip() != "":
+                    limits[k] = int(float(extra[k]))
+    except Exception:
+        pass
+    try:
+        override_storage = int(storage_limit_mb or 0)
+        if override_storage > 0:
+            limits["storage_mb"] = override_storage
+    except Exception:
+        pass
+    return limits
+
+def _workspace_limits_from_db(db, workspace_id):
+    try:
+        row = db.execute("SELECT plan, custom_limits_json, storage_limit_mb FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        if not row:
+            return dict(WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+        return _limits_for_plan(row.get("plan") if hasattr(row, 'get') else row["plan"], row.get("custom_limits_json", "") if hasattr(row, 'get') else (row["custom_limits_json"] if "custom_limits_json" in row.keys() else ""), row.get("storage_limit_mb", 0) if hasattr(row, 'get') else (row["storage_limit_mb"] if "storage_limit_mb" in row.keys() else 0))
+    except Exception:
+        return dict(WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+
 # Keep the older /api/usage endpoint aligned with the same plan config.
 PLAN_LIMITS = {
     plan: {
@@ -10229,6 +10333,15 @@ def _workspace_storage_limit_bytes_for_plan(plan):
     cfg = WORKSPACE_PLAN_USAGE_LIMITS.get(str(plan or "starter").lower(), WORKSPACE_PLAN_USAGE_LIMITS["starter"])
     mb = int(cfg.get("storage_mb") or 0)
     return mb * 1024 * 1024 if mb > 0 else WORKSPACE_UPLOAD_QUOTA_BYTES
+
+def _workspace_storage_limit_bytes(workspace_id):
+    try:
+        with get_db() as db:
+            limits = _workspace_limits_from_db(db, workspace_id)
+        mb = int(limits.get("storage_mb") or 0)
+        return mb * 1024 * 1024 if mb > 0 else WORKSPACE_UPLOAD_QUOTA_BYTES
+    except Exception:
+        return WORKSPACE_UPLOAD_QUOTA_BYTES
 
 def _live_workspace_role(user_id=None, workspace_id=None):
     try:
@@ -10255,7 +10368,7 @@ def workspace_plan_usage():
     try:
         with get_db() as db:
             # Read-only endpoint. Never run schema migrations/ALTER here.
-            ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+            ws = db.execute("SELECT id, name, plan, custom_limits_json, storage_limit_mb FROM workspaces WHERE id=?", (wid(),)).fetchone()
             # Use schema-aware counters. Some older production databases do not
             # have deleted_at on every table; the previous query failed and showed 0/limit.
             storage_bytes = _workspace_upload_bytes(db, wid())
@@ -10269,7 +10382,7 @@ def workspace_plan_usage():
                 "storage_bytes": int(storage_bytes),
             }
         plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
-        limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+        limits = _limits_for_plan(plan, ws["custom_limits_json"] if ws and "custom_limits_json" in ws.keys() else "", ws["storage_limit_mb"] if ws and "storage_limit_mb" in ws.keys() else 0)
         return jsonify({"ok": True, "plan": plan, "limits": limits, "usage": usage, "role": role, "updated_at": ts()})
     except Exception:
         log.exception("workspace plan usage failed")
