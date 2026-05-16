@@ -103,7 +103,7 @@ def vault_decrypt(token: str) -> str:
         return token
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session, Response, send_file, send_from_directory, redirect
+from flask import Flask, request, jsonify, session, Response, send_file, send_from_directory, redirect, make_response
 from flask_cors import CORS
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -3500,7 +3500,7 @@ def login():
         result = dict(u)
         result.pop("totp_secret", None)
         result.pop("password", None)
-        result.pop("avatar_data", None)
+        # Keep avatar_data for the logged-in user only so profile photo survives refresh.
         # ── Include workspace-scoped dashboard URL in response ────────────────
         try:
             ws_row = db.execute(
@@ -4703,7 +4703,7 @@ def me():
     try:
         import re as _re
         rows = _raw_pg(
-            "SELECT u.id,u.name,u.email,u.role,u.avatar,u.color,u.workspace_id,u.last_active,"
+            "SELECT u.id,u.name,u.email,u.role,u.avatar,u.color,u.avatar_data,u.workspace_id,u.last_active,"
             "u.two_fa_enabled,u.totp_verified,u.logged_out_at,u.birth_date,u.birth_date_visibility,u.first_login_seen,"
             "w.name as _ws_name, w.workspace_slug as _ws_slug "
             "FROM users u LEFT JOIN workspaces w ON w.id=u.workspace_id "
@@ -4951,7 +4951,8 @@ def get_users():
     with get_db() as db:
         rows = db.execute(
             """SELECT id,workspace_id,name,email,role,avatar,color,created,
-               two_fa_enabled,totp_verified,last_active,birth_date,birth_date_visibility
+               two_fa_enabled,totp_verified,last_active,birth_date,birth_date_visibility,
+               CASE WHEN avatar_data IS NOT NULL AND avatar_data <> '' THEN 1 ELSE 0 END AS has_avatar
                FROM users WHERE workspace_id=? ORDER BY name""",
             (wid(),)).fetchall()
         caller = db.execute("SELECT role FROM users WHERE id=?", (session["user_id"],)).fetchone()
@@ -5029,15 +5030,17 @@ def update_profile():
                 vis = "private"
             db.execute("UPDATE users SET birth_date_visibility=? WHERE id=? AND workspace_id=?",
                        (vis, uid, wid()))
+        # Fast profile save: do not full-bust the entire workspace cache.
+        # Only auth/me, user list, and app-data need refreshing. This keeps birthday/avatar saves instant.
         _evict_me_cache(uid)
-        _cache_bust_ws(wid())
-        u = db.execute("SELECT * FROM users WHERE id=? AND workspace_id=?", (uid, wid())).fetchone()
+        _cache_bust(wid(), "users", "appdata")
+        u = db.execute("""SELECT id,workspace_id,name,email,role,avatar,color,avatar_data,
+                              birth_date,birth_date_visibility,
+                              CASE WHEN avatar_data IS NOT NULL AND avatar_data <> '' THEN 1 ELSE 0 END AS has_avatar
+                       FROM users WHERE id=? AND workspace_id=?""", (uid, wid())).fetchone()
         if not u:
             return jsonify({"error":"Not found"}),404
-        result = dict(u)
-        for k in ("password", "plain_password", "totp_secret"):
-            result.pop(k, None)
-        return jsonify(result)
+        return jsonify(dict(u))
 
 @app.route("/api/notif-prefs", methods=["GET"])
 @login_required
@@ -5201,7 +5204,9 @@ def _fetch_app_data_from_db(ws, team_id, uid):
     with get_db(autocommit=True) as db:
         users = [dict(r) for r in db.execute(
             "SELECT id,name,email,role,avatar,color,workspace_id,last_active,"
-            "two_fa_enabled,totp_verified FROM users WHERE workspace_id=? ORDER BY name",
+            "two_fa_enabled,totp_verified,"
+            "CASE WHEN avatar_data IS NOT NULL AND avatar_data <> '' THEN 1 ELSE 0 END AS has_avatar "
+            "FROM users WHERE workspace_id=? ORDER BY name",
             (ws,)
         ).fetchall()]
         projects = [dict(r) for r in db.execute(proj_sql, proj_params).fetchall()]
@@ -5612,14 +5617,13 @@ def create_task():
                 except: proj_members=[]
         # Build ALL notification rows first, then batch-insert in ONE query
         notif_rows=[]
-        if assignee_user:
+        # Assignment notifications are strictly targeted: only the assigned user gets
+        # create/update/status/delete notifications for this task. Project members
+        # still see project activity inside the channel/system message, but they do
+        # not receive personal notification noise.
+        if assignee_user and d.get("assignee") != session.get("user_id"):
             notif_rows.append((f"n{base_ts}",wid(),"task_assigned",
                                f"{cname} assigned you to '{d['title']}'",d["assignee"],0,ts(),tid,'task'))
-        for i,uid in enumerate(proj_members):
-            if uid==session["user_id"] or uid==d.get("assignee"): continue
-            proj_name=proj["name"] if proj else ""
-            notif_rows.append((f"n{base_ts+10+i}",wid(),"task_assigned",
-                               f"{cname} created task '{d['title']}' in {proj_name}",uid,0,ts(),tid,'task'))
         if notif_rows:
             placeholders=",".join(["(?,?,?,?,?,?,?,?,?)"]*len(notif_rows))
             flat=[v for row in notif_rows for v in row]
@@ -5634,10 +5638,7 @@ def create_task():
             _enqueue_push(push_notification_to_user, db, d["assignee"],
                 f"✅ New task assigned: {d['title']}",
                 f"{cname} assigned you this task [{d.get('priority','medium')}]", _task_url)
-        for uid in proj_members:
-            if uid==session["user_id"] or uid==d.get("assignee"): continue
-            _enqueue_push(push_notification_to_user, *(db,uid,f"📋 New task in {proj['name'] if proj else ''}",
-                      f"{cname} created '{d['title']}'",_task_url))
+        # No project-member push spam for task creation — assignee only.
         # Use RETURNING * result if available; fall back to SELECT only if needed
         if t is None:
             t=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=?",(tid,wid())).fetchone()
@@ -5747,25 +5748,8 @@ def update_task(tid):
                     daemon=True).start()
         if d.get("stage") and d["stage"]!=old_stage:
             base_ts2=int(datetime.now().timestamp()*1000)
-            # Notify project members when a task is marked completed
-            if d["stage"] in ("completed","production") and t["project"]:
-                _comp_proj = db.execute("SELECT members,owner FROM projects WHERE id=? AND workspace_id=?",
-                                        (t["project"],wid())).fetchone()
-                _comp_actor = db.execute("SELECT name FROM users WHERE id=?", (session["user_id"],)).fetchone()
-                _comp_actor_name = _comp_actor["name"] if _comp_actor else "Someone"
-                if _comp_proj:
-                    try: _comp_members = json.loads(_comp_proj["members"] or "[]")
-                    except: _comp_members = []
-                    _notified_completed = set()
-                    for _cm_uid in _comp_members:
-                        if _cm_uid in _notified_completed:
-                            continue
-                        _cm_user = db.execute("SELECT name,email FROM users WHERE id=?", (_cm_uid,)).fetchone()
-                        if _cm_user and _cm_user["email"]:
-                            _notified_completed.add(_cm_uid)
-                            threading.Thread(target=send_task_completed_email,
-                                args=(_cm_user["email"], _cm_user["name"], t["title"], _comp_actor_name, wid()),
-                                daemon=True).start()
+            # Completion/status notifications are assignee-only. Team-wide celebration
+            # stays in the UI/project channel, not personal notifications/email.
             if t["assignee"]:
                 nid=f"n{base_ts2}"
                 db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -5781,23 +5765,22 @@ def update_task(tid):
                 _enqueue_push(push_notification_to_user, *(db, t["assignee"], f"🔄 Task updated: {t['title']}",
                           f"{changer_name} moved it to {d['stage']}", f"/?action=task&id={tid}"))
             if t["project"]:
-                proj=db.execute("SELECT members FROM projects WHERE id=? AND workspace_id=?",(t["project"],wid())).fetchone()
-                if proj:
-                    try: members=json.loads(proj["members"] or "[]")
-                    except: members=[]
-                    actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
-                    aname=actor["name"] if actor else "Someone"
-                    for i2,uid in enumerate(members):
-                        if uid==session["user_id"] or uid==t["assignee"]: continue
-                        nid2=f"n{base_ts2+20+i2}"
-                        db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                                   (nid2,wid(),"status_change",f"{aname} moved '{t['title']}' → {d['stage']}",uid,0,ts(),tid,'task'))
-                        _enqueue_push(push_notification_to_user, *(db, uid, f"🔄 {t['title']} → {d['stage']}",
-                                  f"{aname} updated the task stage", f"/?action=task&id={tid}"))
+                actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+                aname=actor["name"] if actor else "Someone"
                 sysmid=f"m{base_ts2+2}"
                 db.execute("INSERT INTO messages(id,workspace_id,sender,project,content,ts,is_system) VALUES (?,?,?,?,?,?,?)",
                            (sysmid,wid(),"system",t["project"],
                             f"⚡ **{aname}** moved **{t['title']}** → {d['stage'].title()}",ts(),1))
+        # General task edit notification — assignee only, and only when stage did not already notify.
+        if (not d.get("stage") or d.get("stage") == old_stage) and t["assignee"] and t["assignee"] != session.get("user_id"):
+            actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+            aname=actor["name"] if actor else "Someone"
+            nid=f"n{int(datetime.now().timestamp()*1000)+7}"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (nid,wid(),"task_updated",f"{aname} updated task '{t['title']}'",t["assignee"],0,ts(),tid,'task'))
+            _enqueue_push(push_notification_to_user, *(db, t["assignee"], f"✏️ Task updated: {t['title']}",
+                      f"{aname} updated this task", f"/?action=task&id={tid}"))
+
         new_comments=d.get("comments",[])
         old_comments=json.loads(t["comments"] or "[]")
         if len(new_comments)>len(old_comments) and t["project"]:
@@ -5914,7 +5897,7 @@ def del_task(tid):
         if cu_role not in ("Admin","Manager","TeamLead"):
             return jsonify({"error":"Only Admin, Manager, or TeamLead can delete tasks."}),403
         task=db.execute(
-            "SELECT id FROM tasks WHERE id=? AND workspace_id=? AND deleted_at=''",
+            "SELECT id,title,assignee FROM tasks WHERE id=? AND workspace_id=? AND deleted_at=''",
             (tid,wid())
         ).fetchone()
         if not task:
@@ -5924,7 +5907,15 @@ def del_task(tid):
             "UPDATE tasks SET deleted_at=? WHERE id=? AND workspace_id=?",
             (deleted_ts, tid, wid())
         )
-    _cache_bust(wid(), "tasks", "appdata")
+        if task and task["assignee"] and task["assignee"] != session.get("user_id"):
+            actor=db.execute("SELECT name FROM users WHERE id=?",(session["user_id"],)).fetchone()
+            aname=actor["name"] if actor else "Someone"
+            nid=f"n{int(datetime.now().timestamp()*1000)+8}"
+            db.execute("INSERT INTO notifications(id,workspace_id,type,content,user_id,read,ts,entity_id,entity_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (nid,wid(),"task_deleted",f"{aname} deleted task '{task['title']}'",task["assignee"],0,ts(),tid,'task'))
+            _enqueue_push(push_notification_to_user, *(db, task["assignee"], f"🗑️ Task deleted: {task['title']}",
+                      f"{aname} deleted this task", "/"))
+    _cache_bust(wid(), "tasks", "notifications", "notifs", "appdata")
     _sse_publish(wid(), "task_updated", {"id": tid, "action": "deleted"})
     return jsonify({"ok":True,"deleted_at":deleted_ts})
 

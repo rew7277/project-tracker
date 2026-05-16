@@ -342,9 +342,10 @@ function idListHas(v,id){return parseIdList(v).includes(id);}
 
 function Av({u,size=32}){
   const imgSrc=(u&&u.avatar_data&&u.avatar_data.startsWith('data:image'))?u.avatar_data:
-               (u&&u.avatar&&u.avatar.length>10&&u.avatar.startsWith('data:image'))?u.avatar:null;
+               (u&&u.avatar&&u.avatar.length>10&&u.avatar.startsWith('data:image'))?u.avatar:
+               (u&&u.has_avatar&&u.id)?('/api/users/'+encodeURIComponent(u.id)+'/avatar?v='+encodeURIComponent(u.avatar_rev||u.updated||u.last_active||'')):null;
   if(imgSrc){
-    return html`<img src=${imgSrc} class="av" style=${{width:size,height:size,objectFit:'cover',borderRadius:'50%',border:'2px solid rgba(0,0,0,.06)'}}/>`;
+    return html`<img src=${imgSrc} class="av" style=${{width:size,height:size,objectFit:'cover',borderRadius:'50%',border:'2px solid rgba(0,0,0,.06)'}} onError=${e=>{try{e.currentTarget.style.display='none';}catch(_){}}}/>`;
   }
   const initials=(u&&u.avatar&&u.avatar.length<=4)?u.avatar:(u&&u.name?u.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase():'?');
   return html`<div class="av" style=${{width:size,height:size,background:(u&&u.color)||'#2563eb',color:'#fff',fontSize:Math.max(9,Math.floor(size*.33))}}>
@@ -1649,8 +1650,8 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
   const upcoming=safe(upcomingReminders).slice(0,4);
   const fmtT=dt=>{const d=new Date(dt);return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');};
   const unread=safe(notifs).filter(n=>!n.read).length;
-  const NI={task_assigned:'✅',status_change:'🔄',comment:'💬',deadline:'⏰',dm:'📨',project_added:'📁',reminder:'🔔',call:'📞'};
-  const NC={task_assigned:'var(--ac)',status_change:'var(--cy)',comment:'var(--pu)',deadline:'var(--am)',dm:'var(--cy)',project_added:'var(--gn)',reminder:'var(--am)',call:'#22c55e'};
+  const NI={task_assigned:'✅',task_updated:'✏️',task_deleted:'🗑️',status_change:'🔄',comment:'💬',deadline:'⏰',dm:'📨',project_added:'📁',reminder:'🔔',call:'📞'};
+  const NC={task_assigned:'var(--ac)',task_updated:'var(--cy)',task_deleted:'var(--rd)',status_change:'var(--cy)',comment:'var(--pu)',deadline:'var(--am)',dm:'var(--cy)',project_added:'var(--gn)',reminder:'var(--am)',call:'#22c55e'};
   const npRef=useRef(null);
   const prRef=useRef(null);
   const prImgRef=useRef(null);
@@ -1739,7 +1740,7 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                         <div style=${{display:'flex',gap:5,alignItems:'center'}}>
                           <span class="mono-10">${ago(n.ts)}</span>
                           ${n.type==='dm'?html`<span style=${{fontSize:9,fontWeight:700,color:'var(--cy)',background:'rgba(14,116,144,0.1)',borderRadius:4,padding:'1px 5px',letterSpacing:'.03em'}}>DM • click to reply</span>`:null}
-                          ${n.type==='task_assigned'||n.type==='status_change'||n.type==='comment'?html`<span style=${{fontSize:9,fontWeight:600,color:'var(--ac)',background:'var(--ac3)',borderRadius:4,padding:'1px 5px'}}>→ Tasks</span>`:null}
+                          ${n.type==='task_assigned'||n.type==='task_updated'||n.type==='task_deleted'||n.type==='status_change'||n.type==='comment'?html`<span style=${{fontSize:9,fontWeight:600,color:'var(--ac)',background:'var(--ac3)',borderRadius:4,padding:'1px 5px'}}>→ Tasks</span>`:null}
                         </div>
                       </div>
                       ${!n.read?html`<div style=${{width:5,height:5,borderRadius:'50%',background:'var(--ac)',flexShrink:0,marginTop:5}}></div>`:null}
@@ -1763,8 +1764,8 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                 <div style=${{padding:'20px 16px',background:'linear-gradient(135deg,rgba(29,78,216,.10),rgba(124,58,237,.05))',borderBottom:'1px solid var(--bd)',display:'flex',flexDirection:'column',alignItems:'center',gap:10}}>
                   <div style=${{position:'relative',cursor:'pointer'}} title="Click to change photo"
                     onClick=${e=>{e.stopPropagation();prImgRef.current&&prImgRef.current.click();}}>
-                    ${(cu.avatar_data&&cu.avatar_data.startsWith('data:image'))?
-                      html`<img src=${cu.avatar_data} style=${{width:68,height:68,borderRadius:'50%',objectFit:'cover',border:'3px solid var(--ac)',display:'block'}}/>`:
+                    ${((cu.avatar_data&&cu.avatar_data.startsWith('data:image'))||cu.has_avatar)?
+                      html`<img src=${cu.avatar_data&&cu.avatar_data.startsWith('data:image')?cu.avatar_data:('/api/users/'+encodeURIComponent(cu.id)+'/avatar?v='+encodeURIComponent(cu.avatar_rev||''))} style=${{width:68,height:68,borderRadius:'50%',objectFit:'cover',border:'3px solid var(--ac)',display:'block'}} onError=${e=>{e.currentTarget.style.display='none';}}/>`:
                       html`<div style=${{width:68,height:68,borderRadius:'50%',background:cu.color||'#2563eb',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,fontWeight:700,color:'#fff',border:'3px solid var(--ac)',boxShadow:'0 4px 16px rgba(29,78,216,.3)'}}>${cu.avatar||'?'}</div>`}
                     <div style=${{position:'absolute',bottom:2,right:2,width:22,height:22,borderRadius:'50%',background:'var(--ac)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,border:'2px solid var(--sf)',color:'#fff',pointerEvents:'none'}}>📷</div>
                   </div>
@@ -1775,14 +1776,13 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                     const reader=new FileReader();
                     reader.onload=async ev=>{
                       const dataUrl=ev.target.result;
-                      const res=await api.put('/api/profile',{avatar_data:dataUrl});
-                      if(res&&res.id){
-                        setCu&&setCu(prev=>({...prev,avatar_data:dataUrl}));
-                        setUploadMsg('✓ Photo updated!');
-                        setTimeout(()=>setUploadMsg(''),2500);
-                      } else {
-                        setUploadMsg('Upload failed. Try a smaller image.');
-                      }
+                      const rev=Date.now();
+                      setCu&&setCu(prev=>({...prev,avatar_data:dataUrl,has_avatar:1,avatar_rev:rev}));
+                      setUploadMsg('✓ Photo updated!');
+                      api.put('/api/profile',{avatar_data:dataUrl},{quiet:true}).then(res=>{
+                        if(!(res&&res.id))setUploadMsg('Upload failed. Try a smaller image.');
+                      }).catch(()=>setUploadMsg('Upload failed. Try a smaller image.'));
+                      setTimeout(()=>setUploadMsg(''),2500);
                     };
                     reader.readAsDataURL(f);
                   }}/>
@@ -1801,11 +1801,15 @@ function Header({title,sub,dark,setDark,extra,cu,setCu,upcomingReminders,onViewR
                       <option value="private">Private</option><option value="team">Team</option>
                     </select>
                   </div>
-                  <button class="btn bp" style=${{width:'100%',justifyContent:'center',fontSize:11,marginTop:8,height:30}} onClick=${async()=>{
-                    setProfileMsg('Saving...');
-                    const res=await api.put('/api/profile',{birth_date:profileBirthDate||'',birth_date_visibility:profileBirthVisibility||'private'});
-                    if(res&&res.id){setCu&&setCu(prev=>({...prev,birth_date:res.birth_date||'',birth_date_visibility:res.birth_date_visibility||'private'}));setProfileMsg('✓ Birthday saved');setTimeout(()=>setProfileMsg(''),2200);}
-                    else {setProfileMsg((res&&res.error)||'Save failed');}
+                  <button class="btn bp" style=${{width:'100%',justifyContent:'center',fontSize:11,marginTop:8,height:30}} onClick=${()=>{
+                    const bd=profileBirthDate||'';
+                    const vis=profileBirthVisibility||'private';
+                    setCu&&setCu(prev=>({...prev,birth_date:bd,birth_date_visibility:vis}));
+                    setProfileMsg('✓ Birthday saved');
+                    api.put('/api/profile',{birth_date:bd,birth_date_visibility:vis},{quiet:true}).then(res=>{
+                      if(!(res&&res.id))setProfileMsg((res&&res.error)||'Save failed');
+                    }).catch(()=>setProfileMsg('Save failed'));
+                    setTimeout(()=>setProfileMsg(''),1800);
                   }}>Save birthday</button>
                   ${profileMsg?html`<div style=${{fontSize:10,marginTop:6,textAlign:'center',color:profileMsg.startsWith('✓')?'var(--gn)':profileMsg==='Saving...'?'var(--tx3)':'var(--rd)'}}>${profileMsg}</div>`:null}
                 </div>
@@ -2984,11 +2988,16 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
   const [celebTask,setCelebTask]=useState(null);
   const _celebTimeout=useRef(null);
   const triggerTaskCelebration=(taskTitle,taskProjectId)=>{
-    // Show task celebration
+    // Show task celebration immediately, never wait for reload/API polling.
     setCelebTask({title:taskTitle,projectId:taskProjectId});
     if(_celebTimeout.current)clearTimeout(_celebTimeout.current);
     _celebTimeout.current=setTimeout(()=>setCelebTask(null),4000);
   };
+  useEffect(()=>{
+    const h=e=>{const d=(e&&e.detail)||{};triggerTaskCelebration(d.title||'Task',d.project||'');};
+    window.addEventListener('pt:task-celebrate',h);
+    return()=>window.removeEventListener('pt:task-celebrate',h);
+  },[]);
   const saveT=async p=>{
     let r;
     if(p.id&&safe(tasks).find(t=>t.id===p.id)){
