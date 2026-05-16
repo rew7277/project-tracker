@@ -194,6 +194,16 @@ function AppLoader(){
 let _apiAbortCtrl = new AbortController();
 const _apiEtagCache = {}; // url → { etag, data }
 const _apiErrorSeen = new Map();
+function ptReadCookie(name){
+  try{
+    const key=String(name||'')+'=';
+    return (document.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(key))?.slice(key.length)||'';
+  }catch(_){return '';}
+}
+function ptCsrfHeaders(extra={}){
+  const token=ptReadCookie('XSRF-TOKEN');
+  return token?{...extra,'X-CSRF-Token':decodeURIComponent(token)}:extra;
+}
 const _apiRead = async (r) => {
   const text = await r.text();
   if (!text) return {};
@@ -242,6 +252,10 @@ const _apiRequest = async (u, opts = {}) => {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const headers = { ...(opts.headers || {}) };
+    if (method !== 'GET' && method !== 'HEAD') {
+      const csrf = ptReadCookie('XSRF-TOKEN');
+      if (csrf && !headers['X-CSRF-Token'] && !headers['X-XSRF-Token']) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
+    }
     const cached = method === 'GET' ? _apiEtagCache[u] : null;
     if (cached && cached.etag) headers['If-None-Match'] = cached.etag;
     const cleanOpts = { ...opts };
@@ -7805,7 +7819,7 @@ async function requestNotifPermission(){
             const sub=await window._pfSWReg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
             window._pfPushSub=sub;
             const sj=sub.toJSON();
-            fetch('/api/push/subscribe',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sj.endpoint,keys:sj.keys})}).catch(()=>{});
+            fetch('/api/push/subscribe',{method:'POST',credentials:'include',headers:ptCsrfHeaders({'Content-Type':'application/json'}),body:JSON.stringify({endpoint:sj.endpoint,keys:sj.keys})}).catch(()=>{});
           }
         }catch(e){}
       }
@@ -9770,7 +9784,10 @@ function ptRouteInfo(){
     if(!page && VALID.includes(action)) page=action;
     const user=q.get('user')||q.get('sender')||q.get('peer')||q.get('peer_id')||(page==='dm'?(seg[idx+1]||''):'');
     const id=q.get('id')||q.get('entity_id')||q.get('task_id')||q.get('project_id')||q.get('ticket_id')||(page&&seg[idx+1]&&page!=='dm'?seg[idx+1]:'');
-    return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx};
+    const workspaceSlug = idx>=2 ? String(seg[0]||'') : '';
+    const workspaceId = idx>=2 ? String(seg[1]||'') : '';
+    const workspaceRest = idx>=2 ? seg.slice(2).join('/') : '';
+    return {page,user:user?String(user):'',id:id?String(id):'',action,seg,idx,workspaceSlug,workspaceId,workspaceRest};
   }catch(_){return {page:'',user:'',id:'',action:'',seg:[],idx:0};}
 }
 
@@ -9913,6 +9930,40 @@ function App(){
     return 'dashboard';
   });
   const [data,setData]=useState({users:[],projects:[],tasks:[],notifs:[],teams:[],tickets:[]});
+  // Block /dm?user=<id> from opening a user outside the current workspace/user list.
+  useEffect(()=>{
+    try{
+      const ri=ptRouteInfo();
+      if(ri.page!=='dm' || !ri.user || !Array.isArray(data.users) || !data.users.length)return;
+      const target=String(ri.user);
+      const allowed=data.users.some(u=>String(u&&u.id)===target && String(u&&u.id)!==String(cu&&cu.id));
+      if(!allowed){
+        console.warn('[SECURITY] Blocked invalid DM URL user', target);
+        try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');}catch(_){}
+        setDmTargetUser(null);
+        history.replaceState(null,'',workspaceBasePath(cu)+'dm');
+      }
+    }catch(e){}
+  },[data.users,cu&&cu.id]);
+  // Validate workspace slug + workspace id together on page load; redirect to canonical URL.
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        const ri=ptRouteInfo();
+        if(!ri.workspaceId || !String(ri.workspaceId).startsWith('ws'))return;
+        const qs=new URLSearchParams({slug:ri.workspaceSlug||'',workspace_id:ri.workspaceId||'',rest:ri.workspaceRest||ri.page||'dashboard'});
+        const res=await api.get('/api/workspace/route-guard?'+qs.toString(),{timeoutMs:8000});
+        if(cancelled||!res)return;
+        if(res.redirect){
+          const next=String(res.redirect||'')+(window.location.search||'');
+          if(next!==window.location.pathname+window.location.search) window.location.replace(next);
+        }
+      }catch(e){}
+    })();
+    return()=>{cancelled=true;};
+  },[]);
+
   // Keep browser URL in sync with current view
   const VIEW_TITLES={
     dashboard:'Dashboard',ops:'Ops Center',projects:'Projects',tasks:'Kanban Board',
@@ -10740,7 +10791,7 @@ function App(){
     // session cookie. The index route sees user_id still in session → 302 to
     // dashboard → user sees a ghost dashboard flash before 401s kick in.
     try{
-      fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}',signal:AbortSignal.timeout(3000)});
+      fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:ptCsrfHeaders({'Content-Type':'application/json'}),body:'{}',signal:AbortSignal.timeout(3000)});
     }catch(e){
       // Timeout or network error — server may have already cleared the session.
       // Proceed with client-side cleanup anyway.

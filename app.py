@@ -301,13 +301,14 @@ app.config.update(
     SESSION_COOKIE_SECURE=_is_https,PERMANENT_SESSION_LIFETIME=86400*30,
     SESSION_COOKIE_NAME="pf_session",
     MAX_CONTENT_LENGTH=150*1024*1024)
-# CORS — restrict to known origins in production
-_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-if not _ALLOWED_ORIGINS:
-    _ALLOWED_ORIGINS = ["*"]
-    if _is_https:
-        log.warning("ALLOWED_ORIGINS not set — CORS is open in production.")
-CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS if _ALLOWED_ORIGINS != ["*"] else "*")
+# CORS — locked down by default. Override with comma-separated ALLOWED_ORIGINS
+# only when you intentionally serve the app from additional domains.
+_DEFAULT_ALLOWED_ORIGIN = os.environ.get("APP_BASE_URL", "https://projecttracker.in").rstrip("/")
+_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ALLOWED_ORIGIN).split(",") if o.strip()]
+if "*" in _ALLOWED_ORIGINS:
+    log.warning("[SECURITY] Refusing wildcard CORS origin; falling back to %s", _DEFAULT_ALLOWED_ORIGIN)
+    _ALLOWED_ORIGINS = [_DEFAULT_ALLOWED_ORIGIN]
+CORS(app, supports_credentials=True, origins=_ALLOWED_ORIGINS)
 
 # ── Gzip compression for all compressible responses ───────────────────────────
 @app.route("/healthz")
@@ -438,6 +439,117 @@ def block_scanners():
                     return jsonify({"error": "Too many requests"}), 429
             except Exception:
                 pass
+
+
+# ── Production route/API hardening ───────────────────────────────────────────
+# CSRF: double-submit token. We set a non-HttpOnly cookie for JS to mirror into
+# X-CSRF-Token on authenticated mutating API calls. The signed session remains
+# HttpOnly; this token only proves the request came from the loaded app page.
+def _csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+_CSRF_EXEMPT_PREFIXES = (
+    "/api/auth/login",
+    "/api/auth/signup",
+    "/api/auth/google",
+    "/api/sso/",
+    "/api/public/",
+)
+
+def _csrf_required():
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return False
+    if not request.path.startswith("/api/"):
+        return False
+    if "user_id" not in session:
+        return False
+    return not any(request.path.startswith(p) for p in _CSRF_EXEMPT_PREFIXES)
+
+_RATE_LOCAL_LOCK = threading.Lock()
+_RATE_LOCAL = {}
+
+def _rate_limit_bucket(name, limit, window_seconds=60, user_part=""):
+    """Small Redis-backed limiter with local fallback. Returns Flask response or None."""
+    ip = _client_ip()
+    ident = user_part or session.get("user_id") or ip
+    key = f"rl:{name}:{ident}:{ip}"
+    now = int(_time_mod.time())
+    if _redis_client is not None:
+        try:
+            count = _redis_client.incr(key)
+            if int(count) == 1:
+                _redis_client.expire(key, int(window_seconds))
+            if int(count) > int(limit):
+                log.warning("[SECURITY] Rate limited %s for %s (%s/%ss)", ident, name, count, window_seconds)
+                return jsonify({"error": "Too many requests"}), 429
+            return None
+        except Exception:
+            pass
+    with _RATE_LOCAL_LOCK:
+        bucket = _RATE_LOCAL.get(key)
+        if not bucket or bucket[0] <= now:
+            _RATE_LOCAL[key] = [now + int(window_seconds), 1]
+            return None
+        bucket[1] += 1
+        if bucket[1] > int(limit):
+            log.warning("[SECURITY] Rate limited %s for %s (%s/%ss)", ident, name, bucket[1], window_seconds)
+            return jsonify({"error": "Too many requests"}), 429
+    return None
+
+@app.before_request
+def csrf_and_api_rate_limits():
+    path = request.path.rstrip("/") or "/"
+    # Focused limits for noisy/realtime endpoints. Keep GET polling useful, but
+    # stop retry storms and abuse from one user/IP.
+    if "user_id" in session:
+        is_root_dm_send = path == "/api/dm"
+        is_ws_dm_send = bool(re.match(r"^/api/[^/]+/ws[^/]+/dm$", path))
+        is_root_dm_typing = path == "/api/dm/typing"
+        is_ws_dm_typing = bool(re.match(r"^/api/[^/]+/ws[^/]+/dm/typing$", path))
+        if (is_root_dm_send or is_ws_dm_send) and request.method == "POST":
+            limited = _rate_limit_bucket("dm-send", int(os.environ.get("RL_DM_SEND_PER_MIN", "60")))
+            if limited: return limited
+        elif (is_root_dm_typing or is_ws_dm_typing) and request.method == "POST":
+            limited = _rate_limit_bucket("dm-typing", int(os.environ.get("RL_DM_TYPING_PER_MIN", "120")))
+            if limited: return limited
+        elif path in ("/api/poll", "/api/app-data") or bool(re.match(r"^/api/[^/]+/ws[^/]+/(poll|app-data)$", path)):
+            limited = _rate_limit_bucket("poll", int(os.environ.get("RL_POLL_PER_MIN", "90")))
+            if limited: return limited
+
+    if _csrf_required():
+        expected = session.get("csrf_token") or ""
+        supplied = (
+            request.headers.get("X-CSRF-Token") or
+            request.headers.get("X-XSRF-Token") or
+            request.form.get("csrf_token") or
+            ""
+        )
+        if not expected or not supplied or not hmac.compare_digest(str(expected), str(supplied)):
+            log.warning("[SECURITY] CSRF blocked %s %s from %s", request.method, request.path, _client_ip())
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+@app.after_request
+def set_csrf_cookie(response):
+    try:
+        # Ensure every app/API response for an authenticated session carries the
+        # current token. Cookie is readable by JS by design for double-submit.
+        if "user_id" in session:
+            token = _csrf_token()
+            response.set_cookie(
+                "XSRF-TOKEN", token,
+                secure=bool(app.config.get("SESSION_COOKIE_SECURE")),
+                httponly=False,
+                samesite="Lax",
+                max_age=86400*30,
+                path="/",
+            )
+    except Exception:
+        pass
+    return response
 
 @app.after_request
 def compress_response(response):
@@ -6798,6 +6910,44 @@ def dm_unread():
     return resp
 
 
+# ── Workspace slug/id validation helpers ─────────────────────────────────────
+def _canonical_workspace_slug(workspace_id=None):
+    wsid = str(workspace_id or wid() or "")
+    if not wsid:
+        return ""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT name, workspace_slug FROM workspaces WHERE id=?", (wsid,)).fetchone()
+        if not row:
+            return ""
+        return (row["workspace_slug"] or _slugify(row["name"] or "workspace") or "workspace").strip("/")
+    except Exception:
+        return ""
+
+def _workspace_alias_ok_strict(workspace_name, workspace_id):
+    if str(workspace_id or "") != str(wid() or ""):
+        return False, jsonify({"error":"Workspace mismatch"}), 403
+    expected = _canonical_workspace_slug(workspace_id)
+    supplied = str(workspace_name or "").strip("/")
+    if expected and supplied and supplied != expected:
+        return False, jsonify({"error":"Workspace slug mismatch", "canonical_slug": expected}), 409
+    return True, None, None
+
+@app.route("/api/workspace/route-guard")
+@login_required
+def workspace_route_guard():
+    """Validate a workspace-scoped browser URL and return the canonical URL.
+    Used by the SPA on page load to correct /wrong-slug/<wsid>/... safely.
+    """
+    supplied_slug = (request.args.get("slug") or "").strip("/")
+    workspace_id = (request.args.get("workspace_id") or "").strip()
+    rest = (request.args.get("rest") or "dashboard").strip("/") or "dashboard"
+    if workspace_id and workspace_id != wid():
+        return jsonify({"ok": False, "error": "Workspace mismatch", "redirect": f"/{_canonical_workspace_slug()}/{wid()}/dashboard"}), 403
+    expected = _canonical_workspace_slug(wid())
+    canonical = f"/{expected}/{wid()}/{rest}"
+    return jsonify({"ok": True, "workspace_id": wid(), "canonical_slug": expected, "canonical_url": canonical, "redirect": canonical if supplied_slug and expected and supplied_slug != expected else ""})
+
 # ── Workspace-scoped task/ticket API aliases for email/deep-link integrations ──
 def _ws_alias_ok(workspace_id):
     return str(workspace_id or "") == str(wid() or "")
@@ -6805,13 +6955,15 @@ def _ws_alias_ok(workspace_id):
 @app.route("/api/<workspace_name>/<workspace_id>/tasks", methods=["GET"])
 @login_required
 def tasks_workspace_alias(workspace_name, workspace_id):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return get_tasks()
 
 @app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>", methods=["GET"])
 @login_required
 def task_detail_workspace_alias(workspace_name, workspace_id, tid):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     with get_db(autocommit=True) as db:
         r=db.execute("SELECT * FROM tasks WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(tid,wid())).fetchone()
     return jsonify(dict(r) if r else {"error":"Task not found"}) if r else (jsonify({"error":"Task not found"}),404)
@@ -6819,54 +6971,58 @@ def task_detail_workspace_alias(workspace_name, workspace_id, tid):
 @app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>", methods=["PUT"])
 @login_required
 def task_update_workspace_alias(workspace_name, workspace_id, tid):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return update_task(tid)
 
 @app.route("/api/<workspace_name>/<workspace_id>/tickets", methods=["GET"])
 @login_required
 def tickets_workspace_alias(workspace_name, workspace_id):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return get_tickets()
 
 @app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>/comments", methods=["GET"])
 @login_required
 def ticket_comments_workspace_alias(workspace_name, workspace_id, tid):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return get_ticket_comments(tid)
 
 @app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>/comments", methods=["POST"])
 @login_required
 def add_ticket_comment_workspace_alias(workspace_name, workspace_id, tid):
-    if not _ws_alias_ok(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return add_ticket_comment(tid)
 
 # ── Workspace-scoped API aliases for email/deep-link integrations ───────────
 @app.route("/api/<workspace_name>/<workspace_id>/dm/<other_id>")
 @login_required
 def get_dm_workspace_alias(workspace_name, workspace_id, other_id):
-    if str(workspace_id or "") != str(wid() or ""):
-        return jsonify({"error":"Workspace mismatch"}), 403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return get_dm(other_id)
 
 @app.route("/api/<workspace_name>/<workspace_id>/dm/unread")
 @login_required
 def dm_unread_workspace_alias(workspace_name, workspace_id):
-    if str(workspace_id or "") != str(wid() or ""):
-        return jsonify({"error":"Workspace mismatch"}), 403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return dm_unread()
 
 @app.route("/api/<workspace_name>/<workspace_id>/dm/previews")
 @login_required
 def dm_previews_workspace_alias(workspace_name, workspace_id):
-    if str(workspace_id or "") != str(wid() or ""):
-        return jsonify({"error":"Workspace mismatch"}), 403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return dm_previews()
 
 @app.route("/api/<workspace_name>/<workspace_id>/dm", methods=["POST"])
 @login_required
 def send_dm_workspace_alias(workspace_name, workspace_id):
-    if str(workspace_id or "") != str(wid() or ""):
-        return jsonify({"error":"Workspace mismatch"}), 403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return send_dm()
 
 
@@ -6880,13 +7036,15 @@ def _workspace_alias_allowed(workspace_id):
 @app.route("/api/<workspace_name>/<workspace_id>/projects", methods=["GET"])
 @login_required
 def projects_workspace_alias_all(workspace_name, workspace_id):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return get_projects_all() if 'get_projects_all' in globals() else get_projects()
 
 @app.route("/api/<workspace_name>/<workspace_id>/projects/<pid>", methods=["GET"])
 @login_required
 def project_workspace_alias_one(workspace_name, workspace_id, pid):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     with get_db(autocommit=True) as db:
         r=db.execute("SELECT * FROM projects WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(pid,wid())).fetchone()
     return jsonify(dict(r)) if r else (jsonify({"error":"Project not found"}),404)
@@ -6894,7 +7052,8 @@ def project_workspace_alias_one(workspace_name, workspace_id, pid):
 @app.route("/api/<workspace_name>/<workspace_id>/tasks/<tid>/comments", methods=["GET"])
 @login_required
 def task_comments_workspace_alias(workspace_name, workspace_id, tid):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     with get_db(autocommit=True) as db:
         rows=db.execute("SELECT * FROM comments WHERE workspace_id=? AND task_id=? ORDER BY ts",(wid(),tid)).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -6902,7 +7061,8 @@ def task_comments_workspace_alias(workspace_name, workspace_id, tid):
 @app.route("/api/<workspace_name>/<workspace_id>/tickets/<tid>", methods=["GET"])
 @login_required
 def ticket_detail_workspace_alias(workspace_name, workspace_id, tid):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     with get_db(autocommit=True) as db:
         r=db.execute("SELECT * FROM tickets WHERE id=? AND workspace_id=? AND COALESCE(deleted_at,'')=''",(tid,wid())).fetchone()
     return jsonify(dict(r)) if r else (jsonify({"error":"Ticket not found"}),404)
@@ -6910,19 +7070,22 @@ def ticket_detail_workspace_alias(workspace_name, workspace_id, tid):
 @app.route("/api/<workspace_name>/<workspace_id>/dm/route-target")
 @login_required
 def dm_route_target_workspace_alias(workspace_name, workspace_id):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return dm_route_target()
 
 @app.route("/api/<workspace_name>/<workspace_id>/dm/latest-unread")
 @login_required
 def latest_unread_dm_workspace_alias(workspace_name, workspace_id):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return latest_unread_dm()
 
 @app.route("/api/<workspace_name>/<workspace_id>/dm/typing",methods=["POST"])
 @login_required
 def dm_typing_workspace_alias(workspace_name, workspace_id):
-    if not _workspace_alias_allowed(workspace_id): return jsonify({"error":"Workspace mismatch"}),403
+    ok,resp,code=_workspace_alias_ok_strict(workspace_name, workspace_id)
+    if not ok: return resp,code
     return dm_typing()
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
@@ -9265,11 +9428,23 @@ def catch_all(path):
     if path.startswith("${") or "${" in path:
         return "", 400
 
-    # Let explicitly registered routes handle /<ws_name>/<ws_id>/... paths
+    # Validate and canonicalize /<workspace-slug>/<workspace-id>/... paths at page load.
+    # The workspace id is authoritative; slug must match the id to avoid weak,
+    # misleading URLs like /wrong-slug/ws123/dm.
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
-        potential_ws_id = parts[1] if len(parts) >= 2 else ""
+        supplied_slug = parts[0]
+        potential_ws_id = parts[1]
         if potential_ws_id.startswith("ws"):
+            if "user_id" in session:
+                if str(potential_ws_id) != str(wid() or ""):
+                    own_slug = _canonical_workspace_slug(wid()) or "workspace"
+                    return redirect(f"/{own_slug}/{wid()}/dashboard", code=302)
+                expected_slug = _canonical_workspace_slug(potential_ws_id)
+                if expected_slug and supplied_slug != expected_slug:
+                    rest = "/".join(parts[2:]) or "dashboard"
+                    qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
+                    return redirect(f"/{expected_slug}/{potential_ws_id}/{rest}{qs}", code=302)
             return _serve_html()
 
     # Otherwise serve the app (for client-side routing)
