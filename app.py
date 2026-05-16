@@ -9910,7 +9910,35 @@ def billing_invoices_overview():
         outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
         overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
         summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
-        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
+
+        def _count(table, where="workspace_id=?", args=None):
+            args = args or (wid(),)
+            try:
+                row = db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE {where}", args).fetchone()
+                return int((row and row["c"]) or 0)
+            except Exception:
+                # Older DBs may not have deleted_at yet; fall back to workspace-only count.
+                try:
+                    row = db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (wid(),)).fetchone()
+                    return int((row and row["c"]) or 0)
+                except Exception:
+                    return 0
+
+        ws = None
+        try:
+            ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+        except Exception:
+            try: ws = db.execute("SELECT id, name FROM workspaces WHERE id=?", (wid(),)).fetchone()
+            except Exception: ws = None
+        ws_stats = {
+            "workspace_name": (ws["name"] if ws and "name" in ws.keys() else "Workspace"),
+            "plan": (ws["plan"] if ws and "plan" in ws.keys() and ws["plan"] else "starter"),
+            "member_count": _count("users", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
+            "project_count": _count("projects", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
+            "task_count": _count("tasks", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
+            "invoice_count": len(invoices),
+        }
+        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "ws_stats": ws_stats, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
 
 @app.route("/api/billing/profile", methods=["PUT"])
 @login_required

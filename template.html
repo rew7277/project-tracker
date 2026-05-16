@@ -10582,6 +10582,7 @@ function BillingInvoicesView({cu}){
   const [err,setErr]=useState('');
   const [profile,setProfile]=useState({legal_name:'',billing_email:'',tax_id:'',address_line1:'',address_line2:'',city:'',state:'',postal_code:'',country:'India',currency:'INR',tax_rate:18,invoice_prefix:'INV',invoice_notes:''});
   const [summary,setSummary]=useState({invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:'INR'});
+  const [wsStats,setWsStats]=useState({workspace_name:'Workspace',plan:'starter',member_count:0,project_count:0,task_count:0,invoice_count:0});
   const [invoices,setInvoices]=useState([]);
   const [nextNo,setNextNo]=useState('INV-0001');
   const [tab,setTab]=useState('overview');
@@ -10591,6 +10592,7 @@ function BillingInvoicesView({cu}){
   const [draft,setDraft]=useState({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
   const money=(v,c)=>`${c||profile.currency||summary.currency||'INR'} ${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
   const load=useCallback(async()=>{
+    if(!canManageBilling){setLoading(false);setErr('');return;}
     setLoading(true);setErr('');
     try{
       const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
@@ -10598,6 +10600,7 @@ function BillingInvoicesView({cu}){
         setProfile(prev=>({...prev,...(r.profile||{})}));
         setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
         setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
+        setWsStats(prev=>({...prev,...(r.ws_stats||{}),invoice_count:(Array.isArray(r.invoices)?r.invoices.length:0)}));
         setNextNo(r.next_invoice_no||'INV-0001');
       }else{
         setErr((r&&r.error)||'Could not load billing details');
@@ -10605,7 +10608,7 @@ function BillingInvoicesView({cu}){
     }catch(e){
       setErr('Could not load billing details. Please refresh once.');
     }finally{setLoading(false);}
-  },[]);
+  },[canManageBilling]);
   useEffect(()=>{load();},[load]);
   const setItem=(i,k,v)=>setDraft(d=>({...d,items:d.items.map((it,idx)=>idx===i?{...it,[k]:v}:it)}));
   const removeItem=(i)=>setDraft(d=>({...d,items:d.items.filter((_,idx)=>idx!==i)}));
@@ -10715,7 +10718,7 @@ function BillingInvoicesView({cu}){
 
     <!-- Tabs -->
     <div style=${{display:'flex',gap:6,marginBottom:20,borderBottom:'1px solid var(--bd)',paddingBottom:1}}>
-      ${[['overview','Overview'],['invoices','Invoices'+(invoices.length?` (${invoices.length})`:'')],['profile','Company details'],['create','Create invoice']].map(([id,l])=>html`
+      ${[['overview','Overview'],['invoices','Invoices'+(invoices.length?` (${invoices.length})`:'')],['usage','Plan & Usage'],['profile','Company details'],['create','Create invoice']].map(([id,l])=>html`
         <button onClick=${()=>setTab(id)} style=${{padding:'7px 16px',fontSize:13,fontWeight:700,background:'none',border:'none',cursor:'pointer',borderBottom:tab===id?'2px solid var(--ac)':'2px solid transparent',color:tab===id?'var(--ac)':'var(--tx2)',marginBottom:-1,borderRadius:'6px 6px 0 0',transition:'color .15s'}}>${l}</button>`)}
     </div>
 
@@ -10820,6 +10823,46 @@ function BillingInvoicesView({cu}){
           <div style=${{padding:'40px 20px',textAlign:'center',color:'var(--tx3)',fontSize:13}}>
             ${searchQ||filterStatus!=='all'?'No invoices match your filters.':'No invoices created yet.'}
           </div>`}
+      </div>
+    </div>`:null}
+
+    <!-- PLAN & USAGE TAB -->
+    ${tab==='usage'?html`<div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) minmax(280px,.45fr)',gap:16}}>
+      <div style=${{padding:24,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,marginBottom:18}}>
+          <div>
+            <div style=${{fontSize:15,fontWeight:950,color:'var(--tx)'}}>Workspace plan & usage</div>
+            <div style=${{fontSize:12,color:'var(--tx3)',marginTop:3}}>A clean SaaS-style summary of members, projects, tasks, and invoice activity.</div>
+          </div>
+          <span style=${{padding:'7px 12px',borderRadius:999,background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.22)',color:'var(--ac)',fontSize:11,fontWeight:950,textTransform:'uppercase',letterSpacing:.4}}>${wsStats.plan||'starter'}</span>
+        </div>
+        ${[
+          ['Team members',wsStats.member_count,50,'Users active in this workspace'],
+          ['Projects',wsStats.project_count,100,'Projects created in this workspace'],
+          ['Tasks',wsStats.task_count,500,'Tasks tracked across projects'],
+          ['Invoices',invoices.length,200,'Invoices created from Billing & Invoices'],
+        ].map(([label,value,limit,sub])=>{const pct=Math.min(100,Math.round((Number(value||0)/Number(limit||1))*100));return html`
+          <div style=${{marginBottom:16}}>
+            <div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:900,color:'var(--tx)',marginBottom:6}}><span>${label}</span><span>${Number(value||0).toLocaleString()} / ${limit}</span></div>
+            <div style=${{height:9,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{width:pct+'%',height:'100%',borderRadius:999,background:'linear-gradient(90deg,var(--ac),#8b5cf6)'}}></div></div>
+            <div style=${{fontSize:11,color:'var(--tx3)',marginTop:5}}>${sub}</div>
+          </div>`})}
+      </div>
+      <div style=${{display:'flex',flexDirection:'column',gap:12}}>
+        <div style=${{padding:20,borderRadius:20,background:'linear-gradient(135deg,rgba(90,140,255,.14),rgba(139,92,246,.10))',border:'1px solid rgba(90,140,255,.22)'}}>
+          <div style=${{fontSize:13,fontWeight:950,color:'var(--tx)',marginBottom:8}}>Billing readiness</div>
+          <div style=${{display:'grid',gap:8,fontSize:12,color:'var(--tx2)'}}>
+            <div>${profile.legal_name?'✅':'⚠️'} Company legal name</div>
+            <div>${profile.billing_email?'✅':'⚠️'} Billing email</div>
+            <div>${profile.tax_id?'✅':'○'} GST / Tax ID</div>
+            <div>${profile.currency?'✅':'⚠️'} Invoice currency</div>
+          </div>
+          <button class="btn bg" style=${{marginTop:14,width:'100%',justifyContent:'center',fontSize:12}} onClick=${()=>setTab('profile')}>Review company details</button>
+        </div>
+        <div style=${{padding:20,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+          <div style=${{fontSize:13,fontWeight:950,color:'var(--tx)',marginBottom:6}}>Invoice controls</div>
+          <div style=${{fontSize:12,color:'var(--tx3)',lineHeight:1.6}}>Admins, Owners, and Managers can create invoices, update statuses, edit company details, and download invoice PDFs.</div>
+        </div>
       </div>
     </div>`:null}
 
@@ -11772,7 +11815,7 @@ function App(){
     };
     document.addEventListener('keydown',h);
     return()=>document.removeEventListener('keydown',h);
-  },[]);
+  },[_setView]);
   useEffect(()=>{load();},[load]);
 
   const prevTeamCtxRef=useRef(teamCtx);
@@ -12188,6 +12231,7 @@ function App(){
             ${baseView==='ai-docs'?html`<${AiDocsView} cu=${cu} projects=${scopedProjects} tasks=${scopedTasks} users=${data.users}/>`:null}
             ${baseView==='timesheet'?html`<${TimesheetView} cu=${cu} teams=${data.teams} users=${data.users} projects=${scopedProjects} tasks=${scopedTasks}/>`:null}
             ${baseView==='password-generator'?html`<${PasswordGeneratorView}/>`:null}
+            ${baseView==='billing'?html`<${BillingInvoicesView} cu=${cu}/>`:null}
             ${baseView==='vault'?html`<${VaultView} cu=${cu}/>`:null}
             </div>
           <//>
