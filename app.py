@@ -2904,6 +2904,16 @@ def init_db():
             "ALTER TABLE workspaces ADD COLUMN plan_expires TEXT DEFAULT ''",
             "ALTER TABLE workspaces ADD COLUMN trial_ends TEXT DEFAULT ''",
             "ALTER TABLE workspaces ADD COLUMN seat_count INTEGER DEFAULT 5",
+            # ── User profile celebrations / personal moments ──
+            "ALTER TABLE users ADD COLUMN birth_date TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN birth_date_visibility TEXT DEFAULT 'private'",
+            "ALTER TABLE users ADD COLUMN first_login_seen INTEGER DEFAULT 0",
+            # ── Billing profile + invoice creation ──
+            "CREATE TABLE IF NOT EXISTS workspace_billing_profile (workspace_id TEXT PRIMARY KEY, legal_name TEXT DEFAULT '', billing_email TEXT DEFAULT '', tax_id TEXT DEFAULT '', address_line1 TEXT DEFAULT '', address_line2 TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', postal_code TEXT DEFAULT '', country TEXT DEFAULT 'India', currency TEXT DEFAULT 'INR', tax_rate REAL DEFAULT 18, invoice_prefix TEXT DEFAULT 'INV', invoice_notes TEXT DEFAULT '', updated_at TEXT DEFAULT '')",
+            "CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, workspace_id TEXT, invoice_no TEXT, customer_name TEXT DEFAULT '', customer_email TEXT DEFAULT '', issue_date TEXT DEFAULT '', due_date TEXT DEFAULT '', status TEXT DEFAULT 'draft', currency TEXT DEFAULT 'INR', subtotal REAL DEFAULT 0, tax_total REAL DEFAULT 0, total REAL DEFAULT 0, notes TEXT DEFAULT '', created_by TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')",
+            "CREATE TABLE IF NOT EXISTS invoice_items (id TEXT PRIMARY KEY, workspace_id TEXT, invoice_id TEXT, description TEXT DEFAULT '', quantity REAL DEFAULT 1, unit_price REAL DEFAULT 0, amount REAL DEFAULT 0)",
+            "CREATE INDEX IF NOT EXISTS idx_invoices_ws_created ON invoices(workspace_id, created)",
+            "CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id)",
             # ── Usage metering ──
             "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT, event_type TEXT, quantity INTEGER DEFAULT 1, meta TEXT DEFAULT '{}', created TEXT)",
             "CREATE INDEX IF NOT EXISTS idx_usage_ws ON usage_events(workspace_id, event_type, created)",
@@ -4555,10 +4565,11 @@ def register():
             from datetime import timedelta
             verify_expires = (now_ist() + timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S') + '+05:30'
             login_ts = ts()
+            birth_date = str(d.get("birth_date") or "").strip()[:10]
             db.execute(
-                "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified,email_verify_token,email_verify_expires) VALUES(?,?,?,?,?,?,?,?,?,0,?,?)",
+                "INSERT INTO users(id,workspace_id,name,email,password,role,avatar,color,created,email_verified,email_verify_token,email_verify_expires,birth_date,birth_date_visibility) VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
                 (uid, ws_id, d["name"], d["email"], hash_pw(d["password"]),
-                 d.get("role","Developer"), av, c, login_ts, verify_token, verify_expires))
+                 d.get("role","Developer"), av, c, login_ts, verify_token, verify_expires, birth_date, "private"))
             session.permanent = True
             session["user_id"] = uid
             session["workspace_id"] = ws_id
@@ -4693,7 +4704,7 @@ def me():
         import re as _re
         rows = _raw_pg(
             "SELECT u.id,u.name,u.email,u.role,u.avatar,u.color,u.workspace_id,u.last_active,"
-            "u.two_fa_enabled,u.totp_verified,u.logged_out_at,"
+            "u.two_fa_enabled,u.totp_verified,u.logged_out_at,u.birth_date,u.birth_date_visibility,u.first_login_seen,"
             "w.name as _ws_name, w.workspace_slug as _ws_slug "
             "FROM users u LEFT JOIN workspaces w ON w.id=u.workspace_id "
             "WHERE u.id=?",
@@ -4940,7 +4951,7 @@ def get_users():
     with get_db() as db:
         rows = db.execute(
             """SELECT id,workspace_id,name,email,role,avatar,color,created,
-               two_fa_enabled,totp_verified,last_active
+               two_fa_enabled,totp_verified,last_active,birth_date,birth_date_visibility
                FROM users WHERE workspace_id=? ORDER BY name""",
             (wid(),)).fetchall()
         caller = db.execute("SELECT role FROM users WHERE id=?", (session["user_id"],)).fetchone()
@@ -4989,7 +5000,7 @@ def update_profile():
     """
     uid = session["user_id"]
     d = request.json or {}
-    allowed = {"name", "avatar_data"}
+    allowed = {"name", "avatar_data", "birth_date", "birth_date_visibility"}
     if not any(k in d for k in allowed):
         return jsonify({"error":"No supported profile fields supplied"}),400
     with get_db() as db:
@@ -5006,6 +5017,18 @@ def update_profile():
                 return jsonify({"error":"Invalid avatar image"}),400
             db.execute("UPDATE users SET avatar_data=? WHERE id=? AND workspace_id=?",
                        (avatar_data, uid, wid()))
+        if "birth_date" in d:
+            birth_date = str(d.get("birth_date") or "").strip()[:10]
+            if birth_date and not re.match(r"^\d{4}-\d{2}-\d{2}$", birth_date):
+                return jsonify({"error":"Birthday must be YYYY-MM-DD"}),400
+            db.execute("UPDATE users SET birth_date=? WHERE id=? AND workspace_id=?",
+                       (birth_date, uid, wid()))
+        if "birth_date_visibility" in d:
+            vis = str(d.get("birth_date_visibility") or "private").strip().lower()
+            if vis not in ("private", "team"):
+                vis = "private"
+            db.execute("UPDATE users SET birth_date_visibility=? WHERE id=? AND workspace_id=?",
+                       (vis, uid, wid()))
         _evict_me_cache(uid)
         _cache_bust_ws(wid())
         u = db.execute("SELECT * FROM users WHERE id=? AND workspace_id=?", (uid, wid())).fetchone()
@@ -8609,7 +8632,7 @@ def about_page():
 # ══════════════════════════════════════════════════════════════════════════════
 
 _WS_APP_PATHS = {
-    "dashboard", "projects", "tasks", "messages", "settings",
+    "dashboard", "projects", "tasks", "messages", "settings", "billing",
     "profile", "analytics", "tickets", "timeline", "app",
 }
 
@@ -8915,6 +8938,7 @@ def _validate_workspace_url_or_404(ws_name, ws_id):
 @app.route("/<ws_name>/<ws_id>/dm")
 @app.route("/<ws_name>/<ws_id>/dm/<other_user>")
 @app.route("/<ws_name>/<ws_id>/settings")
+@app.route("/<ws_name>/<ws_id>/billing")
 @app.route("/<ws_name>/<ws_id>/profile")
 @app.route("/<ws_name>/<ws_id>/analytics")
 @app.route("/<ws_name>/<ws_id>/tickets")
@@ -9594,7 +9618,7 @@ def public_landing():
     _APP_ACTIONS = {
         "login", "signin", "sign-in", "signup", "register",
         "task", "project", "ticket", "dm", "message",
-        "reminder", "notification", "dashboard", "settings",
+        "reminder", "notification", "dashboard", "settings", "billing",
     }
     if action in _APP_ACTIONS:
         return _serve_html()
@@ -9802,6 +9826,122 @@ def _stripe_get(path):
             return json.loads(r.read())
     except Exception as e:
         return {"error":{"message":str(e)}}
+
+
+# ── Workspace billing profile + professional invoice creation ───────────────
+
+def _billing_admin_required():
+    return session.get("role") in ("Admin", "Owner", "Manager")
+
+def _billing_profile_dict(row):
+    if row: return dict(row)
+    return {
+        "workspace_id": wid(), "legal_name": "", "billing_email": "", "tax_id": "",
+        "address_line1": "", "address_line2": "", "city": "", "state": "",
+        "postal_code": "", "country": "India", "currency": "INR",
+        "tax_rate": 18, "invoice_prefix": "INV", "invoice_notes": "", "updated_at": ""
+    }
+
+def _next_invoice_no(db, workspace_id, prefix="INV"):
+    prefix = re.sub(r"[^A-Za-z0-9-]", "", str(prefix or "INV"))[:12] or "INV"
+    year = now_ist().strftime("%Y")
+    like = f"{prefix}-{year}-%"
+    row = db.execute("SELECT invoice_no FROM invoices WHERE workspace_id=? AND invoice_no LIKE ? ORDER BY created DESC LIMIT 1", (workspace_id, like)).fetchone()
+    n = 1
+    if row and row["invoice_no"]:
+        try: n = int(str(row["invoice_no"]).split("-")[-1]) + 1
+        except Exception: n = 1
+    return f"{prefix}-{year}-{n:04d}"
+
+@app.route("/api/billing/invoices", methods=["GET"])
+@login_required
+def billing_invoices_overview():
+    if not _billing_admin_required():
+        return jsonify({"error":"Billing is available to workspace admins/managers only"}),403
+    with get_db() as db:
+        profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
+        rows = db.execute("SELECT * FROM invoices WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
+        invoices = [dict(r) for r in rows]
+        for inv in invoices:
+            inv["items"] = [dict(x) for x in db.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY rowid", (inv["id"],)).fetchall()]
+        paid = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower()=="paid")
+        outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
+        overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
+        summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
+        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
+
+@app.route("/api/billing/profile", methods=["PUT"])
+@login_required
+def billing_save_profile():
+    if not _billing_admin_required():
+        return jsonify({"error":"Billing settings are available to workspace admins/managers only"}),403
+    d = request.json or {}
+    fields = ["legal_name","billing_email","tax_id","address_line1","address_line2","city","state","postal_code","country","currency","invoice_prefix","invoice_notes"]
+    vals = {k: str(d.get(k) or "").strip() for k in fields}
+    vals["country"] = vals["country"] or "India"
+    vals["currency"] = (vals["currency"] or "INR").upper()[:3]
+    vals["invoice_prefix"] = re.sub(r"[^A-Za-z0-9-]", "", vals["invoice_prefix"] or "INV")[:12] or "INV"
+    try: vals["tax_rate"] = float(d.get("tax_rate") if d.get("tax_rate") not in (None,"") else 18)
+    except Exception: vals["tax_rate"] = 18
+    with get_db() as db:
+        db.execute("""INSERT INTO workspace_billing_profile(workspace_id,legal_name,billing_email,tax_id,address_line1,address_line2,city,state,postal_code,country,currency,tax_rate,invoice_prefix,invoice_notes,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_id) DO UPDATE SET legal_name=excluded.legal_name,billing_email=excluded.billing_email,tax_id=excluded.tax_id,address_line1=excluded.address_line1,address_line2=excluded.address_line2,city=excluded.city,state=excluded.state,postal_code=excluded.postal_code,country=excluded.country,currency=excluded.currency,tax_rate=excluded.tax_rate,invoice_prefix=excluded.invoice_prefix,invoice_notes=excluded.invoice_notes,updated_at=excluded.updated_at""",
+        (wid(), vals["legal_name"], vals["billing_email"], vals["tax_id"], vals["address_line1"], vals["address_line2"], vals["city"], vals["state"], vals["postal_code"], vals["country"], vals["currency"], vals["tax_rate"], vals["invoice_prefix"], vals["invoice_notes"], ts()))
+        profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
+    return jsonify(profile)
+
+@app.route("/api/billing/invoices", methods=["POST"])
+@login_required
+def billing_create_invoice():
+    if not _billing_admin_required():
+        return jsonify({"error":"Only workspace admins/managers can create invoices"}),403
+    d = request.json or {}
+    items = d.get("items") or []
+    if not items:
+        return jsonify({"error":"At least one invoice line item is required"}),400
+    with get_db() as db:
+        profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
+        inv_id = f"inv{int(datetime.now().timestamp()*1000)}"
+        inv_no = str(d.get("invoice_no") or "").strip() or _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")
+        currency = str(d.get("currency") or profile.get("currency") or "INR").upper()[:3]
+        tax_rate = float(d.get("tax_rate") if d.get("tax_rate") not in (None,"") else profile.get("tax_rate") or 0)
+        clean_items=[]; subtotal=0.0
+        for it in items:
+            desc=str(it.get("description") or "").strip()[:240]
+            if not desc: continue
+            try: qty=float(it.get("quantity") or 1)
+            except Exception: qty=1
+            try: price=float(it.get("unit_price") or 0)
+            except Exception: price=0
+            amount=round(qty*price,2); subtotal+=amount
+            clean_items.append((desc, qty, price, amount))
+        if not clean_items:
+            return jsonify({"error":"At least one valid invoice line item is required"}),400
+        tax_total=round(subtotal*tax_rate/100,2); total=round(subtotal+tax_total,2)
+        now=ts()
+        db.execute("""INSERT INTO invoices(id,workspace_id,invoice_no,customer_name,customer_email,issue_date,due_date,status,currency,subtotal,tax_total,total,notes,created_by,created,updated)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (inv_id, wid(), inv_no, str(d.get("customer_name") or "").strip(), str(d.get("customer_email") or "").strip(), str(d.get("issue_date") or now_ist().strftime("%Y-%m-%d"))[:10], str(d.get("due_date") or "")[:10], str(d.get("status") or "draft").lower(), currency, round(subtotal,2), tax_total, total, str(d.get("notes") or profile.get("invoice_notes") or "").strip(), session.get("user_id"), now, now))
+        for desc,qty,price,amount in clean_items:
+            db.execute("INSERT INTO invoice_items(id,workspace_id,invoice_id,description,quantity,unit_price,amount) VALUES(?,?,?,?,?,?,?)", (f"ii{secrets.token_hex(8)}", wid(), inv_id, desc, qty, price, amount))
+        inv = dict(db.execute("SELECT * FROM invoices WHERE id=? AND workspace_id=?", (inv_id, wid())).fetchone())
+        inv["items"]=[dict(x) for x in db.execute("SELECT * FROM invoice_items WHERE invoice_id=?", (inv_id,)).fetchall()]
+    return jsonify(inv)
+
+@app.route("/api/billing/invoices/<invoice_id>/status", methods=["PUT"])
+@login_required
+def billing_update_invoice_status(invoice_id):
+    if not _billing_admin_required():
+        return jsonify({"error":"Only workspace admins/managers can update invoices"}),403
+    status = str((request.json or {}).get("status") or "draft").lower()
+    if status not in ("draft","sent","paid","overdue","void"):
+        return jsonify({"error":"Invalid status"}),400
+    with get_db() as db:
+        db.execute("UPDATE invoices SET status=?, updated=? WHERE id=? AND workspace_id=?", (status, ts(), invoice_id, wid()))
+        inv = db.execute("SELECT * FROM invoices WHERE id=? AND workspace_id=?", (invoice_id, wid())).fetchone()
+        if not inv: return jsonify({"error":"Invoice not found"}),404
+        return jsonify(dict(inv))
 
 @app.route("/api/billing/create-checkout", methods=["POST"])
 @login_required
