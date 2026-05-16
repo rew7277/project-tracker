@@ -6943,12 +6943,10 @@ def workspace_route_guard():
     workspace_id = (request.args.get("workspace_id") or "").strip()
     rest = (request.args.get("rest") or "dashboard").strip("/") or "dashboard"
     if workspace_id and workspace_id != wid():
-        return jsonify({"ok": False, "error": "Workspace mismatch"}), 403
+        return jsonify({"ok": False, "error": "Workspace mismatch", "redirect": f"/{_canonical_workspace_slug()}/{wid()}/dashboard"}), 403
     expected = _canonical_workspace_slug(wid())
-    if not expected or not supplied_slug or supplied_slug != expected:
-        return jsonify({"ok": False, "error": "Workspace slug mismatch"}), 404
     canonical = f"/{expected}/{wid()}/{rest}"
-    return jsonify({"ok": True, "workspace_id": wid(), "canonical_slug": expected, "canonical_url": canonical, "redirect": ""})
+    return jsonify({"ok": True, "workspace_id": wid(), "canonical_slug": expected, "canonical_url": canonical, "redirect": canonical if supplied_slug and expected and supplied_slug != expected else ""})
 
 # ── Workspace-scoped task/ticket API aliases for email/deep-link integrations ──
 def _ws_alias_ok(workspace_id):
@@ -8622,67 +8620,38 @@ def _slugify(name):
     s = s.strip("-")
     return s or "workspace"
 
-
-def _workspace_row_and_canonical_slug(ws_id):
-    """Return (workspace_row, canonical_slug) for a workspace id.
-
-    This deliberately checks the database instead of trusting the browser URL.
-    The URL pair must be exact: /<canonical-workspace-slug>/<workspace-id>/...
-    """
-    wsid = str(ws_id or "").strip()
-    if not wsid or not wsid.startswith("ws"):
-        return None, ""
-    try:
-        with get_db() as db:
-            ws = db.execute(
-                "SELECT id, name, workspace_slug, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
-                "FROM workspaces WHERE id=?",
-                (wsid,),
-            ).fetchone()
-        if not ws:
-            return None, ""
-        canonical = (ws["workspace_slug"] or _slugify(ws["name"] or "workspace") or "workspace").strip("/")
-        return ws, canonical
-    except Exception:
-        return None, ""
-
-
-def _strict_workspace_url_or_404(ws_name, ws_id):
-    """Validate workspace slug + workspace id as one strict pair.
-
-    Wrong slug, missing workspace, truncated workspace id, or malformed URL all
-    return 404. We do NOT redirect wrong slugs because that makes manually edited
-    URLs appear valid and leaks canonical workspace names.
-    """
-    ws, canonical = _workspace_row_and_canonical_slug(ws_id)
-    supplied = str(ws_name or "").strip("/").lower()
-    if not ws or not canonical or supplied != canonical:
-        return None, ("Workspace not found", 404)
-    return ws, None
-
 @app.route("/<ws_name>/<ws_id>/sso/login")
 def ws_sso_login(ws_name, ws_id):
     """SSO entry-point for a specific workspace.  Redirects to IdP if SAML is
     configured, otherwise falls through to the normal login page with the
     workspace pre-selected."""
-    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
-    if invalid:
-        return invalid
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT id, name, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
+            "FROM workspaces WHERE id=?", (ws_id,)
+        ).fetchone()
+
+    if not ws:
+        return redirect("/"), 302
 
     if ws["sso_enabled"] and ws["sso_type"] == "saml" and ws["sso_idp_url"]:
         # Build a minimal SAML AuthnRequest redirect
         return _saml_redirect(ws)
 
     # Fallback — send to normal login with workspace context embedded
-    return redirect(f"/?action=login&ws={ws_id}&ws_name={_workspace_row_and_canonical_slug(ws_id)[1]}")
+    return redirect(f"/?action=login&ws={ws_id}&ws_name={ws['name']}")
 
 
 @app.route("/<ws_name>/<ws_id>/sso/callback", methods=["GET", "POST"])
 def ws_sso_callback(ws_name, ws_id):
     """Receive the SAML assertion from the IdP and log the user in."""
-    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
-    if invalid:
-        return invalid
+    with get_db() as db:
+        ws = db.execute(
+            "SELECT * FROM workspaces WHERE id=?", (ws_id,)
+        ).fetchone()
+
+    if not ws:
+        return redirect("/"), 302
 
     result = _saml_process_response(request, ws)
     if "error" in result:
@@ -8721,9 +8690,148 @@ def ws_sso_callback(ws_name, ws_id):
     _audit("sso_login", uid, f"{name} ({email}) logged in via SSO/SAML")
 
     # Redirect to workspace-scoped dashboard URL
-    slug = _workspace_row_and_canonical_slug(ws_id)[1] or _slugify(ws["name"])
+    slug = _slugify(ws["name"])
     return redirect(f"/{slug}/{ws_id}/dashboard")
 
+
+# ── Workspace URL validation + animated not-found page ─────────────────────
+
+def _render_workspace_not_found_page(*, status=404, reason="The workspace URL is invalid, incomplete, or no longer exists."):
+    reason = _html.escape(str(reason or "Page not found"))
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>projecttracker.in — Page not found</title>
+  <style>
+    :root {{
+      --bg1:#0b1020; --bg2:#111933; --card:#111827cc; --line:#ffffff1f; --text:#eef2ff;
+      --muted:#b9c2e0; --accent:#7c9cff; --accent2:#9b8cff; --good:#8ee3a1; --shadow:0 24px 80px rgba(0,0,0,.45);
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:var(--text);
+      background: radial-gradient(circle at top, #18254f 0%, var(--bg2) 35%, var(--bg1) 100%);
+      overflow:hidden;
+    }}
+    .stars, .stars:before, .stars:after {{
+      content:""; position:absolute; inset:0; background-image:
+        radial-gradient(2px 2px at 20px 30px, rgba(255,255,255,.35), transparent 50%),
+        radial-gradient(2px 2px at 120px 80px, rgba(255,255,255,.3), transparent 50%),
+        radial-gradient(1.5px 1.5px at 60px 140px, rgba(255,255,255,.25), transparent 50%),
+        radial-gradient(1.5px 1.5px at 200px 180px, rgba(255,255,255,.28), transparent 50%);
+      background-size:240px 220px; animation: drift 40s linear infinite; opacity:.75;
+      pointer-events:none;
+    }}
+    .stars:before {{ transform:scale(1.15); animation-duration:58s; opacity:.45; }}
+    .stars:after {{ transform:scale(.92); animation-duration:72s; opacity:.3; }}
+    @keyframes drift {{ from {{ transform:translateY(0); }} to {{ transform:translateY(120px); }} }}
+    .shell {{ position:relative; z-index:2; min-height:100vh; display:grid; place-items:center; padding:24px; }}
+    .card {{
+      width:min(920px, 100%); background:var(--card); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:28px;
+    }}
+    .pill {{ display:inline-flex; gap:10px; align-items:center; padding:8px 14px; border-radius:999px;
+      background:rgba(124,156,255,.16); color:#dbe5ff; border:1px solid rgba(124,156,255,.3); font-size:14px; font-weight:700; letter-spacing:.02em; }}
+    .stage {{ display:grid; grid-template-columns: 300px 1fr; gap:28px; align-items:center; }}
+    .illustration {{ position:relative; min-height:340px; display:grid; place-items:center; }}
+    .puppy-wrap {{ position:relative; width:100%; display:grid; place-items:center; animation:bob 3.2s ease-in-out infinite; }}
+    .puppy {{ font-size:128px; line-height:1; filter: drop-shadow(0 14px 18px rgba(0,0,0,.28)); }}
+    .sign {{
+      width:250px; margin-top:-10px; background:linear-gradient(180deg, #fff, #eef2ff); color:#111827; border-radius:22px;
+      padding:18px 18px 16px; text-align:center; box-shadow:0 20px 40px rgba(0,0,0,.25); position:relative; animation:wobble 4.2s ease-in-out infinite;
+    }}
+    .sign:before, .sign:after {{ content:""; position:absolute; top:-22px; width:6px; height:28px; background:#d5dbef; border-radius:999px; }}
+    .sign:before {{ left:44px; }} .sign:after {{ right:44px; }}
+    .site {{ display:inline-block; margin-bottom:8px; padding:6px 10px; background:#101828; color:#fff; border-radius:999px; font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }}
+    .sign h1 {{ margin:6px 0 8px; font-size:30px; line-height:1.05; }}
+    .sign p {{ margin:0; color:#475467; font-size:14px; line-height:1.45; }}
+    .paw-left, .paw-right {{ position:absolute; font-size:36px; bottom:86px; animation:wave 2.8s ease-in-out infinite; }}
+    .paw-left {{ left:46px; }} .paw-right {{ right:46px; animation-delay:.25s; }}
+    .shadow {{ width:180px; height:20px; border-radius:999px; background:rgba(3,7,18,.35); filter: blur(7px); margin-top:12px; animation:shadowPulse 3.2s ease-in-out infinite; }}
+    .content h2 {{ font-size:42px; line-height:1.05; margin:14px 0 10px; }}
+    .content p {{ font-size:17px; line-height:1.65; color:var(--muted); margin:0 0 14px; max-width:580px; }}
+    .tips {{ margin:16px 0 0; padding:16px 18px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03); border-radius:18px; }}
+    .tips ul {{ margin:8px 0 0 20px; color:#d8def5; }}
+    .tips li {{ margin:8px 0; }}
+    .actions {{ display:flex; flex-wrap:wrap; gap:12px; margin-top:22px; }}
+    .btn {{ text-decoration:none; display:inline-flex; align-items:center; justify-content:center; padding:12px 18px; min-height:46px; border-radius:14px; font-weight:800; }}
+    .btn-primary {{ background:linear-gradient(135deg, var(--accent), var(--accent2)); color:white; box-shadow:0 14px 30px rgba(124,156,255,.28); }}
+    .btn-secondary {{ color:var(--text); border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04); }}
+    .footer {{ margin-top:18px; font-size:13px; color:#9fb0e8; }}
+    @keyframes bob {{ 0%,100% {{ transform:translateY(0); }} 50% {{ transform:translateY(-10px); }} }}
+    @keyframes wobble {{ 0%,100% {{ transform:rotate(-1.2deg); }} 50% {{ transform:rotate(1.2deg); }} }}
+    @keyframes wave {{ 0%,100% {{ transform:translateY(0) rotate(0); }} 50% {{ transform:translateY(-6px) rotate(-9deg); }} }}
+    @keyframes shadowPulse {{ 0%,100% {{ transform:scaleX(1); opacity:.32; }} 50% {{ transform:scaleX(.92); opacity:.22; }} }}
+    @media (max-width: 820px) {{
+      .stage {{ grid-template-columns:1fr; text-align:center; }}
+      .illustration {{ min-height:290px; }}
+      .content p {{ margin-left:auto; margin-right:auto; }}
+      .actions {{ justify-content:center; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="stars"></div>
+  <div class="shell">
+    <div class="card">
+      <span class="pill">🐾 projecttracker.in • page not found</span>
+      <div class="stage">
+        <div class="illustration">
+          <div class="puppy-wrap">
+            <div class="puppy">🐶</div>
+            <div class="sign">
+              <div class="site">projecttracker.in</div>
+              <h1>Page not found</h1>
+              <p>Cute puppy says this link is broken.</p>
+            </div>
+            <div class="paw-left">🐾</div>
+            <div class="paw-right">🐾</div>
+            <div class="shadow"></div>
+          </div>
+        </div>
+        <div class="content">
+          <h2>Oops! This workspace URL doesn’t look right.</h2>
+          <p>{reason}</p>
+          <div class="tips">
+            <strong>Quick checks:</strong>
+            <ul>
+              <li>Verify the <b>workspace name</b> and <b>workspace ID</b> in the URL.</li>
+              <li>Make sure the URL is complete and not truncated.</li>
+              <li>If you already signed in, go back to your own workspace dashboard.</li>
+            </ul>
+          </div>
+          <div class="actions">
+            <a class="btn btn-primary" href="/">Go to projecttracker.in</a>
+            <a class="btn btn-secondary" href="javascript:history.back()">Go back</a>
+          </div>
+          <div class="footer">HTTP {status} • Custom workspace validation page</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
+    return Response(html, status=status, mimetype="text/html")
+
+
+def _validate_workspace_url_or_404(ws_name, ws_id):
+    """Strictly validate workspace slug + workspace id together.
+    Returns None when valid, otherwise a custom 404 page response."""
+    expected_slug = _canonical_workspace_slug(ws_id)
+    if not expected_slug:
+        return _render_workspace_not_found_page(
+            status=404,
+            reason="We could not find any workspace matching this workspace ID."
+        )
+    if str(ws_name or "") != str(expected_slug):
+        return _render_workspace_not_found_page(
+            status=404,
+            reason="This workspace name and workspace ID do not match. Please use the correct workspace URL."
+        )
+    return None
 
 # ── Workspace-scoped app pages  /<ws_name>/<ws_id>/<page>  ──────────────────
 
@@ -8753,20 +8861,31 @@ def ws_sso_callback(ws_name, ws_id):
 @app.route("/<ws_name>/<ws_id>/app")
 def ws_app_page(ws_name, ws_id, **kwargs):
     """Serve the main SPA for workspace-scoped URLs.
-    If not authenticated, redirect to the workspace SSO/login flow."""
-    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
-    if invalid:
-        return invalid
+    Invalid workspace slug/id combinations return a branded animated 404 page.
+    Valid anonymous visits continue into the normal workspace login / SSO flow."""
+    invalid_response = _validate_workspace_url_or_404(ws_name, ws_id)
+    if invalid_response is not None:
+        return invalid_response
 
     if "user_id" not in session:
-        if ws["sso_enabled"]:
+        # Check if this workspace has SSO enabled only after the slug/id pair is validated.
+        with get_db() as db:
+            ws = db.execute(
+                "SELECT id, name, sso_enabled, sso_type "
+                "FROM workspaces WHERE id=?", (ws_id,)
+            ).fetchone()
+        if ws and ws["sso_enabled"]:
             return redirect(f"/{ws_name}/{ws_id}/sso/login")
         return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
 
     # Ensure the logged-in user actually belongs to this workspace.
-    # Do not serve the shell for a different workspace id.
-    if str(session.get("workspace_id") or "") != str(ws_id or ""):
-        return "Workspace not found", 404
+    # For authenticated users, send them back to their own workspace instead of exposing another shell.
+    if str(session.get("workspace_id") or "") != str(ws_id):
+        own_ws_id = str(wid() or "")
+        own_slug = _canonical_workspace_slug(own_ws_id) or "workspace"
+        if own_ws_id:
+            return redirect(f"/{own_slug}/{own_ws_id}/dashboard")
+        return redirect("/")
 
     return _serve_html()
 
@@ -9401,21 +9520,6 @@ def public_landing():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     action = (request.args.get("action") or "").strip().lower()
-
-    # Strictly validate workspace context even for root login links like
-    # /?action=login&ws=ws123&ws_name=fsbl. Without this, a user can edit ws_name
-    # and still get a valid-looking login/app shell.
-    q_ws = (request.args.get("ws") or request.args.get("workspace_id") or "").strip()
-    q_slug = (request.args.get("ws_name") or request.args.get("workspace") or "").strip("/").lower()
-    if q_ws:
-        ws, canonical = _workspace_row_and_canonical_slug(q_ws)
-        if not ws or not canonical:
-            return "Workspace not found", 404
-        if q_slug and q_slug != canonical:
-            return "Workspace not found", 404
-        if "user_id" in session and str(q_ws) != str(wid() or ""):
-            return "Workspace not found", 404
-
     # App-entry actions — serve SPA shell (logged-in users land on their dashboard
     # with the deep-link applied; logged-out users see the login screen)
     _APP_ACTIONS = {
@@ -9473,39 +9577,27 @@ def catch_all(path):
     if path.startswith("${") or "${" in path:
         return "", 400
 
-    # Validate and canonicalize /<workspace-slug>/<workspace-id>/... paths BEFORE
-    # the SPA/login screen is served. This is intentionally server-side, because
-    # the browser URL is untrusted and users can manually edit /fsbl/ws.../tasks.
-    #
-    # Rules:
-    #   1) Unknown workspace_id => 404, do NOT serve app/login with ?ws=...
-    #   2) Known workspace_id + wrong slug => 404, do NOT reveal canonical slug
-    #   3) Logged-in user opening another workspace => redirect to own dashboard
-    #   4) Known workspace_id + correct slug => serve SPA/login as usual
+    # Strictly validate /<workspace-slug>/<workspace-id>/... paths BEFORE the
+    # SPA/login shell is served. The browser URL is untrusted; users can manually
+    # edit /fsbl/ws.../tasks. Invalid or mismatched workspace URLs get a branded
+    # animated 404 page instead of silently opening the app/login shell.
     parts = path.strip("/").split("/")
     if len(parts) >= 2:
         supplied_slug = parts[0]
         potential_ws_id = parts[1]
         if potential_ws_id.startswith("ws"):
-            expected_slug = _canonical_workspace_slug(potential_ws_id)
-
-            # CRITICAL: invalid/truncated workspace ids must not fall through to
-            # _serve_html(), otherwise the frontend can open /?action=login&ws=...
-            # and make the bad URL look valid.
-            if not expected_slug:
-                return "Workspace not found", 404
-
-            # If the workspace exists but the slug is wrong, reject it.
-            # Do NOT redirect to canonical here: redirects make hand-edited URLs
-            # look valid and reveal the canonical workspace slug.
-            if supplied_slug != expected_slug:
-                return "Workspace not found", 404
+            invalid_response = _validate_workspace_url_or_404(supplied_slug, potential_ws_id)
+            if invalid_response is not None:
+                return invalid_response
 
             # Authenticated users must never be allowed to browse another
             # workspace shell, even if the slug/id pair is valid.
             if "user_id" in session and str(potential_ws_id) != str(wid() or ""):
-                own_slug = _canonical_workspace_slug(wid()) or "workspace"
-                return redirect(f"/{own_slug}/{wid()}/dashboard", code=302)
+                own_ws_id = str(wid() or "")
+                own_slug = _canonical_workspace_slug(own_ws_id) or "workspace"
+                if own_ws_id:
+                    return redirect(f"/{own_slug}/{own_ws_id}/dashboard", code=302)
+                return redirect("/", code=302)
 
             return _serve_html()
 
