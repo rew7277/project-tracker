@@ -6943,10 +6943,12 @@ def workspace_route_guard():
     workspace_id = (request.args.get("workspace_id") or "").strip()
     rest = (request.args.get("rest") or "dashboard").strip("/") or "dashboard"
     if workspace_id and workspace_id != wid():
-        return jsonify({"ok": False, "error": "Workspace mismatch", "redirect": f"/{_canonical_workspace_slug()}/{wid()}/dashboard"}), 403
+        return jsonify({"ok": False, "error": "Workspace mismatch"}), 403
     expected = _canonical_workspace_slug(wid())
+    if not expected or not supplied_slug or supplied_slug != expected:
+        return jsonify({"ok": False, "error": "Workspace slug mismatch"}), 404
     canonical = f"/{expected}/{wid()}/{rest}"
-    return jsonify({"ok": True, "workspace_id": wid(), "canonical_slug": expected, "canonical_url": canonical, "redirect": canonical if supplied_slug and expected and supplied_slug != expected else ""})
+    return jsonify({"ok": True, "workspace_id": wid(), "canonical_slug": expected, "canonical_url": canonical, "redirect": ""})
 
 # ── Workspace-scoped task/ticket API aliases for email/deep-link integrations ──
 def _ws_alias_ok(workspace_id):
@@ -8620,38 +8622,67 @@ def _slugify(name):
     s = s.strip("-")
     return s or "workspace"
 
+
+def _workspace_row_and_canonical_slug(ws_id):
+    """Return (workspace_row, canonical_slug) for a workspace id.
+
+    This deliberately checks the database instead of trusting the browser URL.
+    The URL pair must be exact: /<canonical-workspace-slug>/<workspace-id>/...
+    """
+    wsid = str(ws_id or "").strip()
+    if not wsid or not wsid.startswith("ws"):
+        return None, ""
+    try:
+        with get_db() as db:
+            ws = db.execute(
+                "SELECT id, name, workspace_slug, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
+                "FROM workspaces WHERE id=?",
+                (wsid,),
+            ).fetchone()
+        if not ws:
+            return None, ""
+        canonical = (ws["workspace_slug"] or _slugify(ws["name"] or "workspace") or "workspace").strip("/")
+        return ws, canonical
+    except Exception:
+        return None, ""
+
+
+def _strict_workspace_url_or_404(ws_name, ws_id):
+    """Validate workspace slug + workspace id as one strict pair.
+
+    Wrong slug, missing workspace, truncated workspace id, or malformed URL all
+    return 404. We do NOT redirect wrong slugs because that makes manually edited
+    URLs appear valid and leaks canonical workspace names.
+    """
+    ws, canonical = _workspace_row_and_canonical_slug(ws_id)
+    supplied = str(ws_name or "").strip("/").lower()
+    if not ws or not canonical or supplied != canonical:
+        return None, ("Workspace not found", 404)
+    return ws, None
+
 @app.route("/<ws_name>/<ws_id>/sso/login")
 def ws_sso_login(ws_name, ws_id):
     """SSO entry-point for a specific workspace.  Redirects to IdP if SAML is
     configured, otherwise falls through to the normal login page with the
     workspace pre-selected."""
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT id, name, sso_enabled, sso_type, sso_idp_url, sso_entity_id "
-            "FROM workspaces WHERE id=?", (ws_id,)
-        ).fetchone()
-
-    if not ws:
-        return redirect("/"), 302
+    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
+    if invalid:
+        return invalid
 
     if ws["sso_enabled"] and ws["sso_type"] == "saml" and ws["sso_idp_url"]:
         # Build a minimal SAML AuthnRequest redirect
         return _saml_redirect(ws)
 
     # Fallback — send to normal login with workspace context embedded
-    return redirect(f"/?action=login&ws={ws_id}&ws_name={ws['name']}")
+    return redirect(f"/?action=login&ws={ws_id}&ws_name={_workspace_row_and_canonical_slug(ws_id)[1]}")
 
 
 @app.route("/<ws_name>/<ws_id>/sso/callback", methods=["GET", "POST"])
 def ws_sso_callback(ws_name, ws_id):
     """Receive the SAML assertion from the IdP and log the user in."""
-    with get_db() as db:
-        ws = db.execute(
-            "SELECT * FROM workspaces WHERE id=?", (ws_id,)
-        ).fetchone()
-
-    if not ws:
-        return redirect("/"), 302
+    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
+    if invalid:
+        return invalid
 
     result = _saml_process_response(request, ws)
     if "error" in result:
@@ -8690,7 +8721,7 @@ def ws_sso_callback(ws_name, ws_id):
     _audit("sso_login", uid, f"{name} ({email}) logged in via SSO/SAML")
 
     # Redirect to workspace-scoped dashboard URL
-    slug = _slugify(ws["name"])
+    slug = _workspace_row_and_canonical_slug(ws_id)[1] or _slugify(ws["name"])
     return redirect(f"/{slug}/{ws_id}/dashboard")
 
 
@@ -8723,20 +8754,19 @@ def ws_sso_callback(ws_name, ws_id):
 def ws_app_page(ws_name, ws_id, **kwargs):
     """Serve the main SPA for workspace-scoped URLs.
     If not authenticated, redirect to the workspace SSO/login flow."""
+    ws, invalid = _strict_workspace_url_or_404(ws_name, ws_id)
+    if invalid:
+        return invalid
+
     if "user_id" not in session:
-        # Check if this workspace has SSO enabled
-        with get_db() as db:
-            ws = db.execute(
-                "SELECT id, name, sso_enabled, sso_type "
-                "FROM workspaces WHERE id=?", (ws_id,)
-            ).fetchone()
-        if ws and ws["sso_enabled"]:
+        if ws["sso_enabled"]:
             return redirect(f"/{ws_name}/{ws_id}/sso/login")
         return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
 
-    # Ensure the logged-in user actually belongs to this workspace
-    if session.get("workspace_id") != ws_id:
-        return redirect(f"/?action=login&ws={ws_id}&ws_name={ws_name}")
+    # Ensure the logged-in user actually belongs to this workspace.
+    # Do not serve the shell for a different workspace id.
+    if str(session.get("workspace_id") or "") != str(ws_id or ""):
+        return "Workspace not found", 404
 
     return _serve_html()
 
@@ -9371,6 +9401,21 @@ def public_landing():
     if request.method == "HEAD":
         return Response(status=200, headers={"Cache-Control": "no-store"})
     action = (request.args.get("action") or "").strip().lower()
+
+    # Strictly validate workspace context even for root login links like
+    # /?action=login&ws=ws123&ws_name=fsbl. Without this, a user can edit ws_name
+    # and still get a valid-looking login/app shell.
+    q_ws = (request.args.get("ws") or request.args.get("workspace_id") or "").strip()
+    q_slug = (request.args.get("ws_name") or request.args.get("workspace") or "").strip("/").lower()
+    if q_ws:
+        ws, canonical = _workspace_row_and_canonical_slug(q_ws)
+        if not ws or not canonical:
+            return "Workspace not found", 404
+        if q_slug and q_slug != canonical:
+            return "Workspace not found", 404
+        if "user_id" in session and str(q_ws) != str(wid() or ""):
+            return "Workspace not found", 404
+
     # App-entry actions — serve SPA shell (logged-in users land on their dashboard
     # with the deep-link applied; logged-out users see the login screen)
     _APP_ACTIONS = {
@@ -9434,7 +9479,7 @@ def catch_all(path):
     #
     # Rules:
     #   1) Unknown workspace_id => 404, do NOT serve app/login with ?ws=...
-    #   2) Known workspace_id + wrong slug => redirect to canonical slug
+    #   2) Known workspace_id + wrong slug => 404, do NOT reveal canonical slug
     #   3) Logged-in user opening another workspace => redirect to own dashboard
     #   4) Known workspace_id + correct slug => serve SPA/login as usual
     parts = path.strip("/").split("/")
@@ -9450,12 +9495,11 @@ def catch_all(path):
             if not expected_slug:
                 return "Workspace not found", 404
 
-            # If the workspace exists but the slug is wrong, canonicalize it for
-            # both logged-in and logged-out users. Keep the path/query intact.
+            # If the workspace exists but the slug is wrong, reject it.
+            # Do NOT redirect to canonical here: redirects make hand-edited URLs
+            # look valid and reveal the canonical workspace slug.
             if supplied_slug != expected_slug:
-                rest = "/".join(parts[2:]) or "dashboard"
-                qs = ("?" + request.query_string.decode("utf-8")) if request.query_string else ""
-                return redirect(f"/{expected_slug}/{potential_ws_id}/{rest}{qs}", code=302)
+                return "Workspace not found", 404
 
             # Authenticated users must never be allowed to browse another
             # workspace shell, even if the slug/id pair is valid.
