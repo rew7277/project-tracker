@@ -1866,7 +1866,7 @@ function TaskModal({task,onClose,onSave,onDel,projects,users,cu,defaultPid,onSet
     if(task&&task.id)payload.id=task.id;
     if(!rmEnabled&&!opts.keepOpen){
       if((payload.stage==='completed'||payload.stage==='production')&&typeof window!=='undefined'){
-        try{window.dispatchEvent(new CustomEvent('pt:task-celebrate',{detail:{title:payload.title||title||'Task',project:payload.project||pid||''}}));}catch(_){ }
+        try{window.dispatchEvent(new CustomEvent('pt:task-celebrate',{detail:{title:payload.title||title||'Task',project:payload.project||pid||'',id:payload.id||''}}));}catch(_){ }
       }
       const closeNow=()=>{setSaving(false);onClose();};
       if(window.ReactDOM&&typeof ReactDOM.flushSync==='function')ReactDOM.flushSync(closeNow);
@@ -2866,8 +2866,15 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
     window.addEventListener('pt:task-celebrate',h);
     return()=>window.removeEventListener('pt:task-celebrate',h);
   },[]);
+  // Guard: prevent concurrent saves for the same task id (stops double PUT on rapid submits)
+  const _savingTaskIds=useRef(new Set());
   const saveT=async p=>{
+    // Concurrent-save guard — drop the second call if same task is already in-flight
+    const taskKey=p.id?String(p.id):'new_'+Date.now();
+    if(p.id&&_savingTaskIds.current.has(String(p.id)))return;
+    if(p.id)_savingTaskIds.current.add(String(p.id));
     let r;
+    try{
     if(p.id&&safe(tasks).find(t=>t.id===p.id)){
       // UPDATE: optimistic patch immediately
       setData&&setData(prev=>({...prev,tasks:prev.tasks.map(t=>t.id===p.id?{...t,...p}:t)}));
@@ -2891,16 +2898,13 @@ function TasksView({tasks,projects,users,cu,reload,setData,onSetReminder,initial
         setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==tempTaskId)}));
       }
     }
-    // Trigger celebration if task just completed. Do not reload immediately, because
-    // stale cache can briefly move the card back to the old stage and then forward again.
-    if(p.stage==='completed'||p.stage==='production'){
-      const tTitle=p.title||(safe(tasks).find(t=>t.id===p.id)||{}).title||'Task';
-      triggerTaskCelebration(tTitle,p.project,p.id||'');
-    }
+    // NOTE: celebration is fired by pt:task-celebrate event (dispatched by TaskModal before save),
+    // so we do NOT call triggerTaskCelebration here to avoid double badge/confetti.
     if(r&&r.id){
       setData&&setData(prev=>({...prev,tasks:(prev.tasks||[]).map(t=>t.id===r.id?{...t,...r}:t)}));
     }
     return r;
+    }finally{if(p.id)_savingTaskIds.current.delete(String(p.id));}
   };
   const delT=async id=>{
     setData&&setData(prev=>({...prev,tasks:prev.tasks.filter(t=>t.id!==id)}));
@@ -9784,6 +9788,8 @@ function BillingInvoicesView({cu}){
   const [nextNo,setNextNo]=useState('INV-0001');
   const [tab,setTab]=useState('overview');
   const [saving,setSaving]=useState(false);
+  const [filterStatus,setFilterStatus]=useState('all');
+  const [searchQ,setSearchQ]=useState('');
   const [draft,setDraft]=useState({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
   const money=(v,c)=>`${c||profile.currency||summary.currency||'INR'} ${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
   const load=useCallback(async()=>{
@@ -9791,7 +9797,7 @@ function BillingInvoicesView({cu}){
     try{
       const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
       if(r&&!r.error){
-        setProfile({...profile,...(r.profile||{})});
+        setProfile(prev=>({...prev,...(r.profile||{})}));
         setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
         setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
         setNextNo(r.next_invoice_no||'INV-0001');
@@ -9804,6 +9810,7 @@ function BillingInvoicesView({cu}){
   },[]);
   useEffect(()=>{load();},[load]);
   const setItem=(i,k,v)=>setDraft(d=>({...d,items:d.items.map((it,idx)=>idx===i?{...it,[k]:v}:it)}));
+  const removeItem=(i)=>setDraft(d=>({...d,items:d.items.filter((_,idx)=>idx!==i)}));
   const subtotal=(draft.items||[]).reduce((a,it)=>a+(Number(it.quantity||0)*Number(it.unit_price||0)),0);
   const taxRate=Number(profile.tax_rate||0); const tax=subtotal*taxRate/100; const total=subtotal+tax;
   const saveProfile=async()=>{
@@ -9811,12 +9818,13 @@ function BillingInvoicesView({cu}){
     const optimistic={...profile};
     try{
       const r=await api.put('/api/billing/profile',optimistic);
-      if(r&&!r.error){setProfile({...optimistic,...r});try{window._pfToast&&window._pfToast('success','Billing profile saved','Company invoice details updated instantly.');}catch{}}
+      if(r&&!r.error){setProfile({...optimistic,...r});try{window._pfToast&&window._pfToast('success','Billing profile saved','Company invoice details updated.');}catch{}}
       else setErr((r&&r.error)||'Could not save billing profile');
     }catch(e){setErr('Could not save billing profile');}
     setSaving(false);
   };
   const createInvoice=async()=>{
+    if(!draft.customer_name.trim())return;
     setSaving(true);setErr('');
     const temp={...draft,id:'tmp_'+Date.now(),invoice_no:nextNo||'INV-0001',currency:profile.currency||'INR',subtotal,tax_total:tax,total,status:draft.status||'draft',created:new Date().toISOString(),items:draft.items};
     setInvoices(prev=>[temp,...prev]);
@@ -9827,6 +9835,7 @@ function BillingInvoicesView({cu}){
       if(r&&!r.error){
         setInvoices(prev=>prev.map(x=>x.id===temp.id?r:x));
         setDraft({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
+        try{window._pfToast&&window._pfToast('success','Invoice created',`${r.invoice_no} saved successfully.`);}catch{}
         load();
       }else{
         setInvoices(prev=>prev.filter(x=>x.id!==temp.id));
@@ -9840,74 +9849,279 @@ function BillingInvoicesView({cu}){
     if(String(id).startsWith('tmp_'))return;
     try{const r=await api.put('/api/billing/invoices/'+id+'/status',{status});if(r&&r.error)setErr(r.error);}catch(e){setErr('Could not update invoice status');}
   };
-  const card=(label,val,sub,icon)=>html`<div style=${{padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 18px 50px rgba(15,23,42,.08)'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><span style=${{fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.4}}>${label}</span><span style=${{fontSize:22}}>${icon}</span></div><div style=${{fontSize:25,fontWeight:950,color:'var(--tx)',lineHeight:1}}>${val}</div><div style=${{fontSize:11,color:'var(--tx3)',marginTop:8}}>${sub}</div></div>`;
-  return html`<div style=${{height:'100%',minHeight:'calc(100vh - 112px)',overflow:'auto',padding:24,background:'var(--bg)'}}>
-    <div style=${{display:'flex',justifyContent:'space-between',gap:14,alignItems:'flex-start',marginBottom:18}}>
-      <div><div style=${{fontSize:28,fontWeight:950,color:'var(--tx)',letterSpacing:-.7}}>Billing & Invoices</div><div style=${{fontSize:13,color:'var(--tx2)',marginTop:5}}>Manage company billing details, create invoices, and track invoice history from one professional billing center.</div></div>
-      <button class="btn bp" onClick=${()=>setTab('create')} disabled=${!canManageBilling}>+ Create invoice</button>
+  const printInvoice=(inv)=>{
+    const cur=inv.currency||profile.currency||'INR';
+    const fmt=(v)=>`${cur} ${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+    const w=window.open('','_blank','width=800,height=900');
+    if(!w)return;
+    const rows=(inv.items||[]).map(it=>`<tr><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb">${it.description||'Service'}</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right">${it.quantity||1}</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right">${fmt(it.unit_price)}</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:700">${fmt(Number(it.quantity||0)*Number(it.unit_price||0))}</td></tr>`).join('');
+    w.document.write(`<!DOCTYPE html><html><head><title>${inv.invoice_no||'Invoice'}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:40px;color:#111;max-width:760px;margin:0 auto}table{width:100%;border-collapse:collapse}@media print{button{display:none}}</style></head><body><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:32px"><div><h1 style="margin:0 0 4px;font-size:28px;font-weight:900">${inv.invoice_no||'Invoice'}</h1><span style="font-size:13px;color:#6b7280;background:#f3f4f6;padding:3px 10px;border-radius:999px">${(inv.status||'draft').toUpperCase()}</span></div><div style="text-align:right;font-size:13px;color:#374151"><b style="font-size:22px;color:#111">${fmt(inv.total)}</b><br/>Issued: ${inv.issue_date||'—'}<br/>${inv.due_date?'Due: '+inv.due_date:''}</div></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px;padding:20px;background:#f9fafb;border-radius:12px"><div><div style="font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">Billed To</div><div style="font-weight:700">${inv.customer_name||'Customer'}</div><div style="color:#6b7280">${inv.customer_email||''}</div></div><div><div style="font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;margin-bottom:6px">From</div><div style="font-weight:700">${profile.legal_name||'Company'}</div><div style="color:#6b7280">${profile.billing_email||''}</div>${profile.tax_id?`<div style="color:#6b7280">GST/Tax: ${profile.tax_id}</div>`:''}</div></div><table><thead><tr style="background:#f3f4f6"><th style="padding:10px 12px;text-align:left;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase">Description</th><th style="padding:10px 12px;text-align:right;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase">Qty</th><th style="padding:10px 12px;text-align:right;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase">Unit Price</th><th style="padding:10px 12px;text-align:right;font-size:12px;font-weight:700;color:#6b7280;text-transform:uppercase">Amount</th></tr></thead><tbody>${rows}</tbody></table><div style="display:flex;justify-content:flex-end;margin-top:16px"><div style="width:280px"><div style="display:flex;justify-content:space-between;padding:8px 0;color:#6b7280"><span>Subtotal</span><span>${fmt(inv.subtotal||0)}</span></div><div style="display:flex;justify-content:space-between;padding:8px 0;color:#6b7280"><span>Tax</span><span>${fmt(inv.tax_total||0)}</span></div><div style="display:flex;justify-content:space-between;padding:12px 0;font-size:18px;font-weight:900;border-top:2px solid #111"><span>Total</span><span>${fmt(inv.total)}</span></div></div></div>${inv.notes?`<div style="margin-top:24px;padding:16px;background:#f9fafb;border-radius:8px;font-size:13px;color:#6b7280"><b>Notes:</b><br/>${inv.notes}</div>`:''}<div style="margin-top:32px;text-align:center"><button onclick="window.print()" style="padding:10px 28px;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer">Print / Save PDF</button></div></body></html>`);
+    w.document.close();
+  };
+
+  // Status badge styling
+  const statusBadge=(s)=>{
+    const styles={
+      paid:{bg:'rgba(21,128,61,.13)',color:'#15803d'},
+      sent:{bg:'rgba(37,99,235,.13)',color:'#1d4ed8'},
+      draft:{bg:'rgba(107,114,128,.13)',color:'#6b7280'},
+      overdue:{bg:'rgba(185,28,28,.14)',color:'#b91c1c'},
+      void:{bg:'rgba(100,116,139,.13)',color:'#64748b'},
+    };
+    const st=styles[s]||styles.draft;
+    return html`<span style=${{fontSize:10,fontWeight:900,textTransform:'uppercase',padding:'4px 9px',borderRadius:999,background:st.bg,color:st.color,letterSpacing:.3}}>${s||'draft'}</span>`;
+  };
+
+  // Filtered invoice list
+  const filteredInvoices=(invoices||[]).filter(inv=>{
+    const matchStatus=filterStatus==='all'||inv.status===filterStatus;
+    const q=searchQ.toLowerCase();
+    const matchSearch=!q||(inv.invoice_no||'').toLowerCase().includes(q)||(inv.customer_name||'').toLowerCase().includes(q)||(inv.customer_email||'').toLowerCase().includes(q);
+    return matchStatus&&matchSearch;
+  });
+
+  // Summary stats
+  const paidCount=(invoices||[]).filter(i=>i.status==='paid').length;
+  const overdueCount=(invoices||[]).filter(i=>i.status==='overdue').length;
+  const draftCount=(invoices||[]).filter(i=>i.status==='draft').length;
+
+  const statCard=(label,val,sub,icon,color,bg)=>html`
+    <div style=${{padding:'18px 20px',borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)',boxShadow:'0 2px 12px rgba(15,23,42,.06)',display:'flex',flexDirection:'column',gap:8}}>
+      <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.5}}>${label}</span>
+        <span style=${{width:34,height:34,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:10,background:bg,fontSize:17}}>${icon}</span>
+      </div>
+      <div style=${{fontSize:24,fontWeight:950,color:color||'var(--tx)',letterSpacing:-.5,lineHeight:1}}>${val}</div>
+      <div style=${{fontSize:11,color:'var(--tx3)'}}>${sub}</div>
+    </div>`;
+
+  return html`<div style=${{height:'100%',minHeight:'calc(100vh - 112px)',overflow:'auto',padding:'24px 28px',background:'var(--bg)'}}>
+    <!-- Header -->
+    <div style=${{display:'flex',justifyContent:'space-between',gap:14,alignItems:'flex-start',marginBottom:20}}>
+      <div>
+        <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:4}}>
+          <div style=${{width:36,height:36,borderRadius:10,background:'rgba(90,140,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🧾</div>
+          <div style=${{fontSize:26,fontWeight:950,color:'var(--tx)',letterSpacing:-.6}}>Billing & Invoices</div>
+        </div>
+        <div style=${{fontSize:13,color:'var(--tx2)',marginLeft:46}}>Manage company profile, create & track invoices, download records.</div>
+      </div>
+      <div style=${{display:'flex',gap:8,flexShrink:0}}>
+        <button class="btn bg" onClick=${load} disabled=${loading} style=${{gap:6}}>↻ Refresh</button>
+        ${canManageBilling?html`<button class="btn bp" onClick=${()=>setTab('create')} style=${{gap:6}}>+ New invoice</button>`:null}
+      </div>
     </div>
-    ${loading?html`<div style=${{marginBottom:14,padding:12,borderRadius:14,background:'rgba(90,140,255,.10)',border:'1px solid rgba(90,140,255,.20)',color:'var(--tx2)',fontSize:12}}>Loading billing details…</div>`:null}
-    ${err?html`<div style=${{marginBottom:14,padding:12,borderRadius:14,background:'rgba(239,68,68,.10)',border:'1px solid rgba(239,68,68,.22)',color:'var(--rd)',fontSize:12,fontWeight:750}}>${err}</div>`:null}
-    ${!canManageBilling?html`<div style=${{marginBottom:14,padding:14,borderRadius:16,background:'rgba(245,158,11,.10)',border:'1px solid rgba(245,158,11,.22)',color:'var(--tx2)',fontSize:13}}>Billing is visible here, but only Admins, Owners, and Managers can create invoices or update billing details.</div>`:null}
-    <div style=${{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
-      ${[['overview','Overview'],['invoices','Invoices'],['profile','Company details'],['create','Create invoice']].map(([id,l])=>html`<button class=${'chip '+(tab===id?'on':'')} onClick=${()=>setTab(id)}>${l}</button>`)}
+
+    ${loading?html`<div style=${{marginBottom:14,padding:'10px 14px',borderRadius:12,background:'rgba(90,140,255,.10)',border:'1px solid rgba(90,140,255,.20)',color:'var(--tx2)',fontSize:12,display:'flex',gap:8,alignItems:'center'}}>⏳ Loading billing details…</div>`:null}
+    ${err?html`<div style=${{marginBottom:14,padding:'10px 14px',borderRadius:12,background:'rgba(239,68,68,.10)',border:'1px solid rgba(239,68,68,.22)',color:'var(--rd)',fontSize:12,fontWeight:750,display:'flex',gap:8,alignItems:'center'}}>⚠️ ${err} <button class="btn bg" style=${{marginLeft:'auto',padding:'3px 10px',fontSize:11}} onClick=${()=>setErr('')}>✕</button></div>`:null}
+    ${!canManageBilling?html`<div style=${{marginBottom:14,padding:'12px 16px',borderRadius:14,background:'rgba(245,158,11,.09)',border:'1px solid rgba(245,158,11,.22)',color:'var(--tx2)',fontSize:13,display:'flex',gap:10,alignItems:'center'}}>🔒 <span>Read-only view. Only <b>Admins, Owners, and Managers</b> can create invoices or update billing details.</span></div>`:null}
+
+    <!-- Tabs -->
+    <div style=${{display:'flex',gap:6,marginBottom:20,borderBottom:'1px solid var(--bd)',paddingBottom:1}}>
+      ${[['overview','Overview'],['invoices','Invoices'+(invoices.length?` (${invoices.length})`:'')],['profile','Company details'],['create','Create invoice']].map(([id,l])=>html`
+        <button onClick=${()=>setTab(id)} style=${{padding:'7px 16px',fontSize:13,fontWeight:700,background:'none',border:'none',cursor:'pointer',borderBottom:tab===id?'2px solid var(--ac)':'2px solid transparent',color:tab===id?'var(--ac)':'var(--tx2)',marginBottom:-1,borderRadius:'6px 6px 0 0',transition:'color .15s'}}>${l}</button>`)}
     </div>
+
+    <!-- OVERVIEW TAB -->
     ${tab==='overview'?html`<div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:13,marginBottom:16}}>
-        ${card('Total invoices',summary.invoice_count||invoices.length,'Generated in this workspace','🧾')}
-        ${card('Paid revenue',money(summary.paid_total),'Marked as paid','✅')}
-        ${card('Outstanding',money(summary.outstanding_total),'Draft, sent, or overdue','⏳')}
-        ${card('Next invoice no.',nextNo||'INV-0001','Auto-generated from prefix','🔢')}
+      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:13,marginBottom:20}}>
+        ${statCard('Total invoices',invoices.length,'All time in workspace','🧾','var(--tx)','rgba(90,140,255,.12)')}
+        ${statCard('Paid revenue',money(summary.paid_total),'Collected payments','✅','#15803d','rgba(21,128,61,.10)')}
+        ${statCard('Outstanding',money(summary.outstanding_total),'Draft + sent + overdue','⏳','#b45309','rgba(245,158,11,.10)')}
+        ${statCard('Overdue',overdueCount,'Need attention','🚨','#b91c1c','rgba(185,28,28,.10)')}
       </div>
-      <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1.2fr) minmax(280px,.8fr)',gap:14}}>
-        <div style=${{padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
-          <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)',marginBottom:10}}>Recent invoice history</div>
-          ${(invoices||[]).slice(0,6).length?html`<div style=${{display:'flex',flexDirection:'column',gap:8}}>${invoices.slice(0,6).map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'1fr 130px 90px',gap:10,alignItems:'center',padding:12,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)'}}><div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13}}>${inv.invoice_no}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_name||'Customer'} · ${inv.issue_date||''}</div></div><div style=${{fontWeight:900,color:'var(--tx)',fontSize:13,textAlign:'right'}}>${money(inv.total,inv.currency)}</div><span style=${{justifySelf:'end',fontSize:10,fontWeight:900,textTransform:'uppercase',padding:'5px 8px',borderRadius:999,background:'rgba(90,140,255,.12)',color:'var(--ac)'}}>${inv.status||'draft'}</span></div>`)}</div>`:html`<div style=${{padding:28,textAlign:'center',color:'var(--tx3)',border:'1px dashed var(--bd)',borderRadius:16}}>No invoices yet. Create your first invoice to start billing history.</div>`}
-        </div>
-        <div style=${{padding:18,borderRadius:22,background:'linear-gradient(180deg,rgba(90,140,255,.12),var(--sf))',border:'1px solid var(--bd)'}}>
-          <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)',marginBottom:12}}>Company invoice profile</div>
-          <div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.7}}>
-            <b style=${{color:'var(--tx)'}}>${profile.legal_name||'Company name not set'}</b><br/>
-            ${profile.billing_email||'Billing email missing'}<br/>
-            ${profile.tax_id?html`Tax ID / GST: ${profile.tax_id}<br/>`:null}
-            ${profile.city||profile.country?html`${profile.city||''} ${profile.state||''} ${profile.country||''}`:'Address not configured'}
+      <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1.3fr) minmax(260px,.7fr)',gap:16}}>
+        <!-- Recent invoices -->
+        <div style=${{padding:20,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+          <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)'}}>Recent invoices</div>
+            <button class="btn bg" style=${{fontSize:11,padding:'4px 10px'}} onClick=${()=>setTab('invoices')}>View all →</button>
           </div>
-          <button class="btn bg" style=${{marginTop:16,width:'100%',justifyContent:'center'}} onClick=${()=>setTab('profile')}>Update invoice details</button>
+          ${(invoices||[]).slice(0,6).length?html`<div style=${{display:'flex',flexDirection:'column',gap:6}}>
+            ${invoices.slice(0,6).map(inv=>html`
+              <div style=${{display:'grid',gridTemplateColumns:'140px 1fr 110px 90px 34px',gap:8,alignItems:'center',padding:'10px 12px',borderRadius:12,background:'var(--sf2)',border:'1px solid var(--bd)'}}>
+                <div style=${{fontWeight:900,color:'var(--ac)',fontSize:12}}>${inv.invoice_no}</div>
+                <div>
+                  <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)'}}>${inv.customer_name||'Customer'}</div>
+                  <div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.issue_date||''}</div>
+                </div>
+                <div style=${{fontWeight:900,color:'var(--tx)',fontSize:12,textAlign:'right'}}>${money(inv.total,inv.currency)}</div>
+                <div style=${{textAlign:'right'}}>${statusBadge(inv.status)}</div>
+                <button onClick=${()=>printInvoice(inv)} title="Download/Print" style=${{background:'none',border:'none',cursor:'pointer',color:'var(--tx3)',fontSize:14,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>⬇</button>
+              </div>`)}
+          </div>`:html`<div style=${{padding:'32px 20px',textAlign:'center',color:'var(--tx3)',border:'1px dashed var(--bd)',borderRadius:16,fontSize:13}}>No invoices yet.<br/><span style=${{fontSize:11}}>Create your first invoice to get started.</span></div>`}
+        </div>
+        <!-- Company profile snapshot -->
+        <div style=${{display:'flex',flexDirection:'column',gap:12}}>
+          <div style=${{padding:20,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+            <div style=${{fontSize:14,fontWeight:900,color:'var(--tx)',marginBottom:12}}>Company profile</div>
+            <div style=${{fontSize:13,color:'var(--tx2)',lineHeight:1.8}}>
+              <div style=${{fontWeight:900,color:'var(--tx)',fontSize:14,marginBottom:4}}>${profile.legal_name||html`<span style=${{color:'var(--tx3)'}}>Company name not set</span>`}</div>
+              ${profile.billing_email?html`<div style=${{display:'flex',gap:6,alignItems:'center',fontSize:12,color:'var(--tx3)'}}><span>📧</span>${profile.billing_email}</div>`:null}
+              ${profile.tax_id?html`<div style=${{display:'flex',gap:6,alignItems:'center',fontSize:12,color:'var(--tx3)'}}><span>🏷</span>GST/Tax: ${profile.tax_id}</div>`:null}
+              ${profile.city||profile.country?html`<div style=${{display:'flex',gap:6,alignItems:'center',fontSize:12,color:'var(--tx3)'}}><span>📍</span>${[profile.city,profile.state,profile.country].filter(Boolean).join(', ')}</div>`:null}
+              <div style=${{display:'flex',gap:6,alignItems:'center',fontSize:12,color:'var(--tx3)',marginTop:2}}><span>💱</span>${profile.currency||'INR'} · Tax ${profile.tax_rate||0}%</div>
+            </div>
+            <button class="btn bg" style=${{marginTop:14,width:'100%',justifyContent:'center',fontSize:12}} onClick=${()=>setTab('profile')}>Edit company details</button>
+          </div>
+          <!-- Invoice stats breakdown -->
+          <div style=${{padding:16,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+            <div style=${{fontSize:13,fontWeight:900,color:'var(--tx)',marginBottom:10}}>Invoice breakdown</div>
+            ${[['Paid',paidCount,'#15803d','rgba(21,128,61,.12)'],['Draft',draftCount,'#6b7280','rgba(107,114,128,.12)'],['Overdue',overdueCount,'#b91c1c','rgba(185,28,28,.12)']].map(([l,c,col,bg])=>html`
+              <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderBottom:'1px solid var(--bd)'}}>
+                <div style=${{display:'flex',alignItems:'center',gap:8}}>
+                  <div style=${{width:8,height:8,borderRadius:999,background:col}}></div>
+                  <span style=${{fontSize:12,color:'var(--tx2)'}}>${l}</span>
+                </div>
+                <span style=${{fontWeight:900,fontSize:13,color:col}}>${c}</span>
+              </div>`)}
+            <div style=${{display:'flex',justifyContent:'space-between',padding:'8px 0 0',fontSize:12,color:'var(--tx2)'}}>
+              <span>Next invoice #</span>
+              <span style=${{fontWeight:900,color:'var(--ac)'}}>${nextNo||'INV-0001'}</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>`:null}
-    ${tab==='invoices'?html`<div style=${{border:'1px solid var(--bd)',borderRadius:22,overflow:'hidden',background:'var(--sf)'}}>
-      <div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 120px',gap:12,padding:'12px 14px',background:'var(--sf2)',borderBottom:'1px solid var(--bd)',fontSize:11,fontWeight:950,color:'var(--tx3)',textTransform:'uppercase'}}><span>Invoice</span><span>Customer</span><span>Date</span><span>Total</span><span>Status</span></div>
-      ${(invoices||[]).length?invoices.map(inv=>html`<div style=${{display:'grid',gridTemplateColumns:'150px 1fr 120px 120px 120px',gap:12,padding:'13px 14px',borderBottom:'1px solid var(--bd)',alignItems:'center'}}><div style=${{fontWeight:900,color:'var(--tx)'}}>${inv.invoice_no}</div><div><div style=${{fontSize:13,color:'var(--tx)',fontWeight:800}}>${inv.customer_name||'Customer'}</div><div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_email||'No email'}</div></div><div style=${{fontSize:12,color:'var(--tx2)'}}>${inv.issue_date||'—'}</div><div style=${{fontWeight:900,color:'var(--tx)'}}>${money(inv.total,inv.currency)}</div><select class="inp" disabled=${!canManageBilling} value=${inv.status||'draft'} onChange=${e=>updateStatus(inv.id,e.target.value)} style=${{height:34,fontSize:11}}><option>draft</option><option>sent</option><option>paid</option><option>overdue</option><option>void</option></select></div>`):html`<div style=${{padding:34,textAlign:'center',color:'var(--tx3)'}}>No invoices created yet.</div>`}
+
+    <!-- INVOICES TAB -->
+    ${tab==='invoices'?html`<div>
+      <!-- Filters row -->
+      <div style=${{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
+        <input class="inp" placeholder="Search invoices…" value=${searchQ} onInput=${e=>setSearchQ(e.target.value)} style=${{width:220,height:34,fontSize:13}}/>
+        <div style=${{display:'flex',gap:4}}>
+          ${[['all','All'],['draft','Draft'],['sent','Sent'],['paid','Paid'],['overdue','Overdue'],['void','Void']].map(([v,l])=>html`
+            <button class=${'chip '+(filterStatus===v?'on':'')} onClick=${()=>setFilterStatus(v)} style=${{fontSize:11,padding:'4px 10px'}}>${l}</button>`)}
+        </div>
+        <span style=${{marginLeft:'auto',fontSize:12,color:'var(--tx3)'}}>${filteredInvoices.length} invoice${filteredInvoices.length!==1?'s':''}</span>
+      </div>
+      <!-- Table -->
+      <div style=${{border:'1px solid var(--bd)',borderRadius:18,overflow:'hidden',background:'var(--sf)'}}>
+        <div style=${{display:'grid',gridTemplateColumns:'140px 1fr 110px 120px 110px 80px',gap:10,padding:'10px 16px',background:'var(--sf2)',borderBottom:'1px solid var(--bd)',fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.4}}>
+          <span>Invoice</span><span>Customer</span><span>Date</span><span>Total</span><span>Status</span><span style=${{textAlign:'right'}}>Actions</span>
+        </div>
+        ${filteredInvoices.length?filteredInvoices.map(inv=>html`
+          <div style=${{display:'grid',gridTemplateColumns:'140px 1fr 110px 120px 110px 80px',gap:10,padding:'12px 16px',borderBottom:'1px solid var(--bd)',alignItems:'center',transition:'background .1s'}}
+               onMouseEnter=${e=>e.currentTarget.style.background='var(--sf2)'}
+               onMouseLeave=${e=>e.currentTarget.style.background=''}>
+            <div style=${{fontWeight:900,color:'var(--ac)',fontSize:12}}>${inv.invoice_no}</div>
+            <div>
+              <div style=${{fontSize:12,fontWeight:800,color:'var(--tx)'}}>${inv.customer_name||'Customer'}</div>
+              <div style=${{fontSize:11,color:'var(--tx3)'}}>${inv.customer_email||'No email'}</div>
+            </div>
+            <div style=${{fontSize:12,color:'var(--tx2)'}}>${inv.issue_date||'—'}</div>
+            <div style=${{fontWeight:900,color:'var(--tx)',fontSize:13}}>${money(inv.total,inv.currency)}</div>
+            <div>
+              <select class="inp" disabled=${!canManageBilling} value=${inv.status||'draft'} onChange=${e=>updateStatus(inv.id,e.target.value)} style=${{height:28,fontSize:11,padding:'2px 6px'}}>
+                <option>draft</option><option>sent</option><option>paid</option><option>overdue</option><option>void</option>
+              </select>
+            </div>
+            <div style=${{display:'flex',gap:4,justifyContent:'flex-end'}}>
+              <button onClick=${()=>printInvoice(inv)} title="Download/Print invoice" style=${{background:'none',border:'1px solid var(--bd)',cursor:'pointer',color:'var(--tx2)',fontSize:12,padding:'4px 7px',borderRadius:7,display:'flex',alignItems:'center',gap:3}}>⬇ PDF</button>
+            </div>
+          </div>`):html`
+          <div style=${{padding:'40px 20px',textAlign:'center',color:'var(--tx3)',fontSize:13}}>
+            ${searchQ||filterStatus!=='all'?'No invoices match your filters.':'No invoices created yet.'}
+          </div>`}
+      </div>
     </div>`:null}
-    ${tab==='profile'?html`<div style=${{maxWidth:960,padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
-      <div style=${{fontSize:16,fontWeight:900,color:'var(--tx)',marginBottom:14}}>Company invoice details</div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:12}}>
-        ${[['legal_name','Legal company name'],['billing_email','Billing email'],['tax_id','GST / Tax ID'],['country','Country'],['address_line1','Address line 1'],['address_line2','Address line 2'],['city','City'],['state','State'],['postal_code','Postal code'],['currency','Currency'],['invoice_prefix','Invoice prefix'],['tax_rate','Tax rate %']].map(([k,l])=>html`<label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>${l}<input class="inp" disabled=${!canManageBilling} value=${profile[k]||''} onInput=${e=>setProfile({...profile,[k]:e.target.value})} style=${{marginTop:6}}/></label>`)}
+
+    <!-- COMPANY DETAILS TAB -->
+    ${tab==='profile'?html`<div style=${{maxWidth:880}}>
+      <div style=${{padding:24,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+        <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)',marginBottom:4}}>Company details</div>
+        <div style=${{fontSize:12,color:'var(--tx3)',marginBottom:18}}>This information appears on all invoices you generate.</div>
+        <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:14}}>
+          ${[['legal_name','Legal company name','text'],['billing_email','Billing email','email'],['tax_id','GST / Tax ID','text'],['country','Country','text'],['address_line1','Address line 1','text'],['address_line2','Address line 2','text'],['city','City','text'],['state','State / Province','text'],['postal_code','Postal / ZIP code','text'],['currency','Currency (e.g. INR, USD)','text'],['invoice_prefix','Invoice prefix (e.g. INV)','text'],['tax_rate','Tax rate %','number']].map(([k,l,t])=>html`
+            <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.3}}>
+              ${l}
+              <input class="inp" type=${t} disabled=${!canManageBilling} value=${profile[k]||''} onInput=${e=>setProfile({...profile,[k]:e.target.value})} style=${{marginTop:5}}/>
+            </label>`)}
+        </div>
+        <label style=${{display:'block',marginTop:14,fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.3}}>
+          Default invoice notes
+          <textarea class="inp" disabled=${!canManageBilling} value=${profile.invoice_notes||''} onInput=${e=>setProfile({...profile,invoice_notes:e.target.value})} style=${{marginTop:5,minHeight:80}}></textarea>
+        </label>
+        ${canManageBilling?html`<div style=${{display:'flex',gap:8,marginTop:18}}>
+          <button class="btn bp" disabled=${saving} onClick=${saveProfile}>${saving?'Saving…':'Save company details'}</button>
+        </div>`:null}
       </div>
-      <label style=${{display:'block',marginTop:12,fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>Default invoice notes<textarea class="inp" disabled=${!canManageBilling} value=${profile.invoice_notes||''} onInput=${e=>setProfile({...profile,invoice_notes:e.target.value})} style=${{marginTop:6,minHeight:82}}></textarea></label>
-      <button class="btn bp" disabled=${saving||!canManageBilling} onClick=${saveProfile} style=${{marginTop:14}}>${saving?'Saving…':'Save company details'}</button>
     </div>`:null}
-    ${tab==='create'?html`<div style=${{maxWidth:980,padding:18,borderRadius:22,background:'var(--sf)',border:'1px solid var(--bd)'}}>
-      <div style=${{display:'flex',justifyContent:'space-between',gap:12,marginBottom:14}}><div><div style=${{fontSize:16,fontWeight:900,color:'var(--tx)'}}>Create invoice</div><div style=${{fontSize:12,color:'var(--tx3)'}}>Next number: ${nextNo||'auto'}</div></div><div style=${{fontSize:18,fontWeight:950,color:'var(--tx)'}}>${money(total)}</div></div>
-      <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:10,marginBottom:12}}>
-        <input class="inp" disabled=${!canManageBilling} placeholder="Customer name" value=${draft.customer_name} onInput=${e=>setDraft({...draft,customer_name:e.target.value})}/>
-        <input class="inp" disabled=${!canManageBilling} placeholder="Customer email" value=${draft.customer_email} onInput=${e=>setDraft({...draft,customer_email:e.target.value})}/>
-        <input class="inp" disabled=${!canManageBilling} type="date" value=${draft.issue_date} onInput=${e=>setDraft({...draft,issue_date:e.target.value})}/>
-        <input class="inp" disabled=${!canManageBilling} type="date" value=${draft.due_date} onInput=${e=>setDraft({...draft,due_date:e.target.value})}/>
+
+    <!-- CREATE INVOICE TAB -->
+    ${tab==='create'?html`<div style=${{maxWidth:900}}>
+      <div style=${{padding:24,borderRadius:20,background:'var(--sf)',border:'1px solid var(--bd)'}}>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:18}}>
+          <div>
+            <div style=${{fontSize:15,fontWeight:900,color:'var(--tx)'}}>New invoice</div>
+            <div style=${{fontSize:12,color:'var(--tx3)',marginTop:2}}>Next number: <b style=${{color:'var(--ac)'}}>${nextNo||'auto'}</b></div>
+          </div>
+          <div style=${{textAlign:'right'}}>
+            <div style=${{fontSize:11,color:'var(--tx3)',textTransform:'uppercase',fontWeight:900}}>Total due</div>
+            <div style=${{fontSize:26,fontWeight:950,color:'var(--tx)',letterSpacing:-.5}}>${money(total)}</div>
+          </div>
+        </div>
+        <!-- Customer + dates -->
+        <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))',gap:12,marginBottom:18}}>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            Customer name *
+            <input class="inp" disabled=${!canManageBilling} placeholder="ACME Corp" value=${draft.customer_name} onInput=${e=>setDraft({...draft,customer_name:e.target.value})} style=${{marginTop:5}}/>
+          </label>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            Customer email
+            <input class="inp" type="email" disabled=${!canManageBilling} placeholder="billing@acme.com" value=${draft.customer_email} onInput=${e=>setDraft({...draft,customer_email:e.target.value})} style=${{marginTop:5}}/>
+          </label>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            Issue date
+            <input class="inp" type="date" disabled=${!canManageBilling} value=${draft.issue_date} onInput=${e=>setDraft({...draft,issue_date:e.target.value})} style=${{marginTop:5}}/>
+          </label>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            Due date
+            <input class="inp" type="date" disabled=${!canManageBilling} value=${draft.due_date} onInput=${e=>setDraft({...draft,due_date:e.target.value})} style=${{marginTop:5}}/>
+          </label>
+        </div>
+        <!-- Line items -->
+        <div style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:.3,marginBottom:8}}>Line items</div>
+        <div style=${{border:'1px solid var(--bd)',borderRadius:14,overflow:'hidden',marginBottom:10}}>
+          <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 80px 130px 110px 32px',gap:8,padding:'8px 12px',background:'var(--sf2)',fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            <span>Description</span><span>Qty</span><span>Unit price</span><span style=${{textAlign:'right'}}>Amount</span><span/>
+          </div>
+          ${(draft.items||[]).map((it,i)=>html`
+            <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 80px 130px 110px 32px',gap:8,padding:'8px 12px',borderTop:'1px solid var(--bd)',alignItems:'center'}}>
+              <input class="inp" disabled=${!canManageBilling} placeholder="Description" value=${it.description} onInput=${e=>setItem(i,'description',e.target.value)} style=${{height:32}}/>
+              <input class="inp" disabled=${!canManageBilling} type="number" min="1" value=${it.quantity} onInput=${e=>setItem(i,'quantity',e.target.value)} style=${{height:32}}/>
+              <input class="inp" disabled=${!canManageBilling} type="number" min="0" step="0.01" value=${it.unit_price} onInput=${e=>setItem(i,'unit_price',e.target.value)} style=${{height:32}}/>
+              <div style=${{fontWeight:900,color:'var(--tx)',fontSize:13,textAlign:'right'}}>${money(Number(it.quantity||0)*Number(it.unit_price||0))}</div>
+              <button disabled=${!canManageBilling||(draft.items||[]).length<=1} onClick=${()=>removeItem(i)} style=${{background:'none',border:'none',cursor:'pointer',color:'var(--rd)',fontSize:16,padding:0,opacity:(draft.items||[]).length<=1?.3:1}}>✕</button>
+            </div>`)}
+        </div>
+        <button class="btn bg" disabled=${!canManageBilling} onClick=${()=>setDraft({...draft,items:[...(draft.items||[]),{description:'',quantity:1,unit_price:0}]})} style=${{fontSize:12}}>+ Add line item</button>
+        <!-- Totals -->
+        <div style=${{display:'flex',justifyContent:'flex-end',marginTop:16}}>
+          <div style=${{width:300,padding:16,borderRadius:14,background:'var(--sf2)',border:'1px solid var(--bd)',fontSize:13,color:'var(--tx2)'}}>
+            <div style=${{display:'flex',justifyContent:'space-between',padding:'5px 0'}}><span>Subtotal</span><b>${money(subtotal)}</b></div>
+            <div style=${{display:'flex',justifyContent:'space-between',padding:'5px 0'}}><span>Tax (${taxRate}%)</span><b>${money(tax)}</b></div>
+            <div style=${{display:'flex',justifyContent:'space-between',fontSize:18,color:'var(--tx)',borderTop:'1px solid var(--bd)',paddingTop:10,marginTop:4}}><span>Total</span><b>${money(total)}</b></div>
+          </div>
+        </div>
+        <!-- Notes + status -->
+        <div style=${{display:'grid',gridTemplateColumns:'1fr auto',gap:12,marginTop:14,alignItems:'flex-end'}}>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}>
+            Invoice notes
+            <textarea class="inp" disabled=${!canManageBilling} placeholder="Payment terms, bank details, etc." value=${draft.notes} onInput=${e=>setDraft({...draft,notes:e.target.value})} style=${{marginTop:5,minHeight:70}}></textarea>
+          </label>
+          <label style=${{fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase',minWidth:140}}>
+            Initial status
+            <select class="inp" disabled=${!canManageBilling} value=${draft.status} onChange=${e=>setDraft({...draft,status:e.target.value})} style=${{marginTop:5,height:38}}><option value="draft">Draft</option><option value="sent">Sent</option></select>
+          </label>
+        </div>
+        <div style=${{display:'flex',gap:8,marginTop:18}}>
+          <button class="btn bg" onClick=${()=>setTab('overview')}>Cancel</button>
+          <button class="btn bp" disabled=${saving||!canManageBilling||!draft.customer_name.trim()} onClick=${createInvoice} style=${{flex:1,justifyContent:'center'}}>${saving?'Creating invoice…':'Create invoice'}</button>
+        </div>
       </div>
-      <div style=${{border:'1px solid var(--bd)',borderRadius:16,overflow:'hidden'}}>
-        <div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 90px 130px 120px',gap:10,padding:10,background:'var(--sf2)',fontSize:11,fontWeight:900,color:'var(--tx3)',textTransform:'uppercase'}}><span>Description</span><span>Qty</span><span>Unit price</span><span>Amount</span></div>
-        ${(draft.items||[]).map((it,i)=>html`<div style=${{display:'grid',gridTemplateColumns:'minmax(0,1fr) 90px 130px 120px',gap:10,padding:10,borderTop:'1px solid var(--bd)'}}><input class="inp" disabled=${!canManageBilling} value=${it.description} onInput=${e=>setItem(i,'description',e.target.value)}/><input class="inp" disabled=${!canManageBilling} type="number" value=${it.quantity} onInput=${e=>setItem(i,'quantity',e.target.value)}/><input class="inp" disabled=${!canManageBilling} type="number" value=${it.unit_price} onInput=${e=>setItem(i,'unit_price',e.target.value)}/><div style=${{display:'flex',alignItems:'center',justifyContent:'flex-end',fontWeight:900,color:'var(--tx)'}}>${money(Number(it.quantity||0)*Number(it.unit_price||0))}</div></div>`)}
-      </div>
-      <button class="btn bg" disabled=${!canManageBilling} style=${{marginTop:10}} onClick=${()=>setDraft({...draft,items:[...(draft.items||[]),{description:'',quantity:1,unit_price:0}]})}>+ Add line item</button>
-      <div style=${{marginTop:14,display:'flex',justifyContent:'flex-end'}}><div style=${{width:320,padding:14,borderRadius:16,background:'var(--sf2)',border:'1px solid var(--bd)',fontSize:13,color:'var(--tx2)'}}><div style=${{display:'flex',justifyContent:'space-between',marginBottom:6}}><span>Subtotal</span><b>${money(subtotal)}</b></div><div style=${{display:'flex',justifyContent:'space-between',marginBottom:6}}><span>Tax ${taxRate}%</span><b>${money(tax)}</b></div><div style=${{display:'flex',justifyContent:'space-between',fontSize:18,color:'var(--tx)',borderTop:'1px solid var(--bd)',paddingTop:8}}><span>Total</span><b>${money(total)}</b></div></div></div>
-      <textarea class="inp" disabled=${!canManageBilling} placeholder="Invoice notes" value=${draft.notes} onInput=${e=>setDraft({...draft,notes:e.target.value})} style=${{marginTop:14,minHeight:80}}></textarea>
-      <button class="btn bp" disabled=${saving||!canManageBilling} onClick=${createInvoice} style=${{marginTop:14}}>${saving?'Creating…':'Create invoice'}</button>
     </div>`:null}
   </div>`;
 }
-
 function App(){
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem('pf_dark')==='1';}catch{return false;}});const [cu,setCu]=useState(null);
   // Skip loading screen if we know user has no active session — show login instantly
@@ -10938,6 +11152,12 @@ function App(){
   useEffect(()=>{
     if(!cu)return;
     const onRefresh=()=>load(undefined,{bust:true});
+    // Debounce ref — collapses burst of notification_updated/project_updated events into one reload
+    const _rtReloadTimer={current:null};
+    const debouncedRefresh=()=>{
+      clearTimeout(_rtReloadTimer.current);
+      _rtReloadTimer.current=setTimeout(()=>load(undefined,{bust:true}),600);
+    };
     const onRealtime=(e)=>{
       const msg=e.detail||{};
       if(['task_updated','task.updated','task.deleted'].includes(msg.type)){
@@ -10951,13 +11171,20 @@ function App(){
         }
         return;
       }
+      // notification_updated fires after every task save (backend creates a notification record).
+      // Debounce these to avoid a full reload after each PUT /api/tasks.
+      // Other events (project_updated, ticket_updated, etc.) also debounce to collapse bursts.
       if(['project_updated','ticket_updated','notification_updated','reminder_updated','task.created','ticket.created','ticket.updated','comment.added'].includes(msg.type)){
-        onRefresh();
+        debouncedRefresh();
       }
     };
     window.addEventListener('pt:refresh', onRefresh);
     window.addEventListener('pt:realtime', onRealtime);
-    return()=>{window.removeEventListener('pt:refresh', onRefresh);window.removeEventListener('pt:realtime', onRealtime);};
+    return()=>{
+      clearTimeout(_rtReloadTimer.current);
+      window.removeEventListener('pt:refresh', onRefresh);
+      window.removeEventListener('pt:realtime', onRealtime);
+    };
   },[cu,load]);
 
   useEffect(()=>{
