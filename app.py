@@ -9822,20 +9822,47 @@ def _billing_admin_required():
     return role_norm in ("admin", "owner", "manager", "workspace owner")
 
 def _table_exists(db, table_name):
+    """Return whether a table exists on both SQLite and PostgreSQL.
+    Production uses PostgreSQL, so sqlite_master-only checks caused Settings →
+    Plan & Usage to silently show 0 counts after deployment."""
+    table_name = str(table_name or "")
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
+        return False
     try:
-        row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (str(table_name),)).fetchone()
+        row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (table_name,)).fetchone()
+        if row:
+            return True
+    except Exception:
+        pass
+    try:
+        row = db.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=? LIMIT 1",
+            (table_name,)
+        ).fetchone()
         return bool(row)
     except Exception:
         return False
 
 def _table_columns(db, table_name):
-    """Return column names for a table without throwing. Used by fast read APIs.
-    This prevents count widgets from returning 0 just because older deployments
-    do not have optional columns like deleted_at yet."""
+    """Return column names for a table without throwing. Works for SQLite and PostgreSQL.
+    This prevents count widgets from returning 0 just because production uses PG
+    or older deployments do not have optional columns like deleted_at yet."""
+    table_name = str(table_name or "")
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
+        return set()
     try:
-        if not _table_exists(db, table_name):
-            return set()
-        return {str(r["name"]) for r in db.execute("PRAGMA table_info(" + str(table_name) + ")").fetchall()}
+        rows = db.execute("PRAGMA table_info(" + table_name + ")").fetchall()
+        cols = {str(r["name"]) for r in rows if "name" in r.keys()}
+        if cols:
+            return cols
+    except Exception:
+        pass
+    try:
+        rows = db.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=?",
+            (table_name,)
+        ).fetchall()
+        return {str(r["column_name"]) for r in rows if "column_name" in r.keys()}
     except Exception:
         return set()
 
