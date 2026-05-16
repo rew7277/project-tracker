@@ -557,6 +557,44 @@ def set_csrf_cookie(response):
         pass
     return response
 
+
+# ── Backend feature enforcement ──────────────────────────────────────────────
+# Frontend hiding is UX only. These checks stop disabled paid features from
+# being used through direct URLs/API calls.
+FEATURE_API_PREFIXES = (
+    ("time_tracking", ("/api/timelogs", "/api/timesheet")),
+    ("billing_invoices", ("/api/billing", "/api/invoices")),
+    ("ai_docs", ("/api/ai-docs", "/api/ai/")),
+    ("vault", ("/api/vault", "/api/password")),
+    ("advanced_analytics", ("/api/analytics", "/api/productivity")),
+    ("integrations", ("/api/github", "/api/slack")),
+    ("incident_approvals", ("/api/incidents", "/api/approvals")),
+    ("public_api", ("/api/public-api", "/api/v1")),
+    ("sso_security", ("/api/sso/config",)),
+)
+
+@app.before_request
+def enforce_plan_entitlements_and_payment_status():
+    if request.path.startswith("/api/admin/") or request.path.startswith("/api/auth/"):
+        return None
+    if "user_id" not in session or not wid():
+        return None
+    path = request.path.rstrip("/") or "/"
+    try:
+        with get_db() as db:
+            meta = _workspace_commercial_meta(db, wid())
+            payment = str(meta.get("payment_status") or "active").lower()
+            if request.method in ("POST", "PUT", "PATCH", "DELETE") and payment in ("restricted", "suspended", "cancelled"):
+                return jsonify({"error": "Workspace is restricted by billing status. Contact your workspace admin or Project Tracker support."}), 402
+            cfg = _workspace_feature_config(db, wid())
+            features = cfg.get("features", {})
+        for feature_key, prefixes in FEATURE_API_PREFIXES:
+            if any(path.startswith(p) for p in prefixes) and not bool(features.get(feature_key)):
+                return jsonify({"error": "Feature not available on this workspace plan", "feature": feature_key, "upgrade_required": True}), 403
+    except Exception:
+        return None
+    return None
+
 @app.after_request
 def compress_response(response):
     """Gzip-compress HTML, JS, CSS and JSON responses when client supports it."""
@@ -2913,6 +2951,19 @@ def init_db():
             "ALTER TABLE workspaces ADD COLUMN storage_limit_mb INTEGER DEFAULT 0",
             "ALTER TABLE workspaces ADD COLUMN billing_status TEXT DEFAULT 'active'",
             "ALTER TABLE workspaces ADD COLUMN internal_notes TEXT DEFAULT ''",
+            # ── Owner panel commercial controls ──
+            "ALTER TABLE workspaces ADD COLUMN payment_status TEXT DEFAULT 'active'",
+            "ALTER TABLE workspaces ADD COLUMN billing_cycle TEXT DEFAULT 'monthly'",
+            "ALTER TABLE workspaces ADD COLUMN renewal_date TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN amount_paid REAL DEFAULT 0",
+            "ALTER TABLE workspaces ADD COLUMN last_payment_date TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN payment_method_note TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN manual_discount REAL DEFAULT 0",
+            "ALTER TABLE workspaces ADD COLUMN add_ons_json TEXT DEFAULT '{}'",
+            "ALTER TABLE workspaces ADD COLUMN grace_until TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN read_only_until TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN cancelled_at TEXT DEFAULT ''",
+            "ALTER TABLE workspaces ADD COLUMN plan_change_reason TEXT DEFAULT ''",
             # ── User profile celebrations / personal moments ──
             "ALTER TABLE users ADD COLUMN birth_date TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN birth_date_visibility TEXT DEFAULT 'private'",
@@ -9427,6 +9478,13 @@ def admin_api_dashboard():
             storage_bytes = int((storage_bytes_row and storage_bytes_row["total"]) or 0)
             plans = db.execute("SELECT COALESCE(plan,'starter') AS plan, COUNT(*) AS c FROM workspaces GROUP BY COALESCE(plan,'starter')").fetchall()
             recent = db.execute("SELECT id, name, plan, created FROM workspaces ORDER BY created DESC LIMIT 8").fetchall()
+            all_ws = db.execute("SELECT id, plan, manual_discount, add_ons_json, payment_status, billing_status FROM workspaces").fetchall()
+            estimated_mrr = 0
+            payment_counts = {}
+            for w in all_ws:
+                payment = str((w["payment_status"] if "payment_status" in w.keys() else w["billing_status"] if "billing_status" in w.keys() else "active") or "active").lower()
+                payment_counts[payment] = payment_counts.get(payment, 0) + 1
+                estimated_mrr += _estimated_workspace_mrr(w["plan"] if "plan" in w.keys() else "starter", _workspace_addons_from_row(w), w["manual_discount"] if "manual_discount" in w.keys() else 0)
             try:
                 suspended_ws = db.execute("SELECT COUNT(*) AS c FROM workspaces WHERE COALESCE(suspended,0)=1").fetchone()["c"]
             except Exception:
@@ -9442,6 +9500,10 @@ def admin_api_dashboard():
             "open_tickets": int(open_tickets or 0),
             "storage_mb": round(storage_bytes / (1024*1024), 2),
             "plan_counts": {str(r["plan"] or "starter"): int(r["c"] or 0) for r in plans},
+            "payment_counts": payment_counts,
+            "estimated_mrr": int(estimated_mrr),
+            "addon_catalog": ADD_ON_CATALOG,
+            "plan_prices": PLAN_PRICES_INR,
             "recent_workspaces": [dict(r) for r in recent],
         })
     except Exception as e:
@@ -9501,9 +9563,15 @@ def admin_api_workspaces():
             for r in rows:
                 d=dict(r)
                 usage=_workspace_admin_usage(db, d["id"])
+                limits = _workspace_limits_from_db(db, d["id"])
+                commercial = _workspace_commercial_meta(db, d["id"])
                 d.update({
                     "usage": usage,
-                    "limits": _workspace_limits_from_db(db, d["id"]),
+                    "limits": limits,
+                    "commercial": commercial,
+                    "payment_status": commercial.get("payment_status", d.get("billing_status", "active")),
+                    "health_score": _workspace_health_score(usage, limits, commercial),
+                    "estimated_mrr": _estimated_workspace_mrr(d.get("plan"), commercial.get("add_ons", {}), commercial.get("manual_discount", 0)),
                 })
                 out.append(d)
         return jsonify({"ok": True, "workspaces": out})
@@ -9530,12 +9598,22 @@ def admin_api_workspace_detail(ws_id):
             ).fetchall()
             usage = _workspace_admin_usage(db, ws_id)
             limits = _workspace_limits_from_db(db, ws_id)
+            commercial = _workspace_commercial_meta(db, ws_id)
             feature_cfg = _workspace_feature_config(db, ws_id)
+            timeline = []
+            try:
+                timeline = [dict(r) for r in db.execute("SELECT action, entity_id, details, created FROM audit_log WHERE entity_id=? ORDER BY created DESC LIMIT 60", (ws_id,)).fetchall()]
+            except Exception:
+                timeline = []
         return jsonify({
             "ok": True,
             "workspace": dict(ws),
             "usage": usage,
             "limits": limits,
+            "commercial": commercial,
+            "health_score": _workspace_health_score(usage, limits, commercial),
+            "estimated_mrr": _estimated_workspace_mrr((dict(ws)).get("plan"), commercial.get("add_ons", {}), commercial.get("manual_discount", 0)),
+            "timeline": timeline,
             "features": feature_cfg["features"],
             "feature_catalog": feature_cfg["catalog"],
             "addons": feature_cfg["addons"],
@@ -9660,7 +9738,7 @@ def admin_api_set_plan():
                 pass
     try:
         with get_db() as db:
-            db.execute("UPDATE workspaces SET plan=?, storage_limit_mb=?, custom_limits_json=? WHERE id=?", (plan, storage_limit_mb, json.dumps(clean_limits), ws_id))
+            db.execute("UPDATE workspaces SET plan=?, storage_limit_mb=?, custom_limits_json=?, plan_change_reason=? WHERE id=?", (plan, storage_limit_mb, json.dumps(clean_limits), str(data.get("reason") or data.get("plan_change_reason") or ""), ws_id))
             db.commit()
         _cache_bust_ws(ws_id)
         _audit("set_plan", ws_id, f"Plan changed to {plan}; storage override {storage_limit_mb or 'default'} MB; custom limits {clean_limits}")
@@ -9793,6 +9871,171 @@ def admin_api_workspace_features():
         with get_db() as db:
             cfg = _workspace_feature_config(db, ws_id)
         return jsonify({"ok": True, "features": cfg["features"], "catalog": cfg["catalog"], "addons": cfg["addons"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/workspace/commercial", methods=["POST"])
+def admin_api_workspace_commercial():
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    ws_id = data.get("workspace_id")
+    if not ws_id:
+        return jsonify({"error": "workspace_id is required"}), 400
+    fields = {
+        "payment_status": str(data.get("payment_status") or "active").lower(),
+        "billing_cycle": str(data.get("billing_cycle") or "monthly").lower(),
+        "renewal_date": str(data.get("renewal_date") or ""),
+        "last_payment_date": str(data.get("last_payment_date") or ""),
+        "payment_method_note": str(data.get("payment_method_note") or ""),
+        "plan_change_reason": str(data.get("plan_change_reason") or ""),
+        "internal_notes": str(data.get("internal_notes") or ""),
+        "grace_until": str(data.get("grace_until") or ""),
+        "read_only_until": str(data.get("read_only_until") or ""),
+    }
+    if fields["payment_status"] not in PAYMENT_STATUS_FLOW:
+        return jsonify({"error": "Invalid payment status"}), 400
+    if fields["billing_cycle"] not in BILLING_CYCLES:
+        return jsonify({"error": "Invalid billing cycle"}), 400
+    try:
+        amount_paid = float(data.get("amount_paid") or 0)
+        manual_discount = float(data.get("manual_discount") or 0)
+    except Exception:
+        return jsonify({"error": "Amount and discount must be numeric"}), 400
+    try:
+        with get_db() as db:
+            ws = db.execute("SELECT id FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+            if not ws:
+                return jsonify({"error": "Workspace not found"}), 404
+            db.execute("""
+                UPDATE workspaces
+                   SET payment_status=?, billing_status=?, billing_cycle=?, renewal_date=?, amount_paid=?,
+                       last_payment_date=?, payment_method_note=?, manual_discount=?, plan_change_reason=?,
+                       internal_notes=?, grace_until=?, read_only_until=?
+                 WHERE id=?
+            """, (fields["payment_status"], fields["payment_status"], fields["billing_cycle"], fields["renewal_date"], amount_paid,
+                  fields["last_payment_date"], fields["payment_method_note"], manual_discount, fields["plan_change_reason"],
+                  fields["internal_notes"], fields["grace_until"], fields["read_only_until"], ws_id))
+            db.commit()
+            meta = _workspace_commercial_meta(db, ws_id)
+        _cache_bust_ws(ws_id)
+        _audit("commercial_update", ws_id, f"Payment status {fields['payment_status']}; renewal {fields['renewal_date']}; amount {amount_paid}")
+        return jsonify({"ok": True, "commercial": meta})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/workspace/addons", methods=["POST"])
+def admin_api_workspace_addons():
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    ws_id = data.get("workspace_id")
+    addons = data.get("add_ons") or {}
+    if not ws_id or not isinstance(addons, dict):
+        return jsonify({"error": "workspace_id and add_ons are required"}), 400
+    clean = {k: bool(v) for k, v in addons.items() if k in ADD_ON_CATALOG}
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT add_ons_json FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+            if not row:
+                return jsonify({"error": "Workspace not found"}), 404
+            current = _workspace_addons_from_row(row)
+            current.update(clean)
+            db.execute("UPDATE workspaces SET add_ons_json=? WHERE id=?", (json.dumps(current), ws_id))
+            # If add-on unlocks a feature, mirror it into feature_flags for fast feature APIs.
+            for addon_key, enabled in clean.items():
+                fkey = (ADD_ON_CATALOG.get(addon_key) or {}).get("feature")
+                if fkey in WORKSPACE_FEATURE_CATALOG:
+                    existing = db.execute("SELECT id FROM feature_flags WHERE workspace_id=? AND flag_name=?", (ws_id, fkey)).fetchone()
+                    if existing:
+                        db.execute("UPDATE feature_flags SET enabled=?, updated=? WHERE id=?", (1 if enabled else 0, ts(), existing["id"]))
+                    else:
+                        db.execute("INSERT INTO feature_flags(id,workspace_id,flag_name,enabled,config,updated) VALUES (?,?,?,?,?,?)", (secrets.token_hex(6), ws_id, fkey, 1 if enabled else 0, "{}", ts()))
+            db.commit()
+            meta = _workspace_commercial_meta(db, ws_id)
+            limits = _workspace_limits_from_db(db, ws_id)
+            cfg = _workspace_feature_config(db, ws_id)
+        _cache_bust_ws(ws_id)
+        _audit("addons_update", ws_id, f"Add-ons changed: {clean}")
+        return jsonify({"ok": True, "commercial": meta, "limits": limits, "features": cfg["features"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/workspace/trial", methods=["POST"])
+def admin_api_workspace_trial():
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    ws_id = data.get("workspace_id")
+    action = str(data.get("action") or "start").lower()
+    days = int(float(data.get("days") or 14))
+    if not ws_id:
+        return jsonify({"error": "workspace_id is required"}), 400
+    try:
+        end_date = (datetime.utcnow() + timedelta(days=max(1, days))).strftime("%Y-%m-%d")
+        with get_db() as db:
+            if action in ("start", "extend"):
+                db.execute("UPDATE workspaces SET payment_status='trial', billing_status='trial', trial_ends=? WHERE id=?", (end_date, ws_id))
+            elif action in ("end", "convert"):
+                new_status = "active" if action == "convert" else "payment_due"
+                db.execute("UPDATE workspaces SET payment_status=?, billing_status=?, trial_ends='' WHERE id=?", (new_status, new_status, ws_id))
+            else:
+                return jsonify({"error": "Invalid trial action"}), 400
+            db.commit()
+            meta = _workspace_commercial_meta(db, ws_id)
+        _cache_bust_ws(ws_id)
+        _audit("trial_update", ws_id, f"Trial action {action}; ends {end_date if action in ('start','extend') else ''}")
+        return jsonify({"ok": True, "commercial": meta})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/tickets/<ticket_id>/status", methods=["POST"])
+def admin_api_ticket_status(ticket_id):
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status") or "open").strip()
+    priority = str(data.get("priority") or "").strip()
+    note = str(data.get("note") or "").strip()
+    try:
+        with get_db() as db:
+            cols = _table_columns(db, "tickets")
+            sets, params = [], []
+            if "status" in cols:
+                sets.append("status=?"); params.append(status)
+            if priority and "priority" in cols:
+                sets.append("priority=?"); params.append(priority)
+            if "updated" in cols:
+                sets.append("updated=?"); params.append(ts())
+            if not sets:
+                return jsonify({"error": "Ticket status fields not available"}), 400
+            params.append(ticket_id)
+            db.execute("UPDATE tickets SET " + ", ".join(sets) + " WHERE id=?", tuple(params))
+            db.commit()
+        _audit("admin_ticket_status", ticket_id, f"Status {status}; priority {priority}; note {note[:160]}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/workspace/support-access", methods=["POST"])
+def admin_api_support_access():
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    ws_id = data.get("workspace_id")
+    reason = str(data.get("reason") or "").strip()
+    if not ws_id or len(reason) < 5:
+        return jsonify({"error": "Reason is required for support access"}), 400
+    try:
+        with get_db() as db:
+            ws = db.execute("SELECT id, name FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+            if not ws:
+                return jsonify({"error": "Workspace not found"}), 404
+        _audit("support_access_requested", ws_id, reason)
+        # Deliberately do not create a passwordless login here. This action is audited
+        # and can be wired to a time-limited support-login flow later.
+        return jsonify({"ok": True, "message": "Support access request logged. Use customer-approved recovery flow before impersonating."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -10450,6 +10693,17 @@ WORKSPACE_PLAN_USAGE_LIMITS = {
     "enterprise": {"workspaces": 9999, "members": 9999, "projects": 9999, "tasks": 99999,"invoices": 9999, "storage_mb": 500 * 1024},
 }
 
+PLAN_PRICES_INR = {
+    "starter": 0,
+    "team": 999,
+    "business": 2999,
+    "enterprise": 0,
+}
+
+PAYMENT_STATUS_FLOW = ("trial", "active", "payment_due", "grace", "restricted", "suspended", "cancelled")
+BILLING_CYCLES = ("monthly", "yearly", "manual")
+
+
 WORKSPACE_FEATURE_CATALOG = {
     "core_projects": {"label": "Projects, tasks & Kanban", "category": "Core workspace", "addon_price": 0, "description": "Core planning, tracking and Kanban boards."},
     "channels_dm": {"label": "Channels & direct messages", "category": "Collaboration", "addon_price": 0, "description": "Workspace chat, project channels and direct messages."},
@@ -10490,12 +10744,19 @@ PLAN_FEATURE_MATRIX = {
 }
 
 ADD_ON_CATALOG = {
-    "extra_storage_50gb": {"label": "Extra storage pack", "price_inr": 299, "unit": "50 GB / month"},
-    "ai_docs": {"label": "AI Docs add-on", "price_inr": 499, "unit": "workspace / month"},
-    "billing_invoices": {"label": "Billing & invoices add-on", "price_inr": 299, "unit": "workspace / month"},
-    "advanced_analytics": {"label": "Advanced analytics add-on", "price_inr": 799, "unit": "workspace / month"},
-    "integrations": {"label": "GitHub / Slack integrations", "price_inr": 799, "unit": "workspace / month"},
-    "sso_security": {"label": "SSO & advanced security", "price_inr": 1499, "unit": "workspace / month"},
+    "extra_storage_10gb": {"label": "Extra 10 GB storage", "price_inr": 299, "unit": "workspace / month", "limit_key": "storage_mb", "limit_add": 10 * 1024},
+    "extra_storage_50gb": {"label": "Extra 50 GB storage", "price_inr": 999, "unit": "workspace / month", "limit_key": "storage_mb", "limit_add": 50 * 1024},
+    "extra_25_users": {"label": "Extra 25 users", "price_inr": 499, "unit": "workspace / month", "limit_key": "members", "limit_add": 25},
+    "extra_workspace": {"label": "Extra workspace", "price_inr": 999, "unit": "month", "limit_key": "workspaces", "limit_add": 1},
+    "time_tracking": {"label": "Timesheet module", "price_inr": 799, "unit": "workspace / month", "feature": "time_tracking"},
+    "ai_docs": {"label": "AI Docs add-on", "price_inr": 999, "unit": "workspace / month", "feature": "ai_docs"},
+    "billing_invoices": {"label": "Billing & invoices add-on", "price_inr": 499, "unit": "workspace / month", "feature": "billing_invoices"},
+    "advanced_analytics": {"label": "Advanced analytics add-on", "price_inr": 999, "unit": "workspace / month", "feature": "advanced_analytics"},
+    "integrations": {"label": "GitHub / Slack integrations", "price_inr": 799, "unit": "workspace / month", "feature": "integrations"},
+    "sso_security": {"label": "SSO/SAML + advanced security", "price_inr": 1999, "unit": "workspace / month", "feature": "sso_security"},
+    "audit_logs": {"label": "Extended audit logs", "price_inr": 999, "unit": "workspace / month", "feature": "sso_security"},
+    "custom_branding": {"label": "Custom branding/domain", "price_inr": 1499, "unit": "workspace / month", "feature": "custom_branding"},
+    "priority_support": {"label": "Priority support", "price_inr": 1999, "unit": "workspace / month"},
 }
 
 def _feature_defaults_for_plan(plan):
@@ -10524,6 +10785,16 @@ def _workspace_feature_config(db, workspace_id):
                 features["ai_docs"] = bool(r["enabled"])
             if key == "approval_workflows":
                 features["incident_approvals"] = bool(r["enabled"])
+    except Exception:
+        pass
+    try:
+        ws_row = db.execute("SELECT add_ons_json FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        for addon_key, enabled in _workspace_addons_from_row(ws_row).items():
+            if not enabled:
+                continue
+            fkey = (ADD_ON_CATALOG.get(addon_key) or {}).get("feature")
+            if fkey in WORKSPACE_FEATURE_CATALOG:
+                features[fkey] = True
     except Exception:
         pass
     return {
@@ -10556,23 +10827,105 @@ def _limits_for_plan(plan, custom_limits_json='', storage_limit_mb=0):
 
 def _workspace_limits_from_db(db, workspace_id):
     try:
-        row = db.execute("SELECT plan, custom_limits_json, storage_limit_mb FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        row = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
         if not row:
             return dict(WORKSPACE_PLAN_USAGE_LIMITS["starter"])
-        return _limits_for_plan(row.get("plan") if hasattr(row, 'get') else row["plan"], row.get("custom_limits_json", "") if hasattr(row, 'get') else (row["custom_limits_json"] if "custom_limits_json" in row.keys() else ""), row.get("storage_limit_mb", 0) if hasattr(row, 'get') else (row["storage_limit_mb"] if "storage_limit_mb" in row.keys() else 0))
+        plan = row["plan"] if "plan" in row.keys() else "starter"
+        custom = row["custom_limits_json"] if "custom_limits_json" in row.keys() else ""
+        storage = row["storage_limit_mb"] if "storage_limit_mb" in row.keys() else 0
+        limits = _limits_for_plan(plan, custom, storage)
+        return _apply_addon_limits(limits, _workspace_addons_from_row(row))
     except Exception:
         return dict(WORKSPACE_PLAN_USAGE_LIMITS["starter"])
 
-# Keep the older /api/usage endpoint aligned with the same plan config.
-PLAN_LIMITS = {
-    plan: {
-        "members": cfg["members"],
-        "projects": cfg["projects"],
-        "ai_calls_month": 50 if plan == "starter" else 500 if plan == "team" else 1500 if plan == "business" else 9999,
-        "storage_mb": cfg["storage_mb"],
+
+def _json_dict(value, default=None):
+    if default is None:
+        default = {}
+    try:
+        data = json.loads(value or "{}") if isinstance(value, str) else (value or {})
+        return data if isinstance(data, dict) else default
+    except Exception:
+        return default
+
+def _workspace_addons_from_row(row):
+    try:
+        raw = row["add_ons_json"] if row and "add_ons_json" in row.keys() else "{}"
+    except Exception:
+        raw = "{}"
+    data = _json_dict(raw, {})
+    return {str(k): bool(v) for k, v in data.items()}
+
+def _apply_addon_limits(limits, addons):
+    out = dict(limits or {})
+    for addon_key, enabled in (addons or {}).items():
+        if not enabled:
+            continue
+        cfg = ADD_ON_CATALOG.get(addon_key) or {}
+        lk = cfg.get("limit_key")
+        la = int(cfg.get("limit_add") or 0)
+        if lk and la:
+            out[lk] = int(out.get(lk) or 0) + la
+    return out
+
+def _workspace_commercial_meta(db, workspace_id):
+    cols = _table_columns(db, "workspaces")
+    row = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+    if not row:
+        return {}
+    def get(k, default=""):
+        try:
+            return row[k] if k in row.keys() else default
+        except Exception:
+            return default
+    addons = _json_dict(get("add_ons_json", "{}"), {})
+    return {
+        "payment_status": get("payment_status", get("billing_status", "active")) or "active",
+        "billing_status": get("billing_status", "active") or "active",
+        "billing_cycle": get("billing_cycle", "monthly") or "monthly",
+        "renewal_date": get("renewal_date", get("plan_expires", "")) or "",
+        "plan_expires": get("plan_expires", "") or "",
+        "trial_ends": get("trial_ends", "") or "",
+        "grace_until": get("grace_until", "") or "",
+        "read_only_until": get("read_only_until", "") or "",
+        "amount_paid": float(get("amount_paid", 0) or 0),
+        "last_payment_date": get("last_payment_date", "") or "",
+        "payment_method_note": get("payment_method_note", "") or "",
+        "manual_discount": float(get("manual_discount", 0) or 0),
+        "plan_change_reason": get("plan_change_reason", "") or "",
+        "internal_notes": get("internal_notes", "") or "",
+        "add_ons": addons,
     }
-    for plan, cfg in WORKSPACE_PLAN_USAGE_LIMITS.items()
-}
+
+def _workspace_health_score(usage, limits, commercial):
+    score = 100
+    payment = str((commercial or {}).get("payment_status") or "active").lower()
+    if payment in ("payment_due", "grace"):
+        score -= 15
+    if payment in ("restricted", "suspended", "cancelled"):
+        score -= 40
+    for k in ("members", "projects", "tasks", "invoices", "storage_mb"):
+        lim = float((limits or {}).get(k) or 0)
+        used = float((usage or {}).get(k) or 0)
+        if lim > 0:
+            pct = used / lim
+            if pct >= 1:
+                score -= 18
+            elif pct >= .9:
+                score -= 10
+            elif pct >= .8:
+                score -= 5
+    if int((usage or {}).get("tickets") or 0) > 0:
+        score -= min(15, int((usage or {}).get("tickets") or 0) * 3)
+    return max(0, min(100, int(score)))
+
+def _estimated_workspace_mrr(plan, addons=None, discount=0):
+    base = int(PLAN_PRICES_INR.get(str(plan or "starter").lower(), 0) or 0)
+    addon_total = 0
+    for key, enabled in (addons or {}).items():
+        if enabled:
+            addon_total += int((ADD_ON_CATALOG.get(key) or {}).get("price_inr") or 0)
+    return max(0, base + addon_total - int(float(discount or 0)))
 
 def _workspace_storage_limit_bytes_for_plan(plan):
     cfg = WORKSPACE_PLAN_USAGE_LIMITS.get(str(plan or "starter").lower(), WORKSPACE_PLAN_USAGE_LIMITS["starter"])
