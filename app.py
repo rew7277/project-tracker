@@ -15,6 +15,7 @@ except ImportError:
 import os, sys, json, hashlib, secrets, random, urllib.request, urllib.error
 import socket, threading, time, webbrowser, mimetypes, base64, smtplib
 import re, struct, traceback, hmac, math, zlib, logging
+import html as _html
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import datetime, timedelta
 from functools import wraps
