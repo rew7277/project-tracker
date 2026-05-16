@@ -5958,8 +5958,12 @@ def upload_file():
 
     with get_db() as db:
         used=_workspace_upload_bytes(db, ws_id)
-        if used + len(data) > WORKSPACE_UPLOAD_QUOTA_BYTES:
-            return jsonify({"error":"Workspace upload quota exceeded"}),413
+        ws_plan_row = db.execute("SELECT plan FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+        ws_plan = (ws_plan_row["plan"] if ws_plan_row and "plan" in ws_plan_row.keys() else "starter") or "starter"
+        plan_quota_bytes = _workspace_storage_limit_bytes_for_plan(ws_plan)
+        if used + len(data) > plan_quota_bytes:
+            quota_mb = int(plan_quota_bytes / (1024 * 1024))
+            return jsonify({"error": f"Workspace storage limit exceeded for your {str(ws_plan).title()} plan ({quota_mb} MB)."}),413
 
     with open(path,"wb") as fp:
         fp.write(data)
@@ -10200,20 +10204,31 @@ def stripe_webhook():
 # ═══════════════════════════════════════════════════════════════
 #  USAGE METERING
 # ═══════════════════════════════════════════════════════════════
-PLAN_LIMITS = {
-    "starter":    {"members": 5,   "projects": 3,  "ai_calls_month": 50,  "storage_mb": 500},
-    "team":       {"members": 50,  "projects": 50, "ai_calls_month": 500, "storage_mb": 10000},
-    "enterprise": {"members": 999, "projects": 999,"ai_calls_month": 9999,"storage_mb": 100000},
+# Workspace-level commercial limits shown in Settings and on the landing page.
+# Storage values are intentionally capped by plan so the free tier stays sustainable.
+# Values are in MB.
+WORKSPACE_PLAN_USAGE_LIMITS = {
+    "starter":    {"workspaces": 1, "members": 25,  "projects": 50,  "tasks": 350,  "invoices": 150,  "storage_mb": 1024},
+    "team":       {"workspaces": 1, "members": 100, "projects": 250, "tasks": 1500, "invoices": 500,  "storage_mb": 25 * 1024},
+    "business":   {"workspaces": 3, "members": 250, "projects": 750, "tasks": 5000, "invoices": 1500, "storage_mb": 100 * 1024},
+    "enterprise": {"workspaces": 9999, "members": 9999, "projects": 9999, "tasks": 99999,"invoices": 9999, "storage_mb": 500 * 1024},
 }
 
-# Workspace settings Plan & Usage quotas. Starter caps were reduced to 75% of
-# the previous workspace-display limits. Higher tiers keep the next pricing config.
-WORKSPACE_PLAN_USAGE_LIMITS = {
-    "starter": {"members": 25, "projects": 50, "tasks": 350, "invoices": 150},
-    "team": {"members": 100, "projects": 250, "tasks": 1500, "invoices": 500},
-    "business": {"members": 250, "projects": 750, "tasks": 5000, "invoices": 1500},
-    "enterprise": {"members": 9999, "projects": 9999, "tasks": 99999, "invoices": 9999},
+# Keep the older /api/usage endpoint aligned with the same plan config.
+PLAN_LIMITS = {
+    plan: {
+        "members": cfg["members"],
+        "projects": cfg["projects"],
+        "ai_calls_month": 50 if plan == "starter" else 500 if plan == "team" else 1500 if plan == "business" else 9999,
+        "storage_mb": cfg["storage_mb"],
+    }
+    for plan, cfg in WORKSPACE_PLAN_USAGE_LIMITS.items()
 }
+
+def _workspace_storage_limit_bytes_for_plan(plan):
+    cfg = WORKSPACE_PLAN_USAGE_LIMITS.get(str(plan or "starter").lower(), WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+    mb = int(cfg.get("storage_mb") or 0)
+    return mb * 1024 * 1024 if mb > 0 else WORKSPACE_UPLOAD_QUOTA_BYTES
 
 def _live_workspace_role(user_id=None, workspace_id=None):
     try:
@@ -10243,11 +10258,15 @@ def workspace_plan_usage():
             ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
             # Use schema-aware counters. Some older production databases do not
             # have deleted_at on every table; the previous query failed and showed 0/limit.
+            storage_bytes = _workspace_upload_bytes(db, wid())
             usage = {
+                "workspaces": 1,
                 "members": _safe_workspace_count(db, "users", wid()),
                 "projects": _safe_workspace_count(db, "projects", wid()),
                 "tasks": _safe_workspace_count(db, "tasks", wid()),
                 "invoices": _safe_workspace_count(db, "invoices", wid()),
+                "storage_mb": round(float(storage_bytes) / (1024 * 1024), 2),
+                "storage_bytes": int(storage_bytes),
             }
         plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
         limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])

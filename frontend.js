@@ -6621,12 +6621,19 @@ function WorkspacePlanUsageCard({cu}){
   const plan=String((data&&data.plan)||'starter').toUpperCase();
   const usage=(data&&data.usage)||{};
   const limits=(data&&data.limits)||{};
-  const row=(label,key)=>{
+  const fmtNum=(v)=>Number(v||0).toLocaleString('en-IN');
+  const fmtStorage=(mb)=>{
+    const n=Number(mb||0);
+    if(n>=1024)return (Math.round((n/1024)*10)/10).toLocaleString('en-IN')+' GB';
+    return fmtNum(Math.round(n))+' MB';
+  };
+  const row=(label,key,kind)=>{
     const used=Number(usage[key]||0), max=Number(limits[key]||0);
     const pct=max?Math.min(100,Math.round((used/max)*100)):0;
     const warn=pct>=90?'#ef4444':pct>=75?'#f59e0b':'var(--ac)';
+    const value=kind==='storage'?`${fmtStorage(used)} / ${fmtStorage(max)}`:`${fmtNum(used)} / ${max>=9999?'Custom':fmtNum(max)}`;
     return html`<div style=${{marginBottom:13}}>
-      <div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:800,color:'var(--tx)',marginBottom:5}}><span>${label}</span><span>${used}/${max||'∞'}</span></div>
+      <div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:800,color:'var(--tx)',marginBottom:5,gap:12}}><span>${label}</span><span>${value}</span></div>
       <div style=${{height:8,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:pct+'%',background:warn,borderRadius:999,transition:'width .25s ease'}}></div></div>
     </div>`;
   };
@@ -6639,7 +6646,7 @@ function WorkspacePlanUsageCard({cu}){
     ${allowed&&err?html`<div style=${{padding:'9px 12px',borderRadius:10,background:'rgba(185,28,28,.09)',border:'1px solid rgba(185,28,28,.18)',fontSize:12,color:'var(--rd)'}}>${err}</div>`:null}
     ${allowed&&!err?html`<div>
       <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}><span style=${{fontSize:12,color:'var(--tx3)'}}>Current plan</span><span style=${{fontSize:11,fontWeight:900,color:'var(--ac)',padding:'5px 10px',borderRadius:999,background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.25)'}}>${plan}</span></div>
-      ${row('Team members','members')}${row('Projects','projects')}${row('Tasks','tasks')}${row('Invoices','invoices')}
+      ${row('Workspaces','workspaces')}${row('Team members','members')}${row('Projects','projects')}${row('Tasks','tasks')}${row('Invoices','invoices')}${row('Storage','storage_mb','storage')}
       <div style=${{fontSize:11,color:'var(--tx3)',marginTop:8}}>Last updated: ${(data&&data.updated_at)||'—'} · Role: ${(data&&data.role)||(cu&&cu.role)||'—'}</div>
     </div>`:null}
   </div>`;

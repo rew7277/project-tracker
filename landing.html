@@ -274,13 +274,13 @@ h2.st{font-family:var(--font);font-size:clamp(32px,5vw,58px);font-weight:800;let
 .plan-badge-row{position:absolute;top:-1px;left:50%;transform:translateX(-50%)}
 .plan-badge{background:var(--gb);color:#fff;font-size:11px;font-weight:700;padding:5px 18px;border-radius:0 0 12px 12px;letter-spacing:.04em;font-family:var(--body)}
 .plan-name{font-family:var(--font);font-size:22px;font-weight:800;color:var(--tx);letter-spacing:-.6px;margin-bottom:8px}
-.plan-tagline{font-size:13px;color:var(--tx3);margin-bottom:22px;line-height:1.65;font-family:var(--body);min-height:86px}
+.plan-tagline{font-size:13px;color:var(--tx3);margin-bottom:22px;line-height:1.65;font-family:var(--body);min-height:104px}
 .plan-price{font-family:var(--font);font-size:48px;font-weight:800;letter-spacing:-2.5px;color:var(--tx);line-height:1;margin-bottom:4px}
 .plan-price sup{font-size:24px;vertical-align:super;margin-top:6px;letter-spacing:0}
 .plan-price small{font-size:14px;color:var(--tx3);font-weight:500;letter-spacing:0;font-family:var(--body)}
 .plan-custom{font-family:var(--font);font-size:40px;font-weight:800;letter-spacing:-2px;color:var(--tx);line-height:1;margin-bottom:4px}
 .plan-period{font-size:12.5px;color:var(--tx3);margin-bottom:28px;font-family:var(--body)}
-.plan-cta{display:flex;align-items:center;justify-content:center;gap:8px;padding:13px 18px;border-radius:980px;font-size:14px;font-weight:700;text-decoration:none;font-family:var(--font);letter-spacing:-.2px;transition:all .25s;margin-bottom:26px;white-space:nowrap;line-height:1.15}
+.plan-cta{display:flex;align-items:center;justify-content:center;gap:8px;padding:13px 16px;border-radius:980px;font-size:13.5px;font-weight:700;text-decoration:none;font-family:var(--font);letter-spacing:-.2px;transition:all .25s;margin-bottom:26px;white-space:normal;line-height:1.25;text-align:center;min-height:52px}
 .plan-cta.fill{background:var(--gb);color:#fff;box-shadow:0 8px 28px rgba(90,140,255,.35)}
 .plan-cta.fill:hover{transform:scale(1.04);box-shadow:0 14px 44px rgba(90,140,255,.55)}
 .plan-cta.out{background:transparent;color:var(--tx);border:1.5px solid var(--b3)}
@@ -1459,7 +1459,7 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     <h2 class="st">What Project Tracker does now. <span class="gt">Clear, fast, accountable.</span></h2>
     <p class="ssub">A quick public snapshot of the newest workspace capabilities, so teams understand what is included before they sign in.</p>
     <div class="feat-g" style="margin-top:34px">
-      <div class="fc"><div class="fi" style="background:rgba(90,140,255,.12);border:1px solid rgba(90,140,255,.22)">📊</div><h3>Workspace Plan & Usage</h3><p>Admins and managers can see live members, projects, tasks and invoice usage directly inside Workspace Settings.</p><div class="ftag" style="background:rgba(90,140,255,.12);color:var(--blue)">Settings</div></div>
+      <div class="fc"><div class="fi" style="background:rgba(90,140,255,.12);border:1px solid rgba(90,140,255,.22)">📊</div><h3>Workspace Plan & Usage</h3><p>Admins and managers can see live workspaces, members, projects, tasks, invoices and storage usage directly inside Workspace Settings.</p><div class="ftag" style="background:rgba(90,140,255,.12);color:var(--blue)">Settings</div></div>
       <div class="fc"><div class="fi" style="background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.22)">🧾</div><h3>Billing & Invoices</h3><p>Professional company billing profile, invoice history, invoice creation, status tracking and printable/downloadable records.</p><div class="ftag" style="background:rgba(168,85,247,.12);color:var(--purple)">Billing</div></div>
       <div class="fc"><div class="fi" style="background:rgba(48,209,88,.12);border:1px solid rgba(48,209,88,.22)">⚡</div><h3>Instant workspace actions</h3><p>Ticket and task interactions are optimized for immediate UI response with fewer heavy reloads after save/update/delete.</p><div class="ftag" style="background:rgba(48,209,88,.12);color:var(--green)">Performance</div></div>
       <div class="fc"><div class="fi" style="background:rgba(255,214,10,.12);border:1px solid rgba(255,214,10,.22)">🔔</div><h3>Smarter notifications</h3><p>Ticket and task notifications are routed to the relevant module and targeted to the right people instead of noisy broadcasts.</p><div class="ftag" style="background:rgba(255,214,10,.12);color:var(--amber)">Routing</div></div>
@@ -1468,16 +1468,16 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     </div>
     <div class="compare-table" style="margin-top:32px;display:block;overflow:hidden;border-radius:22px;border:1px solid var(--b2);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015))">
       <table style="width:100%;border-collapse:collapse">
-        <thead><tr><th>Plan</th><th>Recommended for</th><th>Workspace limits</th><th>Commercial positioning</th><th>Support</th></tr></thead>
+        <thead><tr><th>Plan</th><th>Best for</th><th>Workspaces</th><th>Capacity</th><th>Storage</th><th>Support</th></tr></thead>
         <tbody>
-          <tr><td class="feat-name">Starter<span class="compare-muted">₹0 / workspace</span></td><td>Small teams validating the product</td><td>25 members · 50 projects · 350 tasks · 150 invoices</td><td><span class="compare-pill">Acquisition</span><span class="compare-muted">Generous enough to adopt, capped enough to upgrade.</span></td><td>Email</td></tr>
-          <tr><td class="feat-name">Team<span class="compare-muted">₹999 / workspace / month</span></td><td>Growing delivery teams</td><td>100 members · 250 projects · 1,500 tasks · 500 invoices</td><td><span class="compare-pill">Core revenue</span><span class="compare-muted">Best default paid plan for Indian SMB teams.</span></td><td>Priority</td></tr>
-          <tr><td class="feat-name">Business<span class="compare-muted">₹2,999 / workspace / month</span></td><td>Departments and client-service teams</td><td>250 members · 750 projects · 5,000 tasks · 1,500 invoices</td><td><span class="compare-pill">High margin</span><span class="compare-muted">For teams that need scale, billing controls and governance.</span></td><td>Priority SLA</td></tr>
-          <tr><td class="feat-name">Enterprise<span class="compare-muted">Custom contract</span></td><td>Large/private deployments</td><td>Custom members · projects · tasks · invoices</td><td><span class="compare-pill">Sales-led</span><span class="compare-muted">Use for SSO, private hosting, audit, and custom onboarding.</span></td><td>Dedicated</td></tr>
+          <tr><td class="feat-name">Starter<span class="compare-muted">₹0 / month</span></td><td>Small teams starting with structured project tracking</td><td>1 workspace</td><td>25 members · 50 projects · 350 tasks · 150 invoices</td><td>1 GB</td><td>Email</td></tr>
+          <tr><td class="feat-name">Team<span class="compare-muted">₹999 / workspace / month</span></td><td>Growing delivery teams with multiple projects</td><td>1 workspace</td><td>100 members · 250 projects · 1,500 tasks · 500 invoices</td><td>25 GB</td><td>Priority</td></tr>
+          <tr><td class="feat-name">Business<span class="compare-muted">₹2,999 / month</span></td><td>Departments, agencies and client-service teams</td><td>3 workspaces</td><td>250 members · 750 projects · 5,000 tasks · 1,500 invoices</td><td>100 GB</td><td>Priority SLA</td></tr>
+          <tr><td class="feat-name">Enterprise<span class="compare-muted">Custom contract</span></td><td>Large teams, regulated businesses and private deployments</td><td>Custom</td><td>Custom members, projects, tasks and invoices</td><td>Custom / 500 GB+</td><td>Dedicated</td></tr>
         </tbody>
       </table>
     </div>
-    <div class="plan-profit-note"><b>Pricing strategy:</b> competing project tools commonly charge per user, while Project Tracker uses workspace pricing. Keep Starter free, make Team the main paid upgrade, and use Business for heavier usage/SLA needs so high-usage customers do not stay on a low-margin plan.</div>
+    <div class="plan-profit-note"><b>Workspace pricing:</b> Project Tracker keeps Starter free for adoption, then scales by workspace capacity, storage and support level so teams can upgrade when usage grows.</div>
   </div>
 </section>
 
@@ -1490,14 +1490,14 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     <div class="plan-g">
       <div class="plan reveal stagger-1">
         <div class="plan-name">Starter</div>
-        <div class="plan-tagline">For small teams getting started with projects, tasks, tickets and workspace collaboration.</div>
+        <div class="plan-tagline">For small teams getting started with project tracking, tickets and workspace collaboration.</div>
         <div class="plan-price"><sup>₹</sup>0<small>/mo</small></div>
         <div class="plan-period">Free forever · No credit card required</div>
-        <a href="/?action=register" class="plan-cta out">Create workspace →</a>
+        <a href="/?action=register" class="plan-cta out">Create free workspace</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">What's included</div>
         <ul class="plan-feats">
-          <li><div class="ck">✓</div>1 workspace</li>
+          <li><div class="ck">✓</div><b>1 workspace</b> · 1 GB storage</li>
           <li><div class="ck">✓</div><b>25 members</b> · 50 projects</li>
           <li><div class="ck">✓</div>350 tasks · 150 invoices</li>
           <li><div class="ck">✓</div>Kanban, tickets, channels and DMs</li>
@@ -1513,10 +1513,11 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
         <div class="plan-tagline">For growing teams that need reporting, permissions, team management and billing controls.</div>
         <div class="plan-price"><sup>₹</sup>999<small>/mo</small></div>
         <div class="plan-period">Per workspace · Billed monthly</div>
-        <a href="/?action=register" class="plan-cta fill">Start trial →</a>
+        <a href="/?action=register" class="plan-cta fill">Start 14-day trial</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">Everything in Starter, plus</div>
         <ul class="plan-feats">
+          <li><div class="ck">✓</div><b>1 workspace</b> · 25 GB storage</li>
           <li><div class="ck">✓</div><b>100 members</b> · 250 projects</li>
           <li><div class="ck">✓</div>1,500 tasks · 500 invoices</li>
           <li><div class="ck">✓</div>Teams &amp; sub-team management</li>
@@ -1531,11 +1532,12 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
         <div class="plan-name">Business</div>
         <div class="plan-tagline">For departments and client-service teams that need higher capacity, governance and priority SLA.</div>
         <div class="plan-price"><sup>₹</sup>2,999<small>/mo</small></div>
-        <div class="plan-period">Per workspace · Best for departments</div>
-        <a href="/?action=register&plan=business" class="plan-cta out">Upgrade →</a>
+        <div class="plan-period">Includes 3 workspaces · Best for departments</div>
+        <a href="/?action=register&plan=business" class="plan-cta out">Upgrade to Business</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">Everything in Team, plus</div>
         <ul class="plan-feats">
+          <li><div class="ck">✓</div><b>3 workspaces</b> · 100 GB storage</li>
           <li><div class="ck">✓</div><b>250 members</b> · 750 projects</li>
           <li><div class="ck">✓</div>5,000 tasks · 1,500 invoices</li>
           <li><div class="ck">✓</div>Advanced portfolio dashboards</li>
@@ -1551,10 +1553,11 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
         <div class="plan-tagline">For large organisations, regulated teams, private deployment and custom operational requirements.</div>
         <div class="plan-custom">Custom</div>
         <div class="plan-period">Annual contract · Volume pricing</div>
-        <a href="mailto:sales@projecttracker.in" class="plan-cta out">Contact sales →</a>
+        <a href="mailto:sales@projecttracker.in" class="plan-cta out">Contact sales</a>
         <div class="plan-div"></div>
         <div class="plan-fhead">Everything in Business, plus</div>
         <ul class="plan-feats">
+          <li><div class="ck">✓</div>Custom workspaces, storage and usage limits</li>
           <li><div class="ck">✓</div>Custom members, projects, tasks and invoices</li>
           <li><div class="ck">✓</div>Dedicated hosted instance</li>
           <li><div class="ck">✓</div>On-premise / self-hosted deployment</li>
@@ -1587,9 +1590,9 @@ footer{border-top:1px solid var(--b1);padding:64px 48px 40px;background:var(--bg
     </div>
     <p id="faqNoResult" style="display:none;text-align:center;color:var(--tx3);font-size:14px;padding:24px 0">No questions match your search.</p>
     <div class="faq">
-      <div class="faq-i"><button class="faq-q" >Do I need a credit card to start?<span class="arr">▾</span></button><div class="faq-a">No. The Starter plan is completely free forever. Create a workspace, invite your team and use all 12 modules with zero payment required. You only need billing details when upgrading to Team or Enterprise.</div></div>
+      <div class="faq-i"><button class="faq-q" >Do I need a credit card to start?<span class="arr">▾</span></button><div class="faq-a">No. The Starter plan is completely free forever. Create a workspace, invite your team and use all 12 modules with zero payment required. You only need billing details when upgrading to Team, Business or Enterprise.</div></div>
       <div class="faq-i"><button class="faq-q" >How does the AI assistant work?<span class="arr">▾</span></button><div class="faq-a">Project Tracker's AI assistant is powered by Anthropic Claude. You provide your own API key in Workspace Settings → AI Key. Once set, the assistant can create tasks, update statuses, generate EOD reports and answer questions about your projects in natural language.</div></div>
-      <div class="faq-i"><button class="faq-q" >How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan supports up to 25 team members. If your team is larger, upgrade to Team for 100 members or Business for 250 members. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
+      <div class="faq-i"><button class="faq-q" >How many team members can I invite on the free plan?<span class="arr">▾</span></button><div class="faq-a">The Starter plan includes 1 workspace, 25 members and 1 GB storage. Team includes 1 workspace with 25 GB storage, while Business includes 3 workspaces with 100 GB storage. You can invite people via the workspace invite code found in Settings → Workspace.</div></div>
       <div class="faq-i"><button class="faq-q" >Is my data secure?<span class="arr">▾</span></button><div class="faq-a">Yes. Project Tracker uses bcrypt password hashing, session-based auth, Google Authenticator TOTP 2FA, HTTPS-only sessions and tenant-isolated database queries — no workspace can access another's data. Enterprise customers can opt for on-premise deployment for complete data sovereignty.</div></div>
       <div class="faq-i"><button class="faq-q" >What does "bring your own AI key" mean?<span class="arr">▾</span></button><div class="faq-a">Get an API key from Anthropic (anthropic.com) and paste it once in Project Tracker's Workspace Settings. Project Tracker calls the Claude API directly from your server — you pay Anthropic only for actual usage, and we never store your key outside your workspace settings.</div></div>
       <div class="faq-i"><button class="faq-q" >Can I upgrade or downgrade anytime?<span class="arr">▾</span></button><div class="faq-a">Yes. Upgrade from Starter to Team, Business, or Enterprise at any time and your data is preserved exactly as-is. Downgrades take effect at the end of your billing period. Contact <a href="mailto:sales@projecttracker.in" style="color:var(--blue)">sales@projecttracker.in</a> for Enterprise custom billing arrangements.</div></div>
