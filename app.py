@@ -9421,10 +9421,16 @@ def admin_api_dashboard():
             storage_bytes = int((storage_bytes_row and storage_bytes_row["total"]) or 0)
             plans = db.execute("SELECT COALESCE(plan,'starter') AS plan, COUNT(*) AS c FROM workspaces GROUP BY COALESCE(plan,'starter')").fetchall()
             recent = db.execute("SELECT id, name, plan, created FROM workspaces ORDER BY created DESC LIMIT 8").fetchall()
+            try:
+                suspended_ws = db.execute("SELECT COUNT(*) AS c FROM workspaces WHERE COALESCE(suspended,0)=1").fetchone()["c"]
+            except Exception:
+                suspended_ws = 0
         return jsonify({
             "ok": True,
             "total_users": int(total_users or 0),
             "total_workspaces": int(total_ws or 0),
+            "active_workspaces": int((total_ws or 0) - (suspended_ws or 0)),
+            "suspended_workspaces": int(suspended_ws or 0),
             "total_projects": int(total_projects or 0),
             "total_tasks": int(total_tasks or 0),
             "open_tickets": int(open_tickets or 0),
@@ -9554,6 +9560,53 @@ def admin_api_delete_user(uid):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/api/admin/tickets")
+def admin_api_tickets():
+    """Company-level support/enquiry tickets across all workspaces for the management panel."""
+    if not _require_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        with get_db() as db:
+            cols = _table_columns(db, "tickets") or []
+            if not cols:
+                return jsonify({"ok": True, "tickets": []})
+            def expr(col, fallback="''"):
+                return f"t.{col}" if col in cols else f"{fallback} AS {col}"
+            title_expr = "t.title" if "title" in cols else ("t.subject" if "subject" in cols else "t.id")
+            desc_expr  = "t.description" if "description" in cols else ("t.body" if "body" in cols else "''")
+            status_expr = "t.status" if "status" in cols else "'open'"
+            priority_expr = "t.priority" if "priority" in cols else "''"
+            created_expr = "t.created" if "created" in cols else ("t.created_at" if "created_at" in cols else "''")
+            requester_expr = "t.requester" if "requester" in cols else ("t.created_by" if "created_by" in cols else "''")
+            where = []
+            if "deleted_at" in cols:
+                where.append("COALESCE(t.deleted_at,'')=''")
+            if "deleted" in cols:
+                where.append("COALESCE(t.deleted,0)=0")
+            where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+            sql = f"""
+                SELECT t.id,
+                       COALESCE(t.workspace_id,'') AS workspace_id,
+                       COALESCE(w.name,'') AS workspace_name,
+                       {title_expr} AS title,
+                       {desc_expr} AS description,
+                       {status_expr} AS status,
+                       {priority_expr} AS priority,
+                       {requester_expr} AS requester,
+                       {created_expr} AS created
+                FROM tickets t
+                LEFT JOIN workspaces w ON w.id = t.workspace_id
+                {where_sql}
+                ORDER BY {created_expr} DESC
+                LIMIT 500
+            """
+            rows = db.execute(sql).fetchall()
+        return jsonify({"ok": True, "tickets": [dict(r) for r in rows]})
+    except Exception as e:
+        log.exception("admin tickets failed")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/admin/audit")
 def admin_api_audit():
     if not _require_admin():
@@ -9602,12 +9655,13 @@ def admin_api_suspend_workspace():
         return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
     ws_id = data.get("workspace_id")
+    suspended = 1 if data.get("suspended", True) else 0
     try:
         with get_db() as db:
-            db.execute("UPDATE workspaces SET suspended=1 WHERE id=?", (ws_id,))
+            db.execute("UPDATE workspaces SET suspended=? WHERE id=?", (suspended, ws_id))
             db.commit()
-        _audit("suspend_workspace", ws_id, "Workspace suspended")
-        return jsonify({"ok": True})
+        _audit("suspend_workspace" if suspended else "reactivate_workspace", ws_id, "Workspace suspended" if suspended else "Workspace reactivated")
+        return jsonify({"ok": True, "suspended": bool(suspended)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
