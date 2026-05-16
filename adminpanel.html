@@ -45,7 +45,7 @@
 <script>
 const $=s=>document.querySelector(s); let token=localStorage.getItem('pt_admin_token')||''; let view='dashboard'; let state={dashboard:null,workspaces:[],users:[],audit:[]};
 function getCookie(name){return document.cookie.split('; ').find(x=>x.startsWith(name+'='))?.split('=').slice(1).join('=')||''}
-function api(path, opts={}){const xsrf=decodeURIComponent(getCookie('XSRF-TOKEN')||'');return fetch(path,{...opts,headers:{'Content-Type':'application/json','X-Admin-Token':token,'X-CSRF-Token':xsrf,...(opts.headers||{})}}).then(async r=>{let j={};try{j=await r.json()}catch(e){} if(!r.ok) throw new Error(j.error||('Request failed '+r.status)); return j;});}
+function api(path, opts={}){const xsrf=decodeURIComponent(getCookie('XSRF-TOKEN')||'');return fetch(path,{cache:'no-store',credentials:'same-origin',...opts,headers:{'Content-Type':'application/json','X-Admin-Token':token,'X-CSRF-Token':xsrf,...(opts.headers||{})}}).then(async r=>{let j={};try{j=await r.json()}catch(e){} if(!r.ok){ if(r.status===401){localStorage.removeItem('pt_admin_token');} throw new Error(j.error||('Request failed '+r.status)); } return j;});}
 function fmt(n){return Number(n||0).toLocaleString('en-IN')} function mb(v){v=Number(v||0); return v>=1024?(v/1024).toFixed(v>=10240?0:1)+' GB':fmt(v)+' MB'}
 function showLogin(){ $('#login').classList.remove('hidden'); $('#app').classList.add('hidden'); } function showApp(){ $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); }
 async function boot(){ if(!token){showLogin();return} try{await api('/api/admin/session'); showApp(); await loadAll();}catch(e){localStorage.removeItem('pt_admin_token'); token=''; showLogin();}}

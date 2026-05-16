@@ -9151,8 +9151,58 @@ def _saml_process_response(req, ws):
         return {"email": email, "name": name}
     except Exception as e:
         return {"error": str(e)}
-_ADMIN_TOKENS = {}       # token -> expiry (datetime)
+_ADMIN_TOKENS = {}       # token -> expiry (datetime) — legacy single-worker fallback
 _ADMIN_FAIL_LOG = {}     # ip -> [fail_timestamp, ...] — brute-force lockout
+
+def _admin_token_secret():
+    """Shared secret for stateless admin tokens across Gunicorn workers.
+    IMPORTANT: set ADMIN_TOKEN_SECRET or SECRET_KEY in production so tokens remain
+    valid across workers/restarts. Falls back to app.secret_key only as backup.
+    """
+    return (
+        os.environ.get("ADMIN_TOKEN_SECRET")
+        or os.environ.get("SECRET_KEY")
+        or str(getattr(app, "secret_key", ""))
+        or "project-tracker-admin-token-fallback"
+    ).encode("utf-8")
+
+def _issue_admin_token(email):
+    """Create a stateless signed token so /api/admin/dashboard works across
+    multiple Gunicorn workers. The previous in-memory token store caused:
+    login hits worker A -> dashboard hits worker B -> 401 Unauthorized.
+    """
+    exp_ts = int((datetime.utcnow() + timedelta(hours=8)).timestamp())
+    nonce = secrets.token_hex(16)
+    payload = f"{email}|{exp_ts}|{nonce}"
+    sig = hmac.new(_admin_token_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    raw = f"{payload}|{sig}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+def _verify_admin_token(token):
+    """Validate signed admin token without relying on per-worker memory."""
+    token = (token or "").strip()
+    if not token:
+        return False
+
+    # Backward compatibility for any old in-memory tokens during a rolling deploy.
+    exp = _ADMIN_TOKENS.get(token)
+    if exp and datetime.utcnow() < exp:
+        return True
+
+    try:
+        padded = token + ("=" * (-len(token) % 4))
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        email, exp_s, nonce, sig = raw.rsplit("|", 3)
+        payload = f"{email}|{exp_s}|{nonce}"
+        expected = hmac.new(_admin_token_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return False
+        if int(exp_s) < int(datetime.utcnow().timestamp()):
+            return False
+        admin_email = os.environ.get("ADMIN_EMAIL", "admin@project-tracker.in").strip().lower()
+        return email.strip().lower() == admin_email
+    except Exception:
+        return False
 
 def _admin_check_lockout(ip):
     """Return True if this IP is locked out (5+ failures in last 15 min)."""
@@ -9171,10 +9221,8 @@ def _admin_clear_failures(ip):
     _ADMIN_FAIL_LOG.pop(ip, None)
 
 def _require_admin():
-    """Return True if request carries a valid admin token."""
-    token = request.headers.get("X-Admin-Token", "")
-    exp   = _ADMIN_TOKENS.get(token)
-    return bool(exp and datetime.utcnow() < exp)
+    """Return True if request carries a valid signed admin token."""
+    return _verify_admin_token(request.headers.get("X-Admin-Token", ""))
 
 def _audit(action, target="", detail=""):
     """Write an entry to audit_log. Fire-and-forget — never raises."""
@@ -9334,10 +9382,12 @@ def admin_api_login():
         return jsonify({"error": f"Invalid credentials. {max(remaining,0)} attempt(s) remaining before lockout."}), 401
 
     _admin_clear_failures(client_ip)
-    token = secrets.token_hex(32)
+    token = _issue_admin_token(email)
+    # Store only as a compatibility fallback; token verification is stateless,
+    # so dashboard/API calls will work even when routed to a different worker.
     _ADMIN_TOKENS[token] = datetime.utcnow() + timedelta(hours=8)
     _audit("admin_login", "system", f"Admin logged in: {email}")
-    return jsonify({"token": token})
+    return jsonify({"token": token, "expires_in": 8 * 60 * 60})
 
 @app.route("/api/admin/session")
 def admin_api_session():
