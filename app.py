@@ -459,6 +459,11 @@ _CSRF_EXEMPT_PREFIXES = (
     "/api/auth/google",
     "/api/sso/",
     "/api/public/",
+    # Company Management Panel uses a separate bearer token in X-Admin-Token.
+    # Do not bind these endpoints to the normal workspace-user CSRF token,
+    # otherwise logged-in workspace sessions can block /manage login with
+    # "Invalid CSRF token" before the admin token is even issued.
+    "/api/admin/",
 )
 
 def _csrf_required():
