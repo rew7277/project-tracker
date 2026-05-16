@@ -9812,7 +9812,31 @@ def _stripe_get(path):
 # ── Workspace billing profile + professional invoice creation ───────────────
 
 def _billing_admin_required():
-    return session.get("role") in ("Admin", "Owner", "Manager")
+    """Billing is restricted, but role must be read live from DB because
+    session['role'] can be stale after deploy/login refreshes."""
+    try:
+        role = _live_workspace_role()
+    except Exception:
+        role = session.get("role") or ""
+    role_norm = str(role or "").strip().lower().replace("_", " ").replace("-", " ")
+    return role_norm in ("admin", "owner", "manager", "workspace owner")
+
+def _table_exists(db, table_name):
+    try:
+        row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (str(table_name),)).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+def _safe_count(db, table_name, where_sql="", params=()):
+    try:
+        if not _table_exists(db, table_name):
+            return 0
+        sql = "SELECT COUNT(*) AS c FROM " + table_name + (" WHERE " + where_sql if where_sql else "")
+        row = db.execute(sql, tuple(params or ())).fetchone()
+        return int(row["c"] if row and "c" in row.keys() else 0)
+    except Exception:
+        return 0
 
 def _billing_profile_dict(row):
     if row: return dict(row)
@@ -9877,11 +9901,15 @@ def _next_invoice_no(db, workspace_id, prefix="INV"):
     prefix = re.sub(r"[^A-Za-z0-9-]", "", str(prefix or "INV"))[:12] or "INV"
     year = now_ist().strftime("%Y")
     like = f"{prefix}-{year}-%"
-    row = db.execute("SELECT invoice_no FROM invoices WHERE workspace_id=? AND invoice_no LIKE ? ORDER BY created DESC LIMIT 1", (workspace_id, like)).fetchone()
     n = 1
-    if row and row["invoice_no"]:
-        try: n = int(str(row["invoice_no"]).split("-")[-1]) + 1
-        except Exception: n = 1
+    try:
+        if _table_exists(db, "invoices"):
+            row = db.execute("SELECT invoice_no FROM invoices WHERE workspace_id=? AND invoice_no LIKE ? ORDER BY created DESC LIMIT 1", (workspace_id, like)).fetchone()
+            if row and row["invoice_no"]:
+                try: n = int(str(row["invoice_no"]).split("-")[-1]) + 1
+                except Exception: n = 1
+    except Exception:
+        n = 1
     return f"{prefix}-{year}-{n:04d}"
 
 @app.route("/api/billing/invoices", methods=["GET"])
@@ -9889,18 +9917,41 @@ def _next_invoice_no(db, workspace_id, prefix="INV"):
 def billing_invoices_overview():
     if not _billing_admin_required():
         return jsonify({"error":"Billing is available to workspace admins/managers only"}),403
-    with get_db() as db:
-        _ensure_billing_schema(db)
-        profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
-        rows = db.execute("SELECT * FROM invoices WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
-        invoices = [dict(r) for r in rows]
-        for inv in invoices:
-            inv["items"] = [dict(x) for x in db.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY rowid", (inv["id"],)).fetchall()]
-        paid = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower()=="paid")
-        outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
-        overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
-        summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
-        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
+    try:
+        with get_db() as db:
+            # IMPORTANT: no DDL/ALTER statements in read path. DDL was causing
+            # SQLite locks and frontend request timeouts during normal page load.
+            if _table_exists(db, "workspace_billing_profile"):
+                profile = _billing_profile_dict(db.execute("SELECT * FROM workspace_billing_profile WHERE workspace_id=?", (wid(),)).fetchone())
+            else:
+                profile = _billing_profile_dict(None)
+
+            invoices = []
+            if _table_exists(db, "invoices"):
+                rows = db.execute("SELECT * FROM invoices WHERE workspace_id=? ORDER BY created DESC LIMIT 100", (wid(),)).fetchall()
+                invoices = [dict(r) for r in rows]
+                # Fetch all invoice items in one query instead of N+1 round trips.
+                if invoices and _table_exists(db, "invoice_items"):
+                    ids = [i.get("id") for i in invoices if i.get("id")]
+                    ph = ",".join(["?"]*len(ids))
+                    item_rows = db.execute(f"SELECT * FROM invoice_items WHERE invoice_id IN ({ph}) ORDER BY rowid", ids).fetchall() if ids else []
+                    grouped = {}
+                    for it in item_rows:
+                        d = dict(it); grouped.setdefault(d.get("invoice_id"), []).append(d)
+                    for inv in invoices:
+                        inv["items"] = grouped.get(inv.get("id"), [])
+                else:
+                    for inv in invoices: inv["items"] = []
+
+            paid = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower()=="paid")
+            outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
+            overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
+            summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
+            return jsonify({"ok": True, "profile": profile, "invoices": invoices, "summary": summary, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
+    except Exception as e:
+        log.exception("billing overview failed")
+        # Return JSON quickly so frontend can render an actionable error instead of hanging.
+        return jsonify({"ok": False, "error": "Could not load billing details. Please retry."}), 500
 
 @app.route("/api/billing/profile", methods=["PUT"])
 @login_required
@@ -10119,27 +10170,25 @@ def _live_workspace_role(user_id=None, workspace_id=None):
 @login_required
 def workspace_plan_usage():
     role = _live_workspace_role()
-    if role not in ("Admin", "Owner", "Manager", "Workspace Owner"):
+    role_norm = str(role or "").strip().lower().replace("_", " ").replace("-", " ")
+    if role_norm not in ("admin", "owner", "manager", "workspace owner"):
         return jsonify({"error": "Workspace plan and usage is available to admins/managers only", "role": role}), 403
-    with get_db() as db:
-        ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
-        members = db.execute("SELECT COUNT(*) AS c FROM users WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
-        projects = db.execute("SELECT COUNT(*) AS c FROM projects WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
-        tasks = db.execute("SELECT COUNT(*) AS c FROM tasks WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)).fetchone()
-        try:
-            _ensure_billing_schema(db)
-            invoices = db.execute("SELECT COUNT(*) AS c FROM invoices WHERE workspace_id=?", (wid(),)).fetchone()
-        except Exception:
-            invoices = {"c": 0}
-    plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
-    limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])
-    usage = {
-        "members": members["c"] if members else 0,
-        "projects": projects["c"] if projects else 0,
-        "tasks": tasks["c"] if tasks else 0,
-        "invoices": invoices["c"] if invoices else 0,
-    }
-    return jsonify({"ok": True, "plan": plan, "limits": limits, "usage": usage, "role": role, "updated_at": ts()})
+    try:
+        with get_db() as db:
+            # Read-only endpoint. Never run schema migrations/ALTER here.
+            ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
+            usage = {
+                "members": _safe_count(db, "users", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
+                "projects": _safe_count(db, "projects", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
+                "tasks": _safe_count(db, "tasks", "workspace_id=? AND COALESCE(deleted_at,'')=''", (wid(),)),
+                "invoices": _safe_count(db, "invoices", "workspace_id=?", (wid(),)),
+            }
+        plan = ((ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter").lower()
+        limits = WORKSPACE_PLAN_USAGE_LIMITS.get(plan, WORKSPACE_PLAN_USAGE_LIMITS["starter"])
+        return jsonify({"ok": True, "plan": plan, "limits": limits, "usage": usage, "role": role, "updated_at": ts()})
+    except Exception:
+        log.exception("workspace plan usage failed")
+        return jsonify({"ok": False, "error": "Could not load workspace usage. Please retry."}), 500
 
 def _get_month_usage(workspace_id):
     month_start = datetime.now().replace(day=1,hour=0,minute=0,second=0).isoformat()

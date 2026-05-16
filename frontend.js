@@ -6601,7 +6601,8 @@ function NotifPrefsPanel({cu}){
 
 
 function WorkspacePlanUsageCard({cu}){
-  const allowed=cu&&['Admin','Owner','Manager','Workspace Owner'].includes(String(cu.role||''));
+  const roleNorm=String(cu&&cu.role||'').trim().toLowerCase().replace(/[_-]/g,' ');
+  const allowed=!!cu&&['admin','owner','manager','workspace owner'].includes(roleNorm);
   const [data,setData]=useState(null);
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState('');
@@ -6609,8 +6610,10 @@ function WorkspacePlanUsageCard({cu}){
     if(!allowed)return;
     setLoading(true);setErr('');
     try{
-      const r=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:8000});
-      if(r&&r.error)setErr(r.error);else setData(r);
+      const cached=(()=>{try{return JSON.parse(localStorage.getItem('pt_plan_usage_cache')||'null');}catch(_){return null;}})();
+      if(cached&&!data)setData(cached);
+      const r=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:15000});
+      if(r&&r.error){setErr(r.error);}else{setData(r);try{localStorage.setItem('pt_plan_usage_cache',JSON.stringify(r));}catch(_){}}
     }catch(e){setErr('Could not load workspace plan usage.');}
     setLoading(false);
   },[allowed]);
@@ -9824,7 +9827,8 @@ function ptDmUrl(user,u=null){
 
 function BillingInvoicesView({cu}){
   const today=new Date().toISOString().slice(0,10);
-  const canManageBilling=cu&&['Admin','Owner','Manager'].includes(String(cu.role||''));
+  const billingRoleNorm=String(cu&&cu.role||'').trim().toLowerCase().replace(/[_-]/g,' ');
+  const canManageBilling=!!cu&&['admin','owner','manager','workspace owner'].includes(billingRoleNorm);
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState('');
   const [profile,setProfile]=useState({legal_name:'',billing_email:'',tax_id:'',address_line1:'',address_line2:'',city:'',state:'',postal_code:'',country:'India',currency:'INR',tax_rate:18,invoice_prefix:'INV',invoice_notes:''});
@@ -9840,12 +9844,15 @@ function BillingInvoicesView({cu}){
   const load=useCallback(async()=>{
     setLoading(true);setErr('');
     try{
-      const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
+      const cached=(()=>{try{return JSON.parse(localStorage.getItem('pt_billing_cache')||'null');}catch(_){return null;}})();
+      if(cached&&!invoices.length){setProfile(prev=>({...prev,...(cached.profile||{})}));setSummary(cached.summary||summary);setInvoices(Array.isArray(cached.invoices)?cached.invoices:[]);setNextNo(cached.next_invoice_no||nextNo);}
+      const r=await api.get('/api/billing/invoices',{quiet:true,timeoutMs:15000});
       if(r&&!r.error){
         setProfile(prev=>({...prev,...(r.profile||{})}));
         setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
         setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
         setNextNo(r.next_invoice_no||'INV-0001');
+        try{localStorage.setItem('pt_billing_cache',JSON.stringify(r));}catch(_e){}
       }else{
         setErr((r&&r.error)||'Could not load billing details');
       }
@@ -9881,7 +9888,7 @@ function BillingInvoicesView({cu}){
         setInvoices(prev=>prev.map(x=>x.id===temp.id?r:x));
         setDraft({customer_name:'',customer_email:'',issue_date:today,due_date:'',status:'draft',notes:'',items:[{description:'Project management services',quantity:1,unit_price:0}]});
         try{window._pfToast&&window._pfToast('success','Invoice created',`${r.invoice_no} saved successfully.`);}catch{}
-        load();
+        setSummary(prev=>({...prev,invoice_count:Number(prev.invoice_count||0)+1,outstanding_total:Number(prev.outstanding_total||0)+Number(r.total||0)}));
       }else{
         setInvoices(prev=>prev.filter(x=>x.id!==temp.id));
         setErr((r&&r.error)||'Could not create invoice');
