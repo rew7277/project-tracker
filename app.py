@@ -8698,125 +8698,193 @@ def ws_sso_callback(ws_name, ws_id):
 # ── Workspace URL validation + animated not-found page ─────────────────────
 
 def _render_workspace_not_found_page(*, status=404, reason="The workspace URL is invalid, incomplete, or no longer exists."):
-    reason = _html.escape(str(reason or "Page not found"))
+    reason = _html.escape(str(reason or "The workspace name or workspace ID in this link doesn’t match an active workspace. Please check the URL or return to your dashboard."))
     html = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>projecttracker.in — Page not found</title>
+  <title>Project Tracker — Workspace link not found</title>
   <style>
     :root {{
-      --bg1:#0b1020; --bg2:#111933; --card:#111827cc; --line:#ffffff1f; --text:#eef2ff;
-      --muted:#b9c2e0; --accent:#7c9cff; --accent2:#9b8cff; --good:#8ee3a1; --shadow:0 24px 80px rgba(0,0,0,.45);
+      --bg:#0b1020;
+      --bg-soft:#10182f;
+      --card:#121a2fcc;
+      --card-solid:#121a2f;
+      --line:rgba(255,255,255,.13);
+      --text:#eef2ff;
+      --muted:#b8c2df;
+      --muted-2:#8f9abb;
+      --brand:#7c8cff;
+      --brand-2:#9a8cff;
+      --paper:#f8fafc;
+      --ink:#111827;
+      --shadow:0 28px 90px rgba(0,0,0,.38);
     }}
     * {{ box-sizing:border-box; }}
     body {{
-      margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin:0;
+      min-height:100vh;
+      font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
       color:var(--text);
-      background: radial-gradient(circle at top, #18254f 0%, var(--bg2) 35%, var(--bg1) 100%);
+      background:
+        radial-gradient(circle at 20% 0%, rgba(124,140,255,.22), transparent 34%),
+        radial-gradient(circle at 80% 10%, rgba(154,140,255,.16), transparent 32%),
+        linear-gradient(145deg, var(--bg) 0%, #0c1328 46%, #070b18 100%);
       overflow:hidden;
     }}
-    .stars, .stars:before, .stars:after {{
-      content:""; position:absolute; inset:0; background-image:
-        radial-gradient(2px 2px at 20px 30px, rgba(255,255,255,.35), transparent 50%),
-        radial-gradient(2px 2px at 120px 80px, rgba(255,255,255,.3), transparent 50%),
-        radial-gradient(1.5px 1.5px at 60px 140px, rgba(255,255,255,.25), transparent 50%),
-        radial-gradient(1.5px 1.5px at 200px 180px, rgba(255,255,255,.28), transparent 50%);
-      background-size:240px 220px; animation: drift 40s linear infinite; opacity:.75;
+    .grid-bg {{
+      position:fixed; inset:0;
+      background-image:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+      background-size:44px 44px;
+      mask-image:radial-gradient(circle at center, rgba(0,0,0,.72), transparent 72%);
       pointer-events:none;
     }}
-    .stars:before {{ transform:scale(1.15); animation-duration:58s; opacity:.45; }}
-    .stars:after {{ transform:scale(.92); animation-duration:72s; opacity:.3; }}
-    @keyframes drift {{ from {{ transform:translateY(0); }} to {{ transform:translateY(120px); }} }}
-    .shell {{ position:relative; z-index:2; min-height:100vh; display:grid; place-items:center; padding:24px; }}
+    .shell {{
+      position:relative; z-index:1; min-height:100vh;
+      display:grid; place-items:center; padding:32px 20px;
+    }}
     .card {{
-      width:min(920px, 100%); background:var(--card); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-      border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:28px;
+      width:min(900px, 100%);
+      display:grid;
+      grid-template-columns: 280px 1fr;
+      gap:34px;
+      align-items:center;
+      padding:42px;
+      border:1px solid var(--line);
+      border-radius:28px;
+      background:linear-gradient(180deg, rgba(18,26,47,.9), rgba(14,21,39,.88));
+      box-shadow:var(--shadow);
+      backdrop-filter:blur(16px);
+      -webkit-backdrop-filter:blur(16px);
     }}
-    .pill {{ display:inline-flex; gap:10px; align-items:center; padding:8px 14px; border-radius:999px;
-      background:rgba(124,156,255,.16); color:#dbe5ff; border:1px solid rgba(124,156,255,.3); font-size:14px; font-weight:700; letter-spacing:.02em; }}
-    .stage {{ display:grid; grid-template-columns: 300px 1fr; gap:28px; align-items:center; }}
-    .illustration {{ position:relative; min-height:340px; display:grid; place-items:center; }}
-    .puppy-wrap {{ position:relative; width:100%; display:grid; place-items:center; animation:bob 3.2s ease-in-out infinite; }}
-    .puppy {{ font-size:128px; line-height:1; filter: drop-shadow(0 14px 18px rgba(0,0,0,.28)); }}
-    .sign {{
-      width:250px; margin-top:-10px; background:linear-gradient(180deg, #fff, #eef2ff); color:#111827; border-radius:22px;
-      padding:18px 18px 16px; text-align:center; box-shadow:0 20px 40px rgba(0,0,0,.25); position:relative; animation:wobble 4.2s ease-in-out infinite;
+    .art {{ min-height:280px; display:grid; place-items:center; }}
+    .mascot {{ position:relative; width:236px; height:248px; animation:float 4.4s ease-in-out infinite; }}
+    .puppy-head {{
+      position:absolute; top:8px; left:56px; width:124px; height:112px;
+      border-radius:44% 44% 48% 48%;
+      background:linear-gradient(145deg, #d79762, #b9774f);
+      box-shadow:0 18px 28px rgba(0,0,0,.22);
     }}
-    .sign:before, .sign:after {{ content:""; position:absolute; top:-22px; width:6px; height:28px; background:#d5dbef; border-radius:999px; }}
-    .sign:before {{ left:44px; }} .sign:after {{ right:44px; }}
-    .site {{ display:inline-block; margin-bottom:8px; padding:6px 10px; background:#101828; color:#fff; border-radius:999px; font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }}
-    .sign h1 {{ margin:6px 0 8px; font-size:30px; line-height:1.05; }}
-    .sign p {{ margin:0; color:#475467; font-size:14px; line-height:1.45; }}
-    .paw-left, .paw-right {{ position:absolute; font-size:36px; bottom:86px; animation:wave 2.8s ease-in-out infinite; }}
-    .paw-left {{ left:46px; }} .paw-right {{ right:46px; animation-delay:.25s; }}
-    .shadow {{ width:180px; height:20px; border-radius:999px; background:rgba(3,7,18,.35); filter: blur(7px); margin-top:12px; animation:shadowPulse 3.2s ease-in-out infinite; }}
-    .content h2 {{ font-size:42px; line-height:1.05; margin:14px 0 10px; }}
-    .content p {{ font-size:17px; line-height:1.65; color:var(--muted); margin:0 0 14px; max-width:580px; }}
-    .tips {{ margin:16px 0 0; padding:16px 18px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03); border-radius:18px; }}
-    .tips ul {{ margin:8px 0 0 20px; color:#d8def5; }}
-    .tips li {{ margin:8px 0; }}
-    .actions {{ display:flex; flex-wrap:wrap; gap:12px; margin-top:22px; }}
-    .btn {{ text-decoration:none; display:inline-flex; align-items:center; justify-content:center; padding:12px 18px; min-height:46px; border-radius:14px; font-weight:800; }}
-    .btn-primary {{ background:linear-gradient(135deg, var(--accent), var(--accent2)); color:white; box-shadow:0 14px 30px rgba(124,156,255,.28); }}
-    .btn-secondary {{ color:var(--text); border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04); }}
-    .footer {{ margin-top:18px; font-size:13px; color:#9fb0e8; }}
-    @keyframes bob {{ 0%,100% {{ transform:translateY(0); }} 50% {{ transform:translateY(-10px); }} }}
-    @keyframes wobble {{ 0%,100% {{ transform:rotate(-1.2deg); }} 50% {{ transform:rotate(1.2deg); }} }}
-    @keyframes wave {{ 0%,100% {{ transform:translateY(0) rotate(0); }} 50% {{ transform:translateY(-6px) rotate(-9deg); }} }}
-    @keyframes shadowPulse {{ 0%,100% {{ transform:scaleX(1); opacity:.32; }} 50% {{ transform:scaleX(.92); opacity:.22; }} }}
-    @media (max-width: 820px) {{
-      .stage {{ grid-template-columns:1fr; text-align:center; }}
-      .illustration {{ min-height:290px; }}
-      .content p {{ margin-left:auto; margin-right:auto; }}
+    .ear {{ position:absolute; top:8px; width:42px; height:64px; background:#8d574b; border-radius:16px 16px 30px 30px; }}
+    .ear.left {{ left:42px; transform:rotate(10deg); }}
+    .ear.right {{ right:42px; transform:rotate(-10deg); }}
+    .eye {{ position:absolute; top:52px; width:7px; height:14px; border-radius:999px; background:#2f2933; }}
+    .eye.left {{ left:91px; }} .eye.right {{ right:91px; }}
+    .snout {{ position:absolute; top:72px; left:88px; width:60px; height:45px; border-radius:50%; background:#f0c69c; }}
+    .nose {{ position:absolute; top:78px; left:111px; width:15px; height:11px; border-radius:60% 60% 70% 70%; background:#2f2933; }}
+    .mouth {{ position:absolute; top:90px; left:118px; width:2px; height:20px; background:#2f2933; }}
+    .mouth:before, .mouth:after {{ content:""; position:absolute; top:12px; width:18px; height:14px; border-bottom:2px solid #2f2933; border-radius:0 0 18px 18px; }}
+    .mouth:before {{ right:0; }} .mouth:after {{ left:0; }}
+    .paper {{
+      position:absolute; left:7px; bottom:4px; width:222px; min-height:126px;
+      padding:20px 20px 18px;
+      color:var(--ink);
+      text-align:center;
+      background:linear-gradient(180deg, var(--paper), #edf2f7);
+      border:1px solid rgba(15,23,42,.12);
+      border-radius:18px;
+      box-shadow:0 20px 42px rgba(0,0,0,.28);
+      animation:paperTilt 5s ease-in-out infinite;
+    }}
+    .clip {{ position:absolute; top:-18px; width:5px; height:28px; border-radius:999px; background:#d5deef; box-shadow:0 0 0 1px rgba(15,23,42,.08); }}
+    .clip.left {{ left:34px; }} .clip.right {{ right:34px; }}
+    .tag {{ display:inline-flex; align-items:center; justify-content:center; padding:6px 10px; border-radius:999px; background:#111827; color:#fff; font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }}
+    .paper-title {{ margin:12px 0 4px; font-size:24px; line-height:1.05; font-weight:900; letter-spacing:-.03em; }}
+    .paper-copy {{ margin:0; font-size:12px; line-height:1.45; color:#667085; }}
+    .copy {{ max-width:520px; }}
+    .eyebrow {{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid rgba(124,140,255,.26);
+      background:rgba(124,140,255,.11);
+      color:#dfe5ff;
+      font-size:13px;
+      font-weight:800;
+      letter-spacing:.01em;
+    }}
+    h1 {{ margin:18px 0 12px; font-size:44px; line-height:1.04; letter-spacing:-.055em; }}
+    .message {{ margin:0; color:var(--muted); font-size:17px; line-height:1.62; }}
+    .panel {{
+      margin-top:22px;
+      padding:16px 18px;
+      border-radius:18px;
+      border:1px solid rgba(255,255,255,.11);
+      background:rgba(255,255,255,.045);
+    }}
+    .panel-title {{ margin:0 0 8px; font-size:14px; font-weight:900; color:#f4f6ff; }}
+    .panel p {{ margin:0; color:#cbd4ee; font-size:14px; line-height:1.6; }}
+    .actions {{ display:flex; flex-wrap:wrap; gap:12px; margin-top:24px; }}
+    .btn {{
+      display:inline-flex; align-items:center; justify-content:center;
+      min-height:46px; padding:12px 18px;
+      border-radius:14px;
+      text-decoration:none;
+      font-weight:850;
+      font-size:14px;
+      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }}
+    .btn:hover {{ transform:translateY(-1px); }}
+    .btn-primary {{ color:#fff; background:linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow:0 18px 36px rgba(124,140,255,.26); }}
+    .btn-secondary {{ color:#eef2ff; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.05); }}
+    .error-code {{ margin-top:18px; color:var(--muted-2); font-size:12px; letter-spacing:.02em; }}
+    @keyframes float {{ 0%,100% {{ transform:translateY(0); }} 50% {{ transform:translateY(-8px); }} }}
+    @keyframes paperTilt {{ 0%,100% {{ transform:rotate(-.6deg); }} 50% {{ transform:rotate(.8deg); }} }}
+    @media (max-width:820px) {{
+      body {{ overflow:auto; }}
+      .card {{ grid-template-columns:1fr; text-align:center; padding:30px 22px; gap:18px; }}
+      .art {{ min-height:238px; }}
+      .mascot {{ transform:scale(.88); }}
+      h1 {{ font-size:34px; }}
       .actions {{ justify-content:center; }}
     }}
   </style>
 </head>
 <body>
-  <div class="stars"></div>
-  <div class="shell">
-    <div class="card">
-      <span class="pill">🐾 projecttracker.in • page not found</span>
-      <div class="stage">
-        <div class="illustration">
-          <div class="puppy-wrap">
-            <div class="puppy">🐶</div>
-            <div class="sign">
-              <div class="site">projecttracker.in</div>
-              <h1>Page not found</h1>
-              <p>Cute puppy says this link is broken.</p>
-            </div>
-            <div class="paw-left">🐾</div>
-            <div class="paw-right">🐾</div>
-            <div class="shadow"></div>
+  <div class="grid-bg"></div>
+  <main class="shell" role="main">
+    <section class="card" aria-label="Workspace link not found">
+      <div class="art" aria-hidden="true">
+        <div class="mascot">
+          <div class="ear left"></div>
+          <div class="ear right"></div>
+          <div class="puppy-head"></div>
+          <div class="eye left"></div>
+          <div class="eye right"></div>
+          <div class="snout"></div>
+          <div class="nose"></div>
+          <div class="mouth"></div>
+          <div class="paper">
+            <div class="clip left"></div>
+            <div class="clip right"></div>
+            <div class="tag">projecttracker.in</div>
+            <div class="paper-title">Page not found</div>
+            <p class="paper-copy">This workspace link could not be verified.</p>
           </div>
-        </div>
-        <div class="content">
-          <h2>Oops! This workspace URL doesn’t look right.</h2>
-          <p>{reason}</p>
-          <div class="tips">
-            <strong>Quick checks:</strong>
-            <ul>
-              <li>Verify the <b>workspace name</b> and <b>workspace ID</b> in the URL.</li>
-              <li>Make sure the URL is complete and not truncated.</li>
-              <li>If you already signed in, go back to your own workspace dashboard.</li>
-            </ul>
-          </div>
-          <div class="actions">
-            <a class="btn btn-primary" href="/">Go to projecttracker.in</a>
-            <a class="btn btn-secondary" href="javascript:history.back()">Go back</a>
-          </div>
-          <div class="footer">HTTP {status} • Custom workspace validation page</div>
         </div>
       </div>
-    </div>
-  </div>
+      <div class="copy">
+        <div class="eyebrow">Project Tracker • Error {status}</div>
+        <h1>Workspace link not found</h1>
+        <p class="message">The workspace name or workspace ID in this link doesn’t match an active workspace. Please check the URL or return to your dashboard.</p>
+        <div class="panel">
+          <p class="panel-title">What happened?</p>
+          <p>{reason}</p>
+        </div>
+        <div class="actions">
+          <a class="btn btn-primary" href="/">Go to Dashboard</a>
+          <a class="btn btn-secondary" href="/">Back to Project Tracker</a>
+        </div>
+        <div class="error-code">Error {status}</div>
+      </div>
+    </section>
+  </main>
 </body>
 </html>"""
     return Response(html, status=status, mimetype="text/html")
-
 
 def _validate_workspace_url_or_404(ws_name, ws_id):
     """Strictly validate workspace slug + workspace id together.
