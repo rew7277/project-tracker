@@ -9833,6 +9833,53 @@ def _billing_profile_dict(row):
         "tax_rate": 18, "invoice_prefix": "INV", "invoice_notes": "", "updated_at": ""
     }
 
+
+def _safe_workspace_count(db, table, workspace_id):
+    try:
+        return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (workspace_id,)).fetchone()["c"] or 0)
+    except Exception:
+        try:
+            return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (workspace_id,)).fetchone()["c"] or 0)
+        except Exception:
+            return 0
+
+def _workspace_plan_usage_payload(db):
+    workspace_id = wid()
+    ws = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+    try:
+        ws_dict = dict(ws) if ws else {}
+    except Exception:
+        ws_dict = {}
+    plan = str(ws_dict.get('plan') or 'starter').lower()
+    limits_map = {
+        'starter': {'members': 50, 'projects': 100, 'tasks': 500, 'invoices': 200},
+        'pro': {'members': 150, 'projects': 500, 'tasks': 5000, 'invoices': 1000},
+        'business': {'members': 500, 'projects': 2000, 'tasks': 25000, 'invoices': 5000},
+        'enterprise': {'members': 999999, 'projects': 999999, 'tasks': 999999, 'invoices': 999999},
+    }
+    limits = limits_map.get(plan, limits_map['starter'])
+    return {
+        'workspace_id': workspace_id,
+        'workspace_name': ws_dict.get('name') or '',
+        'plan': plan,
+        'limits': limits,
+        'usage': {
+            'members': _safe_workspace_count(db, 'users', workspace_id),
+            'projects': _safe_workspace_count(db, 'projects', workspace_id),
+            'tasks': _safe_workspace_count(db, 'tasks', workspace_id),
+            'invoices': _safe_workspace_count(db, 'invoices', workspace_id),
+        }
+    }
+
+@app.route("/api/workspace/plan-usage", methods=["GET"])
+@login_required
+def workspace_plan_usage():
+    if not _billing_admin_required():
+        return jsonify({"error":"Workspace plan and usage is available to admins/managers only"}), 403
+    with get_db() as db:
+        _ensure_billing_schema(db)
+        return jsonify(_workspace_plan_usage_payload(db))
+
 def _ensure_billing_schema(db):
     """Idempotent billing DDL for already-deployed databases.
     Older deployments may have the route before all invoice tables/columns exist;
@@ -9910,34 +9957,7 @@ def billing_invoices_overview():
         outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
         overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
         summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
-
-        def _count(table, where="workspace_id=?", args=None):
-            args = args or (wid(),)
-            try:
-                row = db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE {where}", args).fetchone()
-                return int((row and row["c"]) or 0)
-            except Exception:
-                # Older DBs may not have deleted_at yet; fall back to workspace-only count.
-                try:
-                    row = db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (wid(),)).fetchone()
-                    return int((row and row["c"]) or 0)
-                except Exception:
-                    return 0
-
-        ws = None
-        try:
-            ws = db.execute("SELECT id, name, plan FROM workspaces WHERE id=?", (wid(),)).fetchone()
-        except Exception:
-            try: ws = db.execute("SELECT id, name FROM workspaces WHERE id=?", (wid(),)).fetchone()
-            except Exception: ws = None
-        ws_stats = {
-            "workspace_name": (ws["name"] if ws and "name" in ws.keys() else "Workspace"),
-            "plan": (ws["plan"] if ws and "plan" in ws.keys() and ws["plan"] else "starter"),
-            "member_count": _count("users", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
-            "project_count": _count("projects", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
-            "task_count": _count("tasks", "workspace_id=? AND COALESCE(deleted_at,'')=''"),
-            "invoice_count": len(invoices),
-        }
+        ws_stats = _workspace_plan_usage_payload(db)
         return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "ws_stats": ws_stats, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
 
 @app.route("/api/billing/profile", methods=["PUT"])

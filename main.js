@@ -6727,6 +6727,14 @@ function NotifPrefsPanel({cu}){
   </div>`;
 }
 
+function WorkspacePlanUsageCard(){
+  const [data,setData]=useState(null),[err,setErr]=useState('');
+  useEffect(()=>{let off=false;api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:9000}).then(r=>{if(off)return;if(r&&r.error)setErr(r.error);else setData(r);}).catch(()=>!off&&setErr('Could not load plan usage'));return()=>{off=true};},[]);
+  const fmt=v=>Number(v||0)>=999999?'Unlimited':Number(v||0).toLocaleString();
+  const meter=(label,key)=>{const used=Number(data&&data.usage&&data.usage[key]||0),limit=Number(data&&data.limits&&data.limits[key]||0),pct=limit>=999999?8:Math.min(100,Math.round((used/Math.max(limit,1))*100));return html`<div style=${{marginTop:12}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:800,color:'var(--tx2)',marginBottom:6}}><span>${label}</span><span>${used.toLocaleString()} / ${fmt(limit)}</span></div><div style=${{height:7,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:pct+'%',borderRadius:999,background:'linear-gradient(90deg,var(--ac),var(--ac2))'}}></div></div></div>`;};
+  return html`<div class="card" style=${{marginBottom:16}}><div style=${{display:'flex',justifyContent:'space-between',gap:12,alignItems:'flex-start'}}><div><h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3><p style=${{fontSize:12,color:'var(--tx2)',marginBottom:0}}>Workspace-level limits and current usage. This belongs under Settings, not invoice billing.</p></div>${data?html`<span style=${{fontSize:10,fontWeight:900,color:'var(--ac)',background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.24)',padding:'6px 10px',borderRadius:999,textTransform:'uppercase'}}>${data.plan||'starter'}</span>`:null}</div>${err?html`<div style=${{marginTop:12,fontSize:12,color:'var(--tx3)'}}>${err}</div>`:!data?html`<div style=${{marginTop:14}}><span class="spin"></span></div>`:html`<div style=${{marginTop:14}}>${meter('Team members','members')}${meter('Projects','projects')}${meter('Tasks','tasks')}${meter('Invoices','invoices')}</div>`}</div>`;
+}
+
 function WorkspaceSettings({cu,onReload}){
   const [ws,setWs]=useState(null);const [wsName,setWsName]=useState('');const [aiKey,setAiKey]=useState('');const [showKey,setShowKey]=useState(false);const [saving,setSaving]=useState(false);const [saved,setSaved]=useState(false);
   const [emailEnabled,setEmailEnabled]=useState(true);const [smtpServer,setSmtpServer]=useState('smtp.gmail.com');const [smtpPort,setSmtpPort]=useState(587);const [smtpUsername,setSmtpUsername]=useState('');const [smtpPassword,setSmtpPassword]=useState('');const [fromEmail,setFromEmail]=useState('');const [showSmtpPass,setShowSmtpPass]=useState(false);const [testEmail,setTestEmail]=useState('');const [testingEmail,setTestingEmail]=useState(false);const [testResult,setTestResult]=useState(null);const [otpEnabled,setOtpEnabled]=useState(false);
@@ -6837,6 +6845,8 @@ function WorkspaceSettings({cu,onReload}){
           <div><label class="lbl">Workspace ID</label><div style=${{fontSize:12,color:'var(--tx3)',fontFamily:'monospace',padding:'8px 12px',background:'var(--sf2)',borderRadius:8}}>${ws.id}</div></div>
         </div>
       </div>
+
+      <${WorkspacePlanUsageCard}/>
 
       <div class="card" style=${{marginBottom:16}}>
         <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🔗 Invite Code</h3>
@@ -9935,7 +9945,8 @@ function ptDmUrl(user,u=null){
 
 function BillingInvoicesView({cu}){
   const today=new Date().toISOString().slice(0,10);
-  const canManageBilling=cu&&['Admin','Owner','Manager'].includes(String(cu.role||''));
+  const billingRole=String(cu&&cu.role||'').toLowerCase().replace(/\s+/g,'');
+  const canManageBilling=['admin','owner','manager','workspaceadmin','workspacemanager'].includes(billingRole);
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState('');
   const [profile,setProfile]=useState({legal_name:'',billing_email:'',tax_id:'',address_line1:'',address_line2:'',city:'',state:'',postal_code:'',country:'India',currency:'INR',tax_rate:18,invoice_prefix:'INV',invoice_notes:''});
@@ -9951,14 +9962,14 @@ function BillingInvoicesView({cu}){
   const load=useCallback(async()=>{
     setLoading(true);setErr('');
     try{
-      const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
+      const r=await api.get('/api/billing/invoices',{quiet:true,timeoutMs:9000});
       if(r&&!r.error){
         setProfile(prev=>({...prev,...(r.profile||{})}));
         setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
         setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
         setNextNo(r.next_invoice_no||'INV-0001');
       }else{
-        setErr((r&&r.error)||'Could not load billing details');
+        if(String((r&&r.error)||'').toLowerCase().includes('admin')||String((r&&r.error)||'').toLowerCase().includes('manager')){setErr('');}else setErr((r&&r.error)||'Could not load billing details');
       }
     }catch(e){
       setErr('Could not load billing details. Please refresh once.');
