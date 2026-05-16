@@ -783,8 +783,8 @@ textarea.inp{resize:vertical;min-height:66px;line-height:1.5}
 .toast{animation:toastIn .28s cubic-bezier(.34,1.56,.64,1) forwards}
 .toast.leaving{animation:toastOut .22s ease forwards}
 @keyframes toastIn{from{opacity:0;transform:translateX(100%)}to{opacity:1;transform:translateX(0)}}
-@keyframes pageEnter{from{opacity:.98;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
-.page-enter{animation:pageEnter .10s ease-out forwards}
+@keyframes pageEnter{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.page-enter{animation:pageEnter .22s ease forwards}
 @keyframes teamSwitch{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
 .team-switch-enter{animation:teamSwitch .25s ease forwards}
 @keyframes loadBar{0%{width:0%;margin-left:0}60%{width:80%}100%{width:100%;margin-left:120%}}
@@ -5046,8 +5046,18 @@ function MessagesView({projects,users,cu,tasks}){
   const [incomingCall,setIncomingCall]=useState(null);
   const dismissedCallIds=useRef(new Set());
 
+  const markChannelReadInstant=useCallback((id)=>{
+    if(!id)return;
+    const latest=(lastMsgTs&&lastMsgTs[id])||((msgCacheRef.current.get(id)||[]).reduce((mx,m)=>m.ts>mx?m.ts:mx,''));
+    if(latest){lastSeenMsgRef.current[id]=latest;saveLastSeen(lastSeenMsgRef.current);}
+    setChannelUnread(prev=>prev&&prev[id]?{...prev,[id]:0}:prev);
+    setNewMsgProjects(prev=>{if(!prev||!prev.has(id))return prev;const n=new Set(prev);n.delete(id);return n;});
+    try{window.dispatchEvent(new CustomEvent('pt:channel-read',{detail:{project:id}}));}catch(_){}
+  },[lastMsgTs]);
+
   const loadMsgs=useCallback(async(id,mode='switch')=>{
     if(!id)return;
+    markChannelReadInstant(id);
     const seq=++msgReqSeq.current;
     const cached=msgCacheRef.current.get(id);
     if(cached){
@@ -5073,7 +5083,7 @@ function MessagesView({projects,users,cu,tasks}){
     }else{
       setLoadingChannel('');
     }
-  },[]);
+  },[markChannelReadInstant]);
 
   useEffect(()=>{
     safe(projects).forEach(p=>{
@@ -5306,7 +5316,7 @@ function MessagesView({projects,users,cu,tasks}){
           return html`
             <button key=${p.id} class=${'nb'+(pid===p.id?' act':'')}
               style=${{marginBottom:2,fontSize:12,alignItems:'center',height:'auto',padding:'7px 10px',width:'100%',display:'flex'}}
-              onClick=${()=>setPid(p.id)}>
+              onClick=${()=>{markChannelReadInstant(p.id);setPid(p.id);}}>
               <div style=${{display:'flex',alignItems:'center',gap:7,width:'100%'}}>
                 <div style=${{width:7,height:7,borderRadius:2,background:p.color,flexShrink:0}}></div>
                 <span style=${{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,textAlign:'left'}}># ${p.name}</span>
@@ -5739,12 +5749,12 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
     if(id===String(activeToRef.current||'')){
       setToId(id);
       try{onDmRead&&onDmRead(id);}catch(_){}
-      try{sessionStorage.setItem('pt_open_dm_user',id);history.replaceState(null,'',ptDmUrl(id));window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
+      try{sessionStorage.setItem('pt_open_dm_user',id);const _u=ptDmUrl(id);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);window.dispatchEvent(new CustomEvent('pt:dm-active',{detail:{user:id,source}}));}catch(_e){}
       return;
     }
     try{
       sessionStorage.setItem('pt_open_dm_user',id);
-      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target'||source==='url'||source==='unread-auto') history.replaceState(null,'',ptDmUrl(id));
+      if(source==='click'||source==='notification'||source==='sw-notification'||source==='saved-dm-target'||source==='url'||source==='unread-auto'){const _u=ptDmUrl(id);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}
     }catch(_e){}
     console.debug('[DM] switch', {from:activeToRef.current,to:id,source});
     activeToRef.current=id;
@@ -6282,7 +6292,7 @@ function DirectMessages({cu,users,dmUnread,onDmRead,dmEnabled=true,initialUserId
       console.warn('[DM] clearing invalid selected peer', {toId});
       activeToRef.current='';
       setToId('');setMsgThreadId('');setMsgs([]);setLoadingThread('');
-      try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');history.replaceState(null,'',ptDmUrl(''));}catch(_e){}
+      try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');const _u=ptDmUrl('');if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}catch(_e){}
     }else if(valid!==String(toId)){
       switchToUser(valid,'url');
     }
@@ -7014,14 +7024,33 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   },[tickets,showResolved,filterStatus,filterPriority,filterType,filterAssignee,ticketSearch]);
 
   const saveTicket=async()=>{
-    if(!nTitle.trim())return;
+    if(!nTitle.trim()||saving)return;
+    const payload={title:nTitle.trim(),description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
+    const oldTickets=tickets;
+    const now=new Date().toISOString();
+    const tempId='tmp_ticket_'+Date.now();
+    const optimistic=editTicket?{...editTicket,...payload,updated:now}:{id:tempId,workspace_id:cu&&cu.workspace_id,title:payload.title,description:payload.description,type:payload.type,priority:payload.priority,status:payload.status,assignee:payload.assignee,reporter:cu&&cu.id,project:payload.project,tags:'[]',created:now,updated:now,team_id:payload.team_id,_pending:true};
     setSaving(true);
-    const payload={title:nTitle,description:nDesc,type:nType,priority:nPriority,assignee:nAssignee,project:nProject,status:nStatus,team_id:activeTeam?activeTeam.id:''};
-    if(editTicket){await api.put('/api/tickets/'+editTicket.id,payload);}
-    else{await api.post('/api/tickets',payload);}
-    setSaving(false);setShowNew(false);setEditTicket(null);
-    setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee('');setNProject('');setNStatus('open');
-    load();
+    if(editTicket){
+      setTickets(prev=>prev.map(t=>t.id===editTicket.id?optimistic:t));
+      if(detailTicket&&detailTicket.id===editTicket.id)setDetailTicket(optimistic);
+    }else{
+      setTickets(prev=>[optimistic,...prev]);
+    }
+    setShowNew(false);setEditTicket(null);
+    setNTitle('');setNDesc('');setNType('bug');setNPriority('medium');setNAssignee(cu&&(cu.role==='Developer'||cu.role==='Tester')?cu.id:'');setNProject('');setNStatus('open');
+    try{
+      const saved=editTicket?await api.put('/api/tickets/'+editTicket.id,payload,{quiet:true,timeoutMs:10000}):await api.post('/api/tickets',payload,{quiet:true,timeoutMs:10000});
+      if(saved&&saved.error)throw new Error(saved.error);
+      if(saved&&saved.id){
+        setTickets(prev=>editTicket?prev.map(t=>t.id===saved.id?saved:t):prev.map(t=>t.id===tempId?saved:t));
+        if(detailTicket&&(detailTicket.id===saved.id||detailTicket.id===tempId))setDetailTicket(saved);
+      }
+    }catch(e){
+      setTickets(oldTickets);
+      setShowNew(true);setEditTicket(editTicket||null);
+      alert((e&&e.message)||'Could not save ticket. Please try again.');
+    }finally{setSaving(false);}
   };
 
   const openEdit=(t)=>{
@@ -7047,15 +7076,34 @@ function TicketsView({cu,users,projects,onReload,activeTeam,initialAssignee,init
   };
 
   const quickStatus=async(t,status)=>{
-    await api.put('/api/tickets/'+t.id,{status});
-    load();
-    if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prev=>({...prev,status}));
+    if(!t||t.status===status)return;
+    const oldTickets=tickets;
+    setTickets(prev=>prev.map(x=>x.id===t.id?{...x,status,updated:new Date().toISOString()}:x));
+    if(detailTicket&&detailTicket.id===t.id)setDetailTicket(prev=>({...prev,status,updated:new Date().toISOString()}));
+    try{
+      const r=await api.put('/api/tickets/'+t.id,{status},{quiet:true,timeoutMs:10000});
+      if(r&&r.error)throw new Error(r.error);
+      if(r&&r.id)setTickets(prev=>prev.map(x=>x.id===r.id?r:x));
+    }catch(e){
+      setTickets(oldTickets);
+      if(detailTicket&&detailTicket.id===t.id)setDetailTicket(t);
+      alert((e&&e.message)||'Could not update ticket status.');
+    }
   };
 
   const del=async(id)=>{
     if(!window.confirm('Delete this ticket?'))return;
-    await api.del('/api/tickets/'+id);
-    setDetailTicket(null);load();
+    const oldTickets=tickets;
+    const oldDetail=detailTicket;
+    setTickets(prev=>prev.filter(t=>t.id!==id));
+    if(detailTicket&&detailTicket.id===id)setDetailTicket(null);
+    try{
+      const r=await api.del('/api/tickets/'+id,{quiet:true,timeoutMs:10000});
+      if(r&&r.error)throw new Error(r.error);
+    }catch(e){
+      setTickets(oldTickets);setDetailTicket(oldDetail);
+      alert((e&&e.message)||'Could not delete ticket.');
+    }
   };
 
   const TYPE_CFG={
@@ -7397,59 +7445,29 @@ function TwoFASettingsCard({cu}){
 }
 
 /* ─── WorkspaceSettings ───────────────────────────────────────────────────── */
-function WorkspacePlanUsageCard({cu}){
-  const [data,setData]=useState(null),[err,setErr]=useState(''),[loading,setLoading]=useState(false);
-  const canSee=hasOpsAccess(cu);
-  const load=useCallback(()=>{
-    if(!canSee){setErr('Workspace plan and usage is available to admins/managers only');return;}
-    setLoading(true);setErr('');
-    api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:12000}).then(r=>{
-      if(r&&r.error){setErr(r.error);setData(null);}else{setData(r||{});}
-    }).catch(()=>setErr('Could not load live workspace usage. Please refresh once.')).finally(()=>setLoading(false));
-  },[canSee]);
-  useEffect(()=>{load();},[load]);
-  const fmt=v=>Number(v||0)>=999999?'Unlimited':Number(v||0).toLocaleString();
-  const pct=(used,limit)=>Number(limit||0)>=999999?8:Math.min(100,Math.round((Number(used||0)/Math.max(Number(limit||1),1))*100));
-  const meter=(label,key,sub)=>{const used=Number(data&&data.usage&&data.usage[key]||0),limit=Number(data&&data.limits&&data.limits[key]||0);return html`
-    <div style=${{marginTop:14}}>
-      <div style=${{display:'flex',justifyContent:'space-between',gap:12,fontSize:12,fontWeight:800,color:'var(--tx2)',marginBottom:6}}>
-        <span>${label}</span><span>${used.toLocaleString()} / ${fmt(limit)}</span>
-      </div>
-      <div style=${{height:8,borderRadius:999,background:'var(--sf2)',border:'1px solid var(--bd)',overflow:'hidden'}}>
-        <div style=${{height:'100%',width:pct(used,limit)+'%',borderRadius:999,background:'linear-gradient(90deg,var(--ac),var(--ac2))',transition:'width .45s ease'}}></div>
-      </div>
-      ${sub?html`<div style=${{fontSize:10,color:'var(--tx3)',marginTop:4}}>${sub}</div>`:null}
-    </div>`;};
-  if(!canSee)return html`<div class="card" style=${{marginBottom:16,opacity:.72}}>
-    <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
-    <p style=${{fontSize:12,color:'var(--tx3)',margin:0}}>Workspace plan and usage is available to admins/managers only.</p>
-  </div>`;
-  return html`<div class="card" style=${{marginBottom:16,border:'1px solid rgba(90,140,255,.18)'}}>
-    <div style=${{display:'flex',justifyContent:'space-between',gap:12,alignItems:'flex-start',marginBottom:4}}>
-      <div>
-        <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
-        <p style=${{fontSize:12,color:'var(--tx2)',marginBottom:0}}>Live workspace limits and current usage. This is workspace administration, not invoice billing.</p>
-      </div>
-      <div style=${{display:'flex',gap:8,alignItems:'center'}}>
-        ${data?html`<span style=${{fontSize:10,fontWeight:900,color:'var(--ac)',background:'rgba(90,140,255,.12)',border:'1px solid rgba(90,140,255,.24)',padding:'6px 10px',borderRadius:999,textTransform:'uppercase'}}>${data.plan||'starter'}</span>`:null}
-        <button class="btn brd" style=${{fontSize:11,padding:'6px 10px'}} onClick=${load} disabled=${loading}>${loading?'Loading…':'↻ Refresh'}</button>
-      </div>
-    </div>
-    ${err?html`<div style=${{marginTop:12,padding:'10px 12px',borderRadius:10,border:'1px solid rgba(248,113,113,.25)',background:'rgba(248,113,113,.08)',fontSize:12,color:'var(--rd2)'}}>${err}</div>`:null}
-    ${loading&&!data?html`<div style=${{marginTop:14,fontSize:12,color:'var(--tx3)'}}><span class="spin"></span> Loading live usage…</div>`:null}
-    ${data?html`<div style=${{marginTop:14}}>
-      ${meter('Team members','members','Users active in this workspace')}
-      ${meter('Projects','projects','Projects created in this workspace')}
-      ${meter('Tasks','tasks','Tasks tracked across projects')}
-      ${meter('Invoices','invoices','Invoices created from Billing & Invoices')}
-    </div>`:null}
-  </div>`;
-}
-
 function WorkspaceSettings({cu,onReload}){
   const [ws,setWs]=useState(null);const [wsName,setWsName]=useState('');const [aiKey,setAiKey]=useState('');const [showKey,setShowKey]=useState(false);const [saving,setSaving]=useState(false);const [saved,setSaved]=useState(false);
   const [emailEnabled,setEmailEnabled]=useState(true);const [smtpServer,setSmtpServer]=useState('smtp.gmail.com');const [smtpPort,setSmtpPort]=useState(587);const [smtpUsername,setSmtpUsername]=useState('');const [smtpPassword,setSmtpPassword]=useState('');const [fromEmail,setFromEmail]=useState('');const [showSmtpPass,setShowSmtpPass]=useState(false);const [testEmail,setTestEmail]=useState('');const [testingEmail,setTestingEmail]=useState(false);const [testResult,setTestResult]=useState(null);const [otpEnabled,setOtpEnabled]=useState(false);
   const [dmEnabled,setDmEnabled]=useState(true);
+  const [planUsage,setPlanUsage]=useState(null);
+  const [planUsageLoading,setPlanUsageLoading]=useState(false);
+  const [planUsageError,setPlanUsageError]=useState('');
+  const loadPlanUsage=useCallback(async()=>{
+    setPlanUsageLoading(true);setPlanUsageError('');
+    try{
+      const d=await api.get('/api/workspace/plan-usage',{quiet:true,timeoutMs:8000});
+      if(d&&d.error){setPlanUsageError(d.error);setPlanUsage(null);}
+      else setPlanUsage(d);
+    }catch(e){setPlanUsageError('Could not load workspace usage. Please refresh once.');}
+    finally{setPlanUsageLoading(false);}
+  },[]);
+  useEffect(()=>{loadPlanUsage();},[loadPlanUsage]);
+  const usageBar=(label,key)=>{
+    const usage=(planUsage&&planUsage.usage&&Number(planUsage.usage[key]))||0;
+    const limit=planUsage&&planUsage.limits?planUsage.limits[key]:null;
+    const pct=limit?Math.min(100,Math.round((usage/Math.max(1,limit))*100)):0;
+    return html`<div style=${{marginTop:12}}><div style=${{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:700,color:'var(--tx)',marginBottom:6}}><span>${label}</span><span>${usage}${limit?'/'+limit:' / Unlimited'}</span></div><div style=${{height:8,borderRadius:999,background:'rgba(255,255,255,.08)',border:'1px solid var(--bd)',overflow:'hidden'}}><div style=${{height:'100%',width:(limit?pct:100)+'%',background:'linear-gradient(90deg,var(--ac),var(--ac2))',transition:'width .25s ease'}}></div></div></div>`;
+  };
   const PERM_DEFAULTS={
     'Create & Edit Projects':   {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Create & Assign Tasks':    {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:false,Viewer:false}, 'Edit Tasks':               {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Delete Tasks':             {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Create Tickets':           {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:false}, 'Edit Tickets':             {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Delete Tickets':           {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Close / Resolve Tickets':  {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:false,Viewer:false}, 'Delete Projects':          {Admin:true, Manager:true, TeamLead:false,Developer:false,Tester:false,Viewer:false}, 'Send Channel Messages':    {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Manage Team Members':      {Admin:true, Manager:true, TeamLead:true, Developer:false,Tester:false,Viewer:false}, 'Manage Workspace Settings':{Admin:true, Manager:false,TeamLead:false,Developer:false,Tester:false,Viewer:false}, 'View All Projects':        {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Start Instant Meet Calls':       {Admin:true, Manager:true, TeamLead:true, Developer:true, Tester:true, Viewer:true}, 'Delete Team Members':      {Admin:true, Manager:false,TeamLead:false,Developer:false,Tester:false,Viewer:false}, };
   const storedPerms=()=>{try{return JSON.parse(localStorage.getItem('pf_perms')||'null');}catch{return null;}};
@@ -7557,7 +7575,27 @@ function WorkspaceSettings({cu,onReload}){
         </div>
       </div>
 
-      <${WorkspacePlanUsageCard} cu=${cu}/>
+      <div class="card" style=${{marginBottom:16,border:'1px solid rgba(90,140,255,.22)',background:'linear-gradient(135deg,rgba(90,140,255,.06),var(--sf))'}}>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:10}}>
+          <div>
+            <h3 style=${{fontSize:13,fontWeight:800,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>📊 Workspace Plan & Usage</h3>
+            <p style=${{fontSize:12,color:'var(--tx2)'}}>Live workspace limits and current usage. This belongs under Settings, not invoice billing.</p>
+          </div>
+          <button class="btn brd" style=${{fontSize:11,padding:'6px 10px'}} disabled=${planUsageLoading} onClick=${loadPlanUsage}>${planUsageLoading?'Refreshing…':'↻ Refresh'}</button>
+        </div>
+        ${planUsageError?html`<div style=${{padding:'10px 12px',borderRadius:10,background:'rgba(245,158,11,.10)',border:'1px solid rgba(245,158,11,.24)',color:'var(--tx2)',fontSize:12}}>⚠️ ${planUsageError}</div>`:null}
+        ${planUsage?html`<div>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:4}}>
+            <span style=${{fontSize:12,color:'var(--tx3)'}}>Current plan</span>
+            <span style=${{fontSize:11,fontWeight:900,letterSpacing:.5,color:'var(--ac)',background:'var(--ac3)',border:'1px solid rgba(90,140,255,.25)',borderRadius:999,padding:'5px 10px',textTransform:'uppercase'}}>${planUsage.plan||'starter'}</span>
+          </div>
+          ${usageBar('Team members','members')}
+          ${usageBar('Projects','projects')}
+          ${usageBar('Tasks','tasks')}
+          ${usageBar('Invoices','invoices')}
+          <div style=${{marginTop:10,fontSize:11,color:'var(--tx3)'}}>Last updated: ${planUsage.updated_at||'just now'} · Role: ${planUsage.role||cu.role||'—'}</div>
+        </div>`:!planUsageLoading&&!planUsageError?html`<div style=${{fontSize:12,color:'var(--tx3)',padding:'8px 0'}}>Usage will appear here after loading.</div>`:null}
+      </div>
 
       <div class="card" style=${{marginBottom:16}}>
         <h3 style=${{fontSize:13,fontWeight:700,color:'var(--tx)',letterSpacing:'-0.01em',marginBottom:4}}>🔗 Invite Code</h3>
@@ -10628,8 +10666,7 @@ function ptDmUrl(user,u=null){
 
 function BillingInvoicesView({cu}){
   const today=new Date().toISOString().slice(0,10);
-  const billingRole=String(cu&&cu.role||'').toLowerCase().replace(/\s+/g,'');
-  const canManageBilling=['admin','owner','manager','workspaceadmin','workspacemanager'].includes(billingRole);
+  const canManageBilling=cu&&['Admin','Owner','Manager'].includes(String(cu.role||''));
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState('');
   const [profile,setProfile]=useState({legal_name:'',billing_email:'',tax_id:'',address_line1:'',address_line2:'',city:'',state:'',postal_code:'',country:'India',currency:'INR',tax_rate:18,invoice_prefix:'INV',invoice_notes:''});
@@ -10645,14 +10682,14 @@ function BillingInvoicesView({cu}){
   const load=useCallback(async()=>{
     setLoading(true);setErr('');
     try{
-      const r=await api.get('/api/billing/invoices',{quiet:true,timeoutMs:9000});
+      const r=await api.get('/api/billing/invoices',{timeoutMs:8000});
       if(r&&!r.error){
         setProfile(prev=>({...prev,...(r.profile||{})}));
         setSummary(r.summary||{invoice_count:0,paid_total:0,outstanding_total:0,overdue_count:0,currency:(r.profile&&r.profile.currency)||'INR'});
         setInvoices(Array.isArray(r.invoices)?r.invoices:[]);
         setNextNo(r.next_invoice_no||'INV-0001');
       }else{
-        if(String((r&&r.error)||'').toLowerCase().includes('admin')||String((r&&r.error)||'').toLowerCase().includes('manager')){setErr('');}else setErr((r&&r.error)||'Could not load billing details');
+        setErr((r&&r.error)||'Could not load billing details');
       }
     }catch(e){
       setErr('Could not load billing details. Please refresh once.');
@@ -11068,7 +11105,7 @@ function App(){
           const entityId=raw.slice(base.length+1);
           if(entityId)suffix='/'+encodeURIComponent(String(entityId));
         }
-        history.pushState(null,'',workspaceBasePath(cu)+base+suffix);
+        const _nextUrl=workspaceBasePath(cu)+base+suffix;if((location.pathname+location.search)!==_nextUrl)history.pushState(null,'',_nextUrl);
         document.title='Project Tracker — '+(VIEW_TITLES[base]||base)+' | AI-Powered Team Collaboration';
       }
     }catch(e){}
@@ -11099,7 +11136,7 @@ function App(){
         console.warn('[SECURITY] Blocked invalid DM URL user', target);
         try{sessionStorage.removeItem('pt_open_dm_user');sessionStorage.removeItem('pt_dm_notification_target');}catch(_){}
         setDmTargetUser(null);
-        history.replaceState(null,'',workspaceBasePath(cu)+'dm');
+        const _dmUrl=workspaceBasePath(cu)+'dm';if((location.pathname+location.search)!==_dmUrl)history.replaceState(null,'',_dmUrl);
       }
     }catch(e){}
   },[data.users,cu&&cu.id]);
@@ -11280,7 +11317,7 @@ function App(){
           setDmTargetUser(peer);
           try{window.dispatchEvent(new CustomEvent('pt:open-dm-user',{detail:{user:peer,source}}));}catch(_){}
           _setView('dm:'+peer);
-          try{history.replaceState(null,'',ptDmUrl(peer));}catch(_){}
+          try{const _u=ptDmUrl(peer);if((location.pathname+location.search)!==_u)history.replaceState(null,'',_u);}catch(_){}
           return peer;
         }
       }catch(_e){}
@@ -12234,7 +12271,6 @@ function App(){
             ${baseView==='tickets'?html`<${TicketsView} cu=${cu} users=${scopedUsers} projects=${scopedProjects} onReload=${load} activeTeam=${activeTeam} initialAssignee=${ticketFilterType==='assignee'?ticketFilterValue:null} initialStatus=${ticketFilterType==='status'?ticketFilterValue:null} initialTicketId=${initialTicketId} onClearInitialTicket=${()=>setInitialTicketId(null)}/>`:null}
             ${baseView==='team'&&hasOpsAccess(cu)?html`<${TeamView} users=${data.users} cu=${cu} reload=${load} projects=${data.projects}/>`:null}
             ${baseView==='settings'&&hasOpsAccess(cu)?html`<${WorkspaceSettings} cu=${cu} onReload=${load}/>`:null}
-            ${baseView==='billing'?html`<${BillingInvoicesView} cu=${cu}/>`:null}
             ${baseView==='timeline'?html`<${TimelineView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} onNav=${(v,pid)=>{setView(v);if(pid)setInitialProjectId(pid);else setInitialProjectId(null);}}/>`:null}
             ${baseView==='productivity'&&hasOpsAccess(cu)?html`<${ProductivityView} cu=${cu} tasks=${scopedTasks} projects=${scopedProjects} users=${scopedUsers}/>`:null}
             ${baseView==='notes'?html`<${NotesView} cu=${cu}/>`:null}

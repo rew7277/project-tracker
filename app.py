@@ -4716,6 +4716,8 @@ def me():
         u = rows[0]
         if u.get("workspace_id"):
             session["workspace_id"] = u["workspace_id"]
+        if u.get("role"):
+            session["role"] = u["role"]
         result = dict(u)
         for k in ("password","plain_password","totp_secret","_ws_name","_ws_slug"):
             result.pop(k, None)
@@ -4736,6 +4738,7 @@ def me():
             u=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
             if not u: session.clear(); return jsonify({"error":"Not found"}),404
             if u["workspace_id"]: session["workspace_id"]=u["workspace_id"]
+            if u["role"]: session["role"]=u["role"]
             result = dict(u)
             for k in ("password","plain_password","totp_secret"):
                 result.pop(k, None)
@@ -7326,6 +7329,8 @@ def create_ticket():
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "created"})
     _sse_publish(wid(), "notification_updated", {"reason": "ticket", "id": tid})
     return jsonify(result)
+
+@app.route("/api/tickets/<tid>", methods=["PUT"])
 @login_required
 def update_ticket(tid):
     d=request.json or {}
@@ -7353,12 +7358,15 @@ def update_ticket(tid):
             _tkt_changer_name = _tkt_changer["name"] if _tkt_changer else "Someone"
             _tkt_notified = set()
             _new_status = d["status"]
+            _ticket_priority = t["priority"] if "priority" in t.keys() else ""
+            _ticket_assignee = t["assignee"] if "assignee" in t.keys() else ""
+            _ticket_reporter = t["reporter"] if "reporter" in t.keys() else ""
             # Notify managers on high/critical priority tickets
             _managers = []
-            if t.get("priority") in ("high", "critical"):
+            if _ticket_priority in ("high", "critical"):
                 _mgr_rows = db.execute("SELECT id FROM users WHERE workspace_id=? AND role IN ('Manager','Admin')", (wid(),)).fetchall()
                 _managers = [r["id"] for r in _mgr_rows if r["id"] != session["user_id"]]
-            _notif_targets = [t.get("assignee",""), t.get("reporter","")]
+            _notif_targets = [_ticket_assignee, _ticket_reporter]
             for _tkt_uid in (_notif_targets + _managers):
                 if not _tkt_uid or _tkt_uid in _tkt_notified:
                     continue
@@ -7385,6 +7393,8 @@ def update_ticket(tid):
     _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "updated",
                                             "status": result.get("status","")})
     return jsonify(result)
+
+@app.route("/api/tickets/<tid>", methods=["DELETE"])
 @login_required
 def delete_ticket(tid):
     with get_db() as db:
@@ -7395,6 +7405,7 @@ def delete_ticket(tid):
         db.execute("DELETE FROM tickets WHERE id=? AND workspace_id=?",(tid,wid()))
         db.execute("DELETE FROM ticket_comments WHERE ticket_id=? AND workspace_id=?",(tid,wid()))
     _cache_bust(wid(), "tickets", "appdata")
+    _sse_publish(wid(), "ticket_updated", {"id": tid, "action": "deleted"})
     return jsonify({"ok":True})
 
 @app.route("/api/tickets/<tid>/comments", methods=["GET"])
@@ -9819,29 +9830,75 @@ def _stripe_get(path):
         return {"error":{"message":str(e)}}
 
 
+# ── Workspace plan & usage ─────────────────────────────────────────────────
+@app.route("/api/workspace/plan-usage", methods=["GET"])
+@login_required
+def workspace_plan_usage():
+    if not _role_can_manage_workspace():
+        return jsonify({"error": "Workspace plan and usage is available to admins/managers only"}), 403
+    ws_id = wid()
+    def count_rows(db, table, extra_where="1=1", params=()):
+        try:
+            return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=? AND {extra_where}", (ws_id,)+tuple(params)).fetchone()["c"] or 0)
+        except Exception:
+            try:
+                return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (ws_id,)).fetchone()["c"] or 0)
+            except Exception:
+                return 0
+    with get_db() as db:
+        ws = db.execute("SELECT id,name,plan FROM workspaces WHERE id=?", (ws_id,)).fetchone()
+        plan = (ws["plan"] if ws and "plan" in ws.keys() else "starter") or "starter"
+        plan_key = str(plan).lower()
+        limits = {
+            "free": {"members": 5, "projects": 10, "tasks": 100, "invoices": 25},
+            "starter": {"members": 50, "projects": 100, "tasks": 500, "invoices": 200},
+            "pro": {"members": 200, "projects": 500, "tasks": 5000, "invoices": 2000},
+            "business": {"members": 500, "projects": 2000, "tasks": 20000, "invoices": 10000},
+            "enterprise": {"members": None, "projects": None, "tasks": None, "invoices": None},
+        }.get(plan_key, {"members": 50, "projects": 100, "tasks": 500, "invoices": 200})
+        usage = {
+            "members": count_rows(db, "users", "COALESCE(deleted_at,'')=''"),
+            "projects": count_rows(db, "projects", "COALESCE(deleted_at,'')=''"),
+            "tasks": count_rows(db, "tasks", "COALESCE(deleted_at,'')=''"),
+            "invoices": count_rows(db, "invoices"),
+        }
+        return jsonify({
+            "workspace_id": ws_id,
+            "workspace_name": (ws["name"] if ws else ""),
+            "plan": plan,
+            "usage": usage,
+            "limits": limits,
+            "role": _current_workspace_role(),
+            "updated_at": ts(),
+        })
+
+
 # ── Workspace billing profile + professional invoice creation ───────────────
 
-def _billing_role_key(role):
-    """Normalize user roles for billing / workspace-admin checks.
-    Handles older role labels such as Workspace Owner, Project Manager, etc."""
-    return re.sub(r"[^a-z]", "", str(role or "").lower())
+def _current_workspace_role():
+    """Return the live role for the signed-in user and sync session role.
+    Session role can be stale after deployment/re-login, so DB is the source of truth.
+    """
+    uid = session.get("user_id")
+    if not uid:
+        return ""
+    try:
+        with get_db() as db:
+            row = db.execute("SELECT role, workspace_id FROM users WHERE id=?", (uid,)).fetchone()
+            if row:
+                session["role"] = row["role"] or ""
+                if row["workspace_id"]:
+                    session["workspace_id"] = row["workspace_id"]
+                return row["role"] or ""
+    except Exception:
+        pass
+    return session.get("role", "")
+
+def _role_can_manage_workspace():
+    return str(_current_workspace_role() or "").lower().replace(" ", "") in ("admin", "owner", "workspaceowner", "manager")
 
 def _billing_admin_required():
-    """Return True for workspace roles allowed to view billing and workspace usage.
-    Do not rely only on session['role']; old sessions can be stale after deployment.
-    Always prefer the current DB role and keep session in sync."""
-    allowed = {
-        "admin", "owner", "workspaceowner", "superadmin",
-        "manager", "projectmanager"
-    }
-    role = ""
-    try:
-        role = get_user_role() or ""
-        if role:
-            session["role"] = role
-    except Exception:
-        role = session.get("role", "")
-    return _billing_role_key(role) in allowed
+    return _role_can_manage_workspace()
 
 def _billing_profile_dict(row):
     if row: return dict(row)
@@ -9851,55 +9908,6 @@ def _billing_profile_dict(row):
         "postal_code": "", "country": "India", "currency": "INR",
         "tax_rate": 18, "invoice_prefix": "INV", "invoice_notes": "", "updated_at": ""
     }
-
-
-def _safe_workspace_count(db, table, workspace_id):
-    try:
-        return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=? AND COALESCE(deleted_at,'')=''", (workspace_id,)).fetchone()["c"] or 0)
-    except Exception:
-        try:
-            return int(db.execute(f"SELECT COUNT(*) AS c FROM {table} WHERE workspace_id=?", (workspace_id,)).fetchone()["c"] or 0)
-        except Exception:
-            return 0
-
-def _workspace_plan_usage_payload(db):
-    workspace_id = wid()
-    ws = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-    try:
-        ws_dict = dict(ws) if ws else {}
-    except Exception:
-        ws_dict = {}
-    plan = str(ws_dict.get('plan') or 'starter').lower()
-    limits_map = {
-        'starter': {'members': 50, 'projects': 100, 'tasks': 500, 'invoices': 200},
-        'pro': {'members': 150, 'projects': 500, 'tasks': 5000, 'invoices': 1000},
-        'business': {'members': 500, 'projects': 2000, 'tasks': 25000, 'invoices': 5000},
-        'enterprise': {'members': 999999, 'projects': 999999, 'tasks': 999999, 'invoices': 999999},
-    }
-    limits = limits_map.get(plan, limits_map['starter'])
-    return {
-        'workspace_id': workspace_id,
-        'workspace_name': ws_dict.get('name') or '',
-        'plan': plan,
-        'limits': limits,
-        'usage': {
-            'members': _safe_workspace_count(db, 'users', workspace_id),
-            'projects': _safe_workspace_count(db, 'projects', workspace_id),
-            'tasks': _safe_workspace_count(db, 'tasks', workspace_id),
-            'invoices': _safe_workspace_count(db, 'invoices', workspace_id),
-        }
-    }
-
-@app.route("/api/workspace/plan-usage", methods=["GET"])
-@login_required
-def workspace_plan_usage():
-    if not _billing_admin_required():
-        return jsonify({"error":"Workspace plan and usage is available to workspace admins/managers only"}), 403
-    with get_db() as db:
-        _ensure_billing_schema(db)
-        payload = _workspace_plan_usage_payload(db)
-        payload["access"] = {"can_manage_workspace_usage": True, "role": get_user_role() or session.get("role", "")}
-        return jsonify(payload)
 
 def _ensure_billing_schema(db):
     """Idempotent billing DDL for already-deployed databases.
@@ -9978,8 +9986,7 @@ def billing_invoices_overview():
         outstanding = sum(float(i.get("total") or 0) for i in invoices if str(i.get("status") or "").lower() in ("sent","overdue","draft"))
         overdue = sum(1 for i in invoices if str(i.get("status") or "").lower()=="overdue")
         summary = {"invoice_count": len(invoices), "paid_total": paid, "outstanding_total": outstanding, "overdue_count": overdue, "currency": profile.get("currency") or "INR"}
-        ws_stats = _workspace_plan_usage_payload(db)
-        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "ws_stats": ws_stats, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
+        return jsonify({"profile": profile, "invoices": invoices, "summary": summary, "next_invoice_no": _next_invoice_no(db, wid(), profile.get("invoice_prefix") or "INV")})
 
 @app.route("/api/billing/profile", methods=["PUT"])
 @login_required
